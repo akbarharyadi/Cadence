@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cadence: a lossless music player for your own files</title>
+    <meta
+      name="description"
+      content="Cadence plays your FLAC and other music files exactly as they were recorded: bit-perfect output, gapless albums, Sound Check, synced karaoke lyrics, mixes by sound and an optional AI DJ. Free and open source for Windows, macOS and Linux."
+    />
+    <meta property="og:title" content="Cadence: a lossless music player for your own files" />
+    <meta property="og:description" content="Bit-perfect, gapless, synced lyrics and mixes by sound. Free and open source." />
+    <meta property="og:image" content="https://cadence.akbarharyadi.com/assets/home.jpg" />
+    <meta property="og:url" content="https://cadence.akbarharyadi.com/" />
+    <meta name="theme-color" content="#0d0e17" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.png" sizes="64x64" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="preload" href="/fonts/bricolage.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="nav">
+      <a class="brand" href="/" aria-label="Cadence home">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15c2.5-7 4.5-7 6 0s3.5 7 6 0 3.5-7 6 0" /></svg>
+        Cadence
+      </a>
+      <nav aria-label="Main">
+        <a href="#sound">Sound</a>
+        <a href="#lyrics">Lyrics</a>
+        <a href="#mixes">Mixes</a>
+        <a href="#download">Download</a>
+        <a href="https://github.com/akbarharyadi/cadence">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <svg class="wave" viewBox="0 0 1200 220" preserveAspectRatio="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="g" x1="0" x2="1">
+              <stop offset="0" stop-color="#8b7cff" />
+              <stop offset="1" stop-color="#ef8fd6" />
+            </linearGradient>
+          </defs>
+          <path id="wave-path" d="" fill="none" stroke="url(#g)" stroke-width="10" stroke-linecap="round" />
+        </svg>
+        <div class="hero-text">
+          <h1>Your music, the way it was recorded.</h1>
+          <p class="lede">
+            Cadence is a music player for the files you own. It plays FLAC and other lossless formats bit-perfect, keeps albums gapless,
+            follows every word of the lyrics, and turns your library into mixes by how the songs sound.
+          </p>
+          <div class="cta">
+            <a class="button" id="download-main" href="#download">Download for your computer</a>
+            <a class="ghost" href="https://github.com/akbarharyadi/cadence">Source code on GitHub</a>
+          </div>
+          <p class="fine" id="download-note">Free and open source. Windows, macOS and Linux.</p>
+        </div>
+        <figure class="shot hero-shot">
+          <img src="/assets/home.jpg" width="1650" height="1075" alt="Cadence's Listen Now page with an album, the AI DJ and daily mixes" />
+        </figure>
+      </section>
+
+      <section class="path" aria-labelledby="path-title">
+        <h2 id="path-title" class="sr-only">What happens to the sound</h2>
+        <ol class="stages">
+          <li><span class="stage-name">Your file</span><span class="stage-value">FLAC 24-bit / 96 kHz</span></li>
+          <li><span class="stage-name">Sound Check</span><span class="stage-value">Off</span></li>
+          <li><span class="stage-name">Equalizer</span><span class="stage-value">Off</span></li>
+          <li><span class="stage-name">Direct output</span><span class="stage-value">96 kHz, 24-bit</span></li>
+          <li class="final"><span class="stage-name">Your DAC</span><span class="stage-value gold">Bit-perfect</span></li>
+        </ol>
+        <p>Cadence shows what happens to every song on its way to your speakers. When nothing changes it, it says so.</p>
+      </section>
+
+      <section class="feature" id="sound">
+        <div class="copy">
+          <h2>Hear the file, not the player</h2>
+          <p>
+            Direct output sends each song to your device at its own sample rate, past the Windows mixer, so 24-bit masters arrive
+            sample for sample. Turn on Sound Check and every song plays at the same loudness, measured with ReplayGain 2.0, and a
+            gentle per-song tone keeps quieter songs full without pushing the voice back.
+          </p>
+          <ul class="ticks">
+            <li>Gapless playback, and crossfade between albums if you like</li>
+            <li>Ten-band and parametric equalizer, with headphone profiles from AutoEq</li>
+            <li>Crossfeed for headphones, high-quality resampling when it's needed</li>
+          </ul>
+        </div>
+        <figure class="shot"><img src="/assets/sound.jpg" width="1650" height="1075" loading="lazy" alt="The Sound page: signal path, Direct output and Sound Check" /></figure>
+      </section>
+
+      <section class="feature flip" id="lyrics">
+        <div class="copy">
+          <h2>Sing along, word by word</h2>
+          <p>
+            Synced lyrics light up as they're sung, like karaoke. Turn the vocals down with one slider and sing the song yourself.
+            Cadence reads lyrics from your files, finds timed ones online, or lets the AI DJ look them up, and remembers them for
+            next time.
+          </p>
+        </div>
+        <figure class="shot"><img src="/assets/lyrics.jpg" width="1650" height="1075" loading="lazy" alt="Now Playing with lyrics filling in word by word" /></figure>
+      </section>
+
+      <section class="feature" id="mixes">
+        <div class="copy">
+          <h2>Mixes by how your music sounds</h2>
+          <p>
+            Cadence listens to each song once, on your computer, for its tempo, timbre, loudness and harmony. That powers sound
+            radio from any song, lists of songs that sound alike, and mixes it builds and names for you.
+          </p>
+          <p>
+            Want more? Connect an AI DJ (Z.ai GLM or any compatible service, with your own key) and ask for "calm songs for
+            late-night coding", get daily mixes, and find new music to buy.
+          </p>
+        </div>
+        <figure class="shot"><img src="/assets/mixes.jpg" width="1650" height="1075" loading="lazy" alt="Mixes by sound and recently played albums" /></figure>
+      </section>
+
+      <section class="grid" aria-labelledby="more-title">
+        <h2 id="more-title">Everything else you'd expect</h2>
+        <ul>
+          <li><h3>Your library, your folders</h3><p>Add folders or drop them on the window. Cadence watches them and picks up new music by itself.</p></li>
+          <li><h3>Media keys and mini player</h3><p>Play from the keyboard, the Windows media overlay or a small always-on-top player.</p></li>
+          <li><h3>Playlists and smart playlists</h3><p>Build them by hand, or with rules like "played often, not this month".</p></li>
+          <li><h3>Edit song info</h3><p>Fix titles, artists and albums in the files themselves.</p></li>
+          <li><h3>Scrobbling</h3><p>Keep a record of what you listen to on ListenBrainz.</p></li>
+          <li><h3>Formats</h3><p>FLAC, ALAC, WAV, AIFF, MP3, AAC and Ogg Vorbis, up to 32-bit and 384 kHz.</p></li>
+        </ul>
+      </section>
+
+      <section class="privacy">
+        <h2>Your music stays yours</h2>
+        <p>
+          Cadence has no account and no tracking. Sound analysis runs on your computer. Lyrics lookups send only the artist and
+          title. The AI DJ is off until you add your own key, and Settings shows exactly what it would send.
+        </p>
+      </section>
+
+      <section class="download" id="download">
+        <h2>Download Cadence</h2>
+        <p class="fine" id="release-name">Latest release on GitHub</p>
+        <div class="platforms">
+          <a class="platform" data-os="windows" href="https://github.com/akbarharyadi/cadence/releases/latest">
+            <span class="os">Windows</span><span class="what">10 and 11, 64-bit installer</span>
+          </a>
+          <a class="platform" data-os="mac" href="https://github.com/akbarharyadi/cadence/releases/latest">
+            <span class="os">macOS</span><span class="what">Apple Silicon and Intel</span>
+          </a>
+          <a class="platform" data-os="linux" href="https://github.com/akbarharyadi/cadence/releases/latest">
+            <span class="os">Linux</span><span class="what">AppImage or .deb</span>
+          </a>
+        </div>
+        <p class="fine">
+          The macOS app isn't signed by Apple yet: the first time, right-click Cadence in Applications and choose Open. Direct
+          output (bit-perfect mode) is available on Windows.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        Cadence is free software under the
+        <a href="https://github.com/akbarharyadi/cadence/blob/main/LICENSE">GNU GPL v3</a>. Made by Akbar Priyono Haryadi.
+      </p>
+      <p><a href="https://github.com/akbarharyadi/cadence">Source code</a> <a href="https://github.com/akbarharyadi/cadence/issues">Report a problem</a></p>
+    </footer>
+
+    <script src="/main.js" defer></script>
+  </body>
+</html>

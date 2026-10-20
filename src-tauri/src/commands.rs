@@ -1,0 +1,858 @@
+//! Tauri commands called from the UI.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use serde::Serialize;
+use tauri::{AppHandle, State};
+
+use crate::audio::eq::{Filter, parse_parametric, presets};
+use crate::audio::{Cmd, DspSettings, Repeat, Status};
+use crate::jobs::{start_analysis, start_scan};
+use crate::library::Snapshot;
+use crate::state::AppState;
+
+type AppStateRef<'a> = State<'a, Arc<AppState>>;
+
+// ---------- library ----------
+
+#[tauri::command]
+pub fn get_library(state: AppStateRef) -> Snapshot {
+    state.library.lock().snapshot.clone()
+}
+
+#[tauri::command]
+pub fn get_folders(state: AppStateRef) -> Vec<String> {
+    state.settings.lock().folders.clone()
+}
+
+/// Adds folders (or the folders of dropped files) to the library and rescans.
+#[tauri::command]
+pub fn add_folders(app: AppHandle, state: AppStateRef, paths: Vec<String>) -> Vec<String> {
+    {
+        let mut s = state.settings.lock();
+        for p in paths {
+            // Rebuilding from components normalizes separators ("C:/x" → "C:\x" on Windows).
+            let path: PathBuf = Path::new(&p).components().collect();
+            if !path.exists() {
+                log::warn!("ignoring missing path {p}");
+                continue;
+            }
+            let folder = if path.is_dir() {
+                path
+            } else {
+                path.parent().map(Path::to_path_buf).unwrap_or(path)
+            };
+            let folder = folder.to_string_lossy().into_owned();
+            let inside = |child: &str, parent: &str| {
+                child.starts_with(&format!("{parent}\\"))
+                    || child.starts_with(&format!("{parent}/"))
+            };
+            // Skip folders already covered by a parent folder; replace folders this one covers.
+            if !s.folders.iter().any(|f| folder == *f || inside(&folder, f)) {
+                s.folders.retain(|f| !inside(f, &folder));
+                s.folders.push(folder);
+            }
+        }
+    }
+    state.save_settings();
+    start_scan(app.clone());
+    crate::jobs::watch_folders(app);
+    state.settings.lock().folders.clone()
+}
+
+#[tauri::command]
+pub fn remove_folder(app: AppHandle, state: AppStateRef, path: String) -> Vec<String> {
+    state.settings.lock().folders.retain(|f| *f != path);
+    state.save_settings();
+    start_scan(app.clone());
+    crate::jobs::watch_folders(app);
+    state.settings.lock().folders.clone()
+}
+
+#[tauri::command]
+pub fn rescan(app: AppHandle) {
+    start_scan(app);
+}
+
+/// Forgets Cadence's loudness measurements and measures everything again.
+#[tauri::command]
+pub fn reanalyze(app: AppHandle, state: AppStateRef) {
+    {
+        let mut lib = state.library.lock();
+        for t in lib.snapshot.tracks.iter_mut().filter(|t| t.gain_measured) {
+            t.gain = Default::default();
+            t.gain_measured = false;
+        }
+    }
+    start_analysis(app);
+}
+
+// ---------- sounds like ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SonicStatus {
+    pub analyzed: usize,
+    pub total: usize,
+    pub running: bool,
+}
+
+#[tauri::command]
+pub fn sonic_status(state: AppStateRef) -> SonicStatus {
+    let lib = state.library.lock();
+    let sonic = state.sonic.lock();
+    SonicStatus {
+        analyzed: lib
+            .snapshot
+            .tracks
+            .iter()
+            .filter(|t| !sonic.needs(t))
+            .count(),
+        total: lib.snapshot.tracks.len(),
+        running: lib.listening,
+    }
+}
+
+/// Runs `f` over every analysed song.
+fn with_sonic<T>(state: &AppState, f: impl FnOnce(&[crate::sonic::Item], &crate::state::Library) -> T) -> T {
+    let lib = state.library.lock();
+    let sonic = state.sonic.lock();
+    let items: Vec<_> = lib
+        .snapshot
+        .tracks
+        .iter()
+        .filter_map(|t| sonic.features(t).map(|f| crate::sonic::Item { track: t, f }))
+        .collect();
+    f(&items, &lib)
+}
+
+/// Songs that sound like `id`, closest first (empty until the song has been analysed).
+#[tauri::command]
+pub fn similar_tracks(state: AppStateRef, id: String, limit: Option<usize>) -> Vec<String> {
+    with_sonic(&state, |items, lib| {
+        let Some(&i) = lib.by_id.get(&id) else {
+            return Vec::new();
+        };
+        crate::sonic::similar(items, &lib.snapshot.tracks[i], limit.unwrap_or(25))
+            .into_iter()
+            .map(|t| t.id.clone())
+            .collect()
+    })
+}
+
+/// A radio of songs that sound like `id`, starting with it.
+#[tauri::command]
+pub fn sound_radio(state: AppStateRef, id: String, count: Option<usize>) -> Vec<String> {
+    with_sonic(&state, |items, lib| {
+        let Some(&i) = lib.by_id.get(&id) else {
+            return Vec::new();
+        };
+        crate::sonic::radio(items, &lib.snapshot.tracks[i], count.unwrap_or(50))
+            .into_iter()
+            .map(|t| t.id.clone())
+            .collect()
+    })
+}
+
+#[tauri::command]
+pub fn sound_mixes(state: AppStateRef) -> Vec<crate::sonic::Mix> {
+    with_sonic(&state, |items, _| crate::sonic::mixes(items))
+}
+
+// ---------- AI DJ ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiInfo {
+    settings: crate::ai::AiSettings,
+    has_key: bool,
+}
+
+#[tauri::command]
+pub fn get_ai_settings(state: AppStateRef) -> AiInfo {
+    AiInfo {
+        settings: state.settings.lock().ai.clone(),
+        has_key: crate::secrets::get(crate::ai::KEY_SECRET).is_some(),
+    }
+}
+
+#[tauri::command]
+pub fn set_ai_settings(state: AppStateRef, settings: crate::ai::AiSettings) {
+    state.settings.lock().ai = settings;
+    state.save_settings();
+}
+
+/// Saves the API key. Accepts the bare key or a pasted .env file (ZAI_API_KEY / AI_API_KEY /
+/// OPENAI_API_KEY, plus AI_MODEL and AI_BASE_URL if present). Returns the new settings.
+#[tauri::command]
+pub fn set_ai_key(state: AppStateRef, text: String) -> Result<AiInfo, String> {
+    let vars: std::collections::HashMap<String, String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| {
+            let k = k.trim().trim_start_matches("export ").trim();
+            (k.to_string(), v.trim().trim_matches(['"', '\'']).to_string())
+        })
+        .collect();
+    let key = if vars.is_empty() {
+        text.trim().to_string()
+    } else {
+        ["ZAI_API_KEY", "AI_API_KEY", "OPENAI_API_KEY", "API_KEY"]
+            .iter()
+            .find_map(|k| vars.get(*k).filter(|v| !v.is_empty()).cloned())
+            .ok_or("No API key found. Paste the key itself, or a .env with ZAI_API_KEY=…")?
+    };
+    crate::secrets::set(crate::ai::KEY_SECRET, &key)?;
+    {
+        let mut s = state.settings.lock();
+        if let Some(m) = vars.get("AI_MODEL").filter(|v| !v.is_empty()) {
+            s.ai.cloud_model = m.clone();
+        }
+        if let Some(u) = vars.get("AI_BASE_URL").filter(|v| !v.is_empty()) {
+            s.ai.cloud_url = u.clone();
+        }
+        if !key.is_empty() && s.ai.provider == crate::ai::Provider::Off {
+            s.ai.provider = crate::ai::Provider::Cloud;
+        }
+    }
+    state.save_settings();
+    Ok(get_ai_settings(state))
+}
+
+/// Everything the DJ needs, copied out of the app state so the slow request runs without locks.
+struct DjInput {
+    settings: crate::ai::AiSettings,
+    taste: String,
+    candidates: Vec<crate::ai::Candidate>,
+    history: crate::history::HistoryStats,
+}
+
+fn dj_input(state: &AppState, request: &str) -> DjInput {
+    let history = state.history.lock().stats();
+    let settings = state.settings.lock().ai.clone();
+    let lib = state.library.lock();
+    let sonic = state.sonic.lock();
+    let items: Vec<_> = lib
+        .snapshot
+        .tracks
+        .iter()
+        .filter_map(|t| sonic.features(t).map(|f| crate::sonic::Item { track: t, f }))
+        .collect();
+    let mut sound = crate::sonic::describe(&items);
+    let taste = crate::ai::taste(
+        |id| lib.by_id.get(id).map(|&i| &lib.snapshot.tracks[i]),
+        &history,
+    );
+    let candidates = lib
+        .snapshot
+        .tracks
+        .iter()
+        .map(|t| crate::ai::Candidate {
+            sound: sound.remove(&t.id),
+            track: t.clone(),
+        })
+        .collect();
+    let candidates = crate::ai::shortlist(candidates, request, &history);
+    DjInput {
+        settings,
+        taste,
+        candidates,
+        history,
+    }
+}
+
+#[tauri::command]
+pub async fn ai_test(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let settings = state.settings.lock().ai.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::ai::test(&settings).map(|_| "Connected".to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Exactly what would be sent for this request (shown in Settings).
+#[tauri::command]
+pub fn ai_preview(state: AppStateRef, request: String) -> String {
+    let input = dj_input(&state, &request);
+    format!(
+        "{}\n\n{}",
+        crate::ai::SYSTEM,
+        crate::ai::ask_prompt(&request, &input.taste, &input.candidates, &input.history)
+    )
+}
+
+/// Tops a short AI pick up with songs that sound like it, when the library has them.
+fn fill_by_sound(state: &AppState, mix: &mut crate::ai::AiMix, want: usize) {
+    if mix.track_ids.len() >= want {
+        return;
+    }
+    with_sonic(state, |items, _| {
+        let picked: Vec<&[f32]> = items
+            .iter()
+            .filter(|i| mix.track_ids.contains(&i.track.id))
+            .map(|i| i.f)
+            .collect();
+        if picked.is_empty() {
+            return;
+        }
+        let mut rest: Vec<(f32, &str)> = items
+            .iter()
+            .filter(|i| !mix.track_ids.contains(&i.track.id))
+            .map(|i| {
+                let d = picked
+                    .iter()
+                    .map(|p| crate::sonic::distance(p, i.f))
+                    .fold(f32::MAX, f32::min);
+                (d, i.track.id.as_str())
+            })
+            .collect();
+        rest.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let need = want - mix.track_ids.len();
+        mix.track_ids
+            .extend(rest.into_iter().take(need).map(|(_, id)| id.to_string()));
+    });
+}
+
+#[tauri::command]
+pub async fn ai_ask(state: State<'_, Arc<AppState>>, request: String) -> Result<crate::ai::AiMix, String> {
+    let input = dj_input(&state, &request);
+    let library = state.library.lock().snapshot.tracks.clone();
+    let mut mix = tauri::async_runtime::spawn_blocking(move || {
+        crate::ai::ask(&input.settings, &request, &input.taste, &input.candidates, &input.history).map(|mut m| {
+            m.discover = crate::catalog::check(std::mem::take(&mut m.discover), &library);
+            m
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    fill_by_sound(&state, &mut mix, 12);
+    Ok(mix)
+}
+
+/// Today's AI mixes: made once a day (or when `refresh` is set) and kept in ai-mixes.json.
+#[tauri::command]
+pub async fn ai_mixes(state: State<'_, Arc<AppState>>, refresh: bool) -> Result<Vec<crate::ai::AiMix>, String> {
+    let file = state.data_dir.join("ai-mixes.json");
+    let cache: crate::ai::DailyCache = crate::state::read_json(&file);
+    // Made once a day: today's mixes (or today's failure) are reused unless asked for new ones.
+    if !refresh && cache.day == crate::ai::today() {
+        if !cache.mixes.is_empty() {
+            return Ok(cache.mixes);
+        }
+        if !cache.error.is_empty() {
+            return Err(cache.error);
+        }
+    }
+    let input = dj_input(&state, "");
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        crate::ai::daily_mixes(&input.settings, &input.taste, &input.candidates, &input.history)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    crate::state::write_json(
+        &file,
+        &crate::ai::DailyCache {
+            day: crate::ai::today(),
+            mixes: result.clone().unwrap_or_default(),
+            error: result.as_ref().err().cloned().unwrap_or_default(),
+        },
+    );
+    result
+}
+
+// ---------- player ----------
+
+#[tauri::command]
+pub fn play_tracks(state: AppStateRef, ids: Vec<String>, start: usize) {
+    let items = state.queue_items(&ids);
+    let start = ids
+        .get(start)
+        .and_then(|id| items.iter().position(|q| &q.id == id))
+        .unwrap_or(0);
+    state.engine.send(Cmd::Load {
+        items,
+        index: start,
+    });
+}
+
+#[tauri::command]
+pub fn enqueue(state: AppStateRef, ids: Vec<String>, next: bool) {
+    let items = state.queue_items(&ids);
+    state.engine.send(Cmd::Enqueue { items, next });
+}
+
+#[tauri::command]
+pub fn player(state: AppStateRef, action: String) {
+    let cmd = match action.as_str() {
+        "play" => Cmd::Play,
+        "pause" => Cmd::Pause,
+        "toggle" => Cmd::Toggle,
+        "next" => Cmd::Next,
+        "prev" => Cmd::Prev,
+        _ => return,
+    };
+    state.engine.send(cmd);
+}
+
+#[tauri::command]
+pub fn seek(state: AppStateRef, position: f64) {
+    state.engine.send(Cmd::Seek(position));
+}
+
+#[tauri::command]
+pub fn jump(state: AppStateRef, index: usize) {
+    state.engine.send(Cmd::Jump(index));
+}
+
+#[tauri::command]
+pub fn remove_from_queue(state: AppStateRef, index: usize) {
+    state.engine.send(Cmd::Remove(index));
+}
+
+#[tauri::command]
+pub fn set_volume(state: AppStateRef, volume: f32) {
+    state.engine.send(Cmd::SetVolume(volume));
+    state.settings.lock().volume = volume;
+    state.save_settings();
+}
+
+#[tauri::command]
+pub fn set_repeat(state: AppStateRef, repeat: Repeat) {
+    state.engine.send(Cmd::SetRepeat(repeat));
+    state.settings.lock().repeat = repeat;
+    state.save_settings();
+}
+
+#[tauri::command]
+pub fn get_status(state: AppStateRef) -> Status {
+    state.engine.status()
+}
+
+// ---------- sound (EQ, leveling, crossfeed) ----------
+
+#[derive(Serialize)]
+pub struct Preset {
+    name: &'static str,
+    gains: [f64; 10],
+}
+
+#[tauri::command]
+pub fn get_dsp(state: AppStateRef) -> DspSettings {
+    state.settings.lock().dsp.clone()
+}
+
+#[tauri::command]
+pub fn set_dsp(state: AppStateRef, dsp: DspSettings) {
+    state.engine.send(Cmd::SetDsp(dsp.clone()));
+    state.settings.lock().dsp = dsp;
+    state.save_settings();
+}
+
+#[tauri::command]
+pub fn eq_presets() -> Vec<Preset> {
+    presets()
+        .into_iter()
+        .map(|(name, gains)| Preset { name, gains })
+        .collect()
+}
+
+#[derive(Serialize)]
+pub struct ParametricImport {
+    preamp: f64,
+    filters: Vec<Filter>,
+}
+
+/// Parses an AutoEq / Equalizer APO `ParametricEQ.txt` (text pasted or read from a file).
+#[tauri::command]
+pub fn parse_eq_file(
+    text: Option<String>,
+    path: Option<String>,
+) -> Result<ParametricImport, String> {
+    let text = match (text, path) {
+        (Some(t), _) => t,
+        (None, Some(p)) => {
+            std::fs::read_to_string(&p).map_err(|e| format!("Couldn't read the file: {e}"))?
+        }
+        _ => return Err("Nothing to import".into()),
+    };
+    let (preamp, filters) = parse_parametric(&text)?;
+    Ok(ParametricImport { preamp, filters })
+}
+
+// ---------- history, windows ----------
+
+#[tauri::command]
+pub fn get_history(state: AppStateRef) -> crate::history::HistoryStats {
+    state.history.lock().stats()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    close_to_tray: bool,
+    lyrics_online: bool,
+    listenbrainz_user: String,
+}
+
+#[tauri::command]
+pub fn get_app_settings(state: AppStateRef) -> AppSettings {
+    let s = state.settings.lock();
+    AppSettings {
+        close_to_tray: s.close_to_tray,
+        lyrics_online: s.lyrics_online,
+        listenbrainz_user: s.listenbrainz_user.clone(),
+    }
+}
+
+#[tauri::command]
+pub fn set_lyrics_online(state: AppStateRef, enabled: bool) {
+    state.settings.lock().lyrics_online = enabled;
+    state.save_settings();
+}
+
+/// Lyrics for a song: from the file or a .lrc next to it, else LRCLIB (if allowed).
+#[tauri::command]
+pub async fn get_lyrics(
+    state: State<'_, Arc<AppState>>,
+    track_id: String,
+) -> Result<crate::lyrics::Lyrics, String> {
+    let (track, online) = {
+        let lib = state.library.lock();
+        let t = lib
+            .by_id
+            .get(&track_id)
+            .map(|&i| lib.snapshot.tracks[i].clone())
+            .ok_or("Unknown song")?;
+        (t, state.settings.lock().lyrics_online)
+    };
+    let cache = state.data_dir.join("lyrics");
+    tauri::async_runtime::spawn_blocking(move || {
+        if crate::lyrics::is_hidden(&cache, &track.id) {
+            return crate::lyrics::Lyrics {
+                lookup: "hidden".into(),
+                ..Default::default()
+            };
+        }
+        if let Some(l) = crate::lyrics::picked(&cache, &track.id) {
+            return l;
+        }
+        // Lyrics in the file win when they're timed. Untimed ones (common in tags) can't follow
+        // the song, so timed lyrics from the saved store or LRCLIB are preferred when there are any.
+        let local = crate::lyrics::local(Path::new(&track.path));
+        if let Some(l) = local.as_ref().filter(|l| !l.synced.is_empty()) {
+            return l.clone();
+        }
+        let found = crate::lyrics::saved(&cache, &track.id, &track.title).map(Ok).unwrap_or_else(|| {
+            if online {
+                crate::lyrics::online(
+                    &cache,
+                    &track.id,
+                    &track.artist,
+                    &track.title,
+                    &track.album,
+                    track.duration,
+                )
+            } else {
+                Err("off")
+            }
+        });
+        match (found, local) {
+            (Ok(l), _) if !l.synced.is_empty() => l,
+            (_, Some(l)) => l,
+            (Ok(l), None) => l,
+            (Err(why), None) => crate::lyrics::Lyrics {
+                lookup: why.into(),
+                ..Default::default()
+            },
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_close_to_tray(state: AppStateRef, enabled: bool) {
+    state.settings.lock().close_to_tray = enabled;
+    state.save_settings();
+}
+
+// Async on purpose: creating a window from a synchronous command deadlocks on Windows.
+#[tauri::command]
+pub async fn toggle_mini(app: AppHandle) {
+    crate::tray::toggle_mini(&app);
+}
+
+#[tauri::command]
+pub fn show_main(app: AppHandle) {
+    crate::tray::show_main(&app);
+}
+
+#[tauri::command]
+pub fn quit(app: AppHandle) {
+    app.exit(0);
+}
+
+// ---------- playlists ----------
+
+#[tauri::command]
+pub fn get_playlists(state: AppStateRef) -> Vec<crate::playlists::Playlist> {
+    state.playlists.lock().items.clone()
+}
+
+/// Creates (empty id) or updates a playlist; returns it with its id.
+#[tauri::command]
+pub fn save_playlist(
+    state: AppStateRef,
+    playlist: crate::playlists::Playlist,
+) -> crate::playlists::Playlist {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let saved = state.playlists.lock().upsert(playlist, now);
+    state.save_playlists();
+    saved
+}
+
+#[tauri::command]
+pub fn delete_playlist(state: AppStateRef, id: String) {
+    state.playlists.lock().remove(&id);
+    state.save_playlists();
+}
+
+// ---------- scrobbling ----------
+
+/// Checks the token with ListenBrainz, then stores it in Credential Manager. Returns the user name.
+#[tauri::command]
+pub async fn connect_listenbrainz(
+    state: State<'_, Arc<AppState>>,
+    token: String,
+) -> Result<String, String> {
+    let t = token.clone();
+    let user = tauri::async_runtime::spawn_blocking(move || crate::scrobble::validate(&t))
+        .await
+        .map_err(|e| e.to_string())??;
+    crate::secrets::set(crate::scrobble::TOKEN_SECRET, &token)?;
+    state.settings.lock().listenbrainz_user = user.clone();
+    state.save_settings();
+    Ok(user)
+}
+
+#[tauri::command]
+pub fn disconnect_listenbrainz(state: AppStateRef) -> Result<(), String> {
+    crate::secrets::set(crate::scrobble::TOKEN_SECRET, "")?;
+    state.settings.lock().listenbrainz_user.clear();
+    state.save_settings();
+    Ok(())
+}
+
+// ---------- tag editing ----------
+
+/// Writes the changed fields into each song's file, then rescans so the library shows them.
+#[tauri::command]
+pub async fn write_tags(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    ids: Vec<String>,
+    changes: crate::tagedit::TagChanges,
+) -> Result<usize, String> {
+    let playing = {
+        let s = state.engine.status();
+        s.index.and_then(|i| s.queue.get(i).cloned())
+    };
+    if ids.iter().any(|id| Some(id) == playing.as_ref()) {
+        return Err(
+            "This song is playing. Play something else (or pause and skip ahead), then edit it."
+                .into(),
+        );
+    }
+    let paths: Vec<String> = {
+        let lib = state.library.lock();
+        ids.iter()
+            .filter_map(|id| {
+                lib.by_id
+                    .get(id)
+                    .map(|&i| lib.snapshot.tracks[i].path.clone())
+            })
+            .collect()
+    };
+    let written = tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        for p in &paths {
+            crate::tagedit::write(Path::new(p), &changes)?;
+        }
+        Ok(paths.len())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    start_scan(app);
+    Ok(written)
+}
+
+fn track_of(state: &AppState, id: &str) -> Result<crate::library::Track, String> {
+    let lib = state.library.lock();
+    lib.by_id
+        .get(id)
+        .map(|&i| lib.snapshot.tracks[i].clone())
+        .ok_or_else(|| "Unknown song".to_string())
+}
+
+/// Searches LRCLIB for lyrics (any text: title, artist, a line).
+#[tauri::command]
+pub async fn search_lyrics(query: String) -> Result<Vec<crate::lyrics::Hit>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::lyrics::search(&query))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Uses an LRCLIB search result as this song's lyrics (kept for next time).
+#[tauri::command]
+pub async fn use_lyrics(
+    state: State<'_, Arc<AppState>>,
+    track_id: String,
+    hit_id: u64,
+) -> Result<crate::lyrics::Lyrics, String> {
+    let cache = state.data_dir.join("lyrics");
+    tauri::async_runtime::spawn_blocking(move || {
+        let l = crate::lyrics::fetch(hit_id)?;
+        crate::lyrics::pick(&cache, &track_id, &l);
+        Ok(l)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Marks this song's lyrics as wrong, so they aren't shown (or looked up) again.
+#[tauri::command]
+pub fn hide_lyrics(state: AppStateRef, track_id: String) {
+    crate::lyrics::hide(&state.data_dir.join("lyrics"), &track_id);
+}
+
+/// Uses pasted text (LRC or plain) as this song's lyrics.
+#[tauri::command]
+pub fn paste_lyrics(state: AppStateRef, track_id: String, text: String) -> Result<crate::lyrics::Lyrics, String> {
+    let l = crate::lyrics::from_pasted(&text).ok_or("There’s no text to use.")?;
+    crate::lyrics::pick(&state.data_dir.join("lyrics"), &track_id, &l);
+    Ok(l)
+}
+
+/// Lets the AI find lyrics: it suggests better searches for LRCLIB (for time-synced lyrics) and
+/// looks the lyrics up on the web as a fallback.
+#[tauri::command]
+pub async fn ai_find_lyrics(
+    state: State<'_, Arc<AppState>>,
+    track_id: String,
+) -> Result<crate::lyrics::Lyrics, String> {
+    let track = track_of(&state, &track_id)?;
+    let settings = state.settings.lock().ai.clone();
+    let cache = state.data_dir.join("lyrics");
+    tauri::async_runtime::spawn_blocking(move || {
+        let found = crate::ai::find_lyrics(&settings, &track)?;
+        // Synced lyrics from LRCLIB beat anything else, so try the AI's searches there first.
+        for q in &found.queries {
+            if let Ok(hits) = crate::lyrics::search(q) {
+                let wanted = crate::lyrics::Wanted {
+                    title: &track.title,
+                    artist: &track.artist,
+                    album: &track.album,
+                    duration: track.duration,
+                };
+                if let Some(hit) = crate::lyrics::best_hit(&hits, &wanted) {
+                    if let Ok(l) = crate::lyrics::fetch(hit.id) {
+                        crate::lyrics::pick(&cache, &track.id, &l);
+                        return Ok(l);
+                    }
+                }
+            }
+        }
+        let l = if found.instrumental {
+            crate::lyrics::Lyrics {
+                source: "ai".into(),
+                instrumental: true,
+                ..Default::default()
+            }
+        } else {
+            crate::lyrics::from_ai(&found.lrc)
+                .filter(|l| !l.synced.is_empty())
+                .or_else(|| crate::lyrics::from_ai(&found.plain))
+                .ok_or("The AI couldn’t find lyrics for this song.")?
+        };
+        crate::lyrics::pick(&cache, &track.id, &l);
+        Ok(l)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Diagnostics: records what goes to the device into `%TEMP%\cadence-tap.f32` while on.
+#[tauri::command]
+pub fn debug_tap(state: AppStateRef, on: bool) -> String {
+    state.engine.tap(on);
+    std::env::temp_dir().join("cadence-tap.f32").display().to_string()
+}
+
+/// New music (not in the library) for the listener, found by the AI with web search. Made once a
+/// day (or when `refresh` is set) and kept in ai-discover.json.
+#[tauri::command]
+pub async fn ai_discover(state: State<'_, Arc<AppState>>, refresh: bool) -> Result<Vec<crate::ai::Discovery>, String> {
+    let file = state.data_dir.join("ai-discover.json");
+    let cache: crate::ai::DiscoverCache = crate::state::read_json(&file);
+    // Made once a day: today's picks (or today's failure) are reused unless asked for more.
+    let library = state.library.lock().snapshot.tracks.clone();
+    if !refresh && cache.day == crate::ai::today() {
+        if !cache.picks.is_empty() {
+            // Picks saved before they were checked against the library and catalogue get checked now.
+            if cache.picks.iter().any(|p| !p.checked) {
+                let picks = cache.picks;
+                let lib = library.clone();
+                let checked = tauri::async_runtime::spawn_blocking(move || crate::catalog::check(picks, &lib))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                crate::state::write_json(
+                    &file,
+                    &crate::ai::DiscoverCache {
+                        day: cache.day,
+                        picks: checked.clone(),
+                        error: String::new(),
+                    },
+                );
+                return Ok(checked);
+            }
+            return Ok(cache.picks);
+        }
+        if !cache.error.is_empty() {
+            return Err(cache.error);
+        }
+    }
+    let input = dj_input(&state, "");
+    let owned: Vec<String> = {
+        let lib = state.library.lock();
+        let mut a: Vec<String> = lib.snapshot.tracks.iter().map(|t| t.artist.clone()).collect();
+        a.sort();
+        a.dedup();
+        a
+    };
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        crate::ai::discover(&input.settings, &input.taste, &input.candidates, &owned)
+            .map(|picks| crate::catalog::check(picks, &library))
+            .and_then(|picks| {
+                if picks.is_empty() {
+                    Err("Everything the DJ found is already in your library. Try “Find more”.".to_string())
+                } else {
+                    Ok(picks)
+                }
+            })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    crate::state::write_json(
+        &file,
+        &crate::ai::DiscoverCache {
+            day: crate::ai::today(),
+            picks: result.clone().unwrap_or_default(),
+            error: result.as_ref().err().cloned().unwrap_or_default(),
+        },
+    );
+    result
+}

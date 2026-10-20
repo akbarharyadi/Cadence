@@ -1,0 +1,276 @@
+@import "@fontsource-variable/bricolage-grotesque";
+@import "@fontsource-variable/instrument-sans";
+
+/* The accent and tint follow the album that's playing; registering them lets the change glide. */
+@property --accent {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #8b7cff;
+}
+@property --tint {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #1b1c33;
+}
+
+:root {
+  /* Ink: a deep indigo rather than neutral black, so artwork colours sit in it naturally. */
+  --ink: #10111a;
+  --ink-2: #161827;
+  --surface: #1c1e30;
+  --surface-2: #24273d;
+  --line: rgba(196, 200, 255, 0.09);
+  --line-strong: rgba(196, 200, 255, 0.16);
+  --hover: rgba(196, 200, 255, 0.06);
+  --active: rgba(196, 200, 255, 0.11);
+
+  --text: #ecedf5;
+  --text-2: #9a9cb4;
+  --text-3: #64667f;
+
+  --accent: #8b7cff;
+  --tint: #1b1c33;
+  /* Lossless / bit-perfect: champagne, like a gold record. Never used for anything else. */
+  --gold: #e8c77a;
+  --good: #5fd39a;
+  --warn: #ffb35c;
+  --bad: #ff6b6b;
+
+  --display: "Bricolage Grotesque Variable", "Segoe UI Variable Display", "Microsoft YaHei UI", "Yu Gothic UI", sans-serif;
+  --font: "Instrument Sans Variable", "Segoe UI Variable Text", "Microsoft YaHei UI", "Yu Gothic UI", sans-serif;
+
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 16px;
+  color-scheme: dark;
+  transition: --accent 0.8s ease, --tint 0.8s ease;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--ink);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: default;
+}
+button:focus-visible,
+[role="button"]:focus-visible,
+[role="option"]:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+img {
+  -webkit-user-drag: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(196, 200, 255, 0.14);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(196, 200, 255, 0.24);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.secondary {
+  color: var(--text-2);
+}
+
+/* ---------- Type ---------- */
+
+.page-title {
+  font-family: var(--display);
+  font-size: 34px;
+  font-weight: 700;
+  font-variation-settings: "wdth" 90;
+  letter-spacing: -0.025em;
+  line-height: 1.05;
+  margin: 0;
+}
+
+.section-title {
+  font-family: var(--display);
+  font-size: 21px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  margin: 0;
+}
+
+/* ---------- Buttons ---------- */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 18px;
+  border-radius: 999px;
+  font-weight: 600;
+  background: var(--accent);
+  color: #0d0e17;
+  white-space: nowrap;
+  flex: none;
+  transition: filter 0.15s, transform 0.1s;
+}
+.pill:hover {
+  filter: brightness(1.08);
+}
+.pill:active {
+  transform: scale(0.97);
+}
+.pill:disabled {
+  opacity: 0.45;
+  filter: none;
+}
+.pill.danger {
+  background: var(--bad);
+  color: #1a0606;
+}
+.pill.ghost {
+  background: var(--hover);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.pill.ghost:hover {
+  background: var(--active);
+  filter: none;
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  color: var(--text-2);
+  transition: color 0.15s, background 0.15s, transform 0.1s;
+}
+.icon-btn:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.icon-btn:active {
+  transform: scale(0.92);
+}
+.icon-btn.on {
+  color: var(--accent);
+}
+
+.link {
+  color: var(--accent);
+}
+.link:hover {
+  text-decoration: underline;
+}
+
+/* ---------- Layout ---------- */
+
+/* Top padding leaves room for the sticky top bar (Back button, window drag area). */
+.page {
+  padding: 60px 44px 56px;
+  max-width: 1500px;
+}
+
+/* ---------- Inputs ---------- */
+
+.field {
+  background: var(--hover);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  outline: none;
+  font-size: 13px;
+  user-select: text;
+}
+.field:focus {
+  border-color: var(--accent);
+}
+/* Number fields: no Windows spinner arrows (use typing, arrow keys or the graph). */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Native range inputs as thin sliders. --pct is set inline for the filled part. */
+input[type="range"].slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 16px;
+  background: transparent;
+  margin: 0;
+  --pct: 0%;
+  --fill: var(--text);
+}
+input[type="range"].slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 4px;
+  background: linear-gradient(to right, var(--fill) var(--pct), rgba(196, 200, 255, 0.16) var(--pct));
+}
+input[type="range"].slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 13px;
+  height: 13px;
+  margin-top: -4.5px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+input[type="range"].slider:hover::-webkit-slider-thumb,
+input[type="range"].slider:active::-webkit-slider-thumb,
+input[type="range"].slider:focus-visible::-webkit-slider-thumb {
+  opacity: 1;
+}
+input[type="range"].slider:focus {
+  outline: none;
+}
+input[type="checkbox"] {
+  accent-color: var(--accent);
+}
