@@ -29,6 +29,7 @@
         <a href="#sound">Sound</a>
         <a href="#lyrics">Lyrics</a>
         <a href="#mixes">Mixes</a>
+        <a href="#android">Android</a>
         <a href="#download">Download</a>
         <a href="https://github.com/akbarharyadi/cadence">GitHub</a>
       </nav>
@@ -58,7 +59,7 @@
           <p class="fine" id="download-note">Free and open source. Windows, macOS, Linux and Android.</p>
         </div>
         <figure class="shot hero-shot">
-          <img src="/assets/home.jpg" width="1650" height="1075" alt="Cadence's Listen Now page with an album, the AI DJ and daily mixes" />
+          <img src="/assets/home.jpg" width="1650" height="1075" alt="Cadence's Listen Now page: recent albums, top picks, and the player showing the next song" />
         </figure>
       </section>
 
@@ -118,6 +119,57 @@
         <figure class="shot"><img src="/assets/mixes.jpg" width="1650" height="1075" loading="lazy" alt="Mixes by sound and recently played albums" /></figure>
       </section>
 
+      <section class="android" id="android">
+        <div class="copy">
+          <h2>Take it with you</h2>
+          <p>
+            The same Cadence runs on Android phones, with the same library features, Sound Check and lossless decoding. It keeps
+            playing with the screen off, and you can control it from the lock screen, the notification shade, Bluetooth buttons,
+            or a widget on your home screen.
+          </p>
+          <ul class="ticks">
+            <li>Made for one hand: tabs at the bottom, the player always within reach</li>
+            <li>A home screen widget with the cover, the song's quality and play controls</li>
+            <li>Works with your phone's media controls and the Now Playing island</li>
+          </ul>
+        </div>
+        <div class="phones">
+          <figure class="phone"><img src="/assets/phone-home.jpg" width="640" height="1236" loading="lazy" alt="Listen Now on an Android phone" /></figure>
+          <figure class="phone raised"><img src="/assets/phone-now.jpg" width="640" height="1236" loading="lazy" alt="Now Playing on an Android phone, showing Lossless 24-bit/48 kHz" /></figure>
+          <figure class="widget"><img src="/assets/widget.jpg" width="900" height="240" loading="lazy" alt="The Cadence widget on an Android home screen" /></figure>
+        </div>
+      </section>
+
+      <section class="systems" aria-labelledby="systems-title">
+        <h2 id="systems-title">The cleanest path on every system</h2>
+        <p class="intro">
+          Each system mixes sound its own way, so Cadence uses the most direct route each one offers. Turn on Direct output in
+          Sound and the signal path shows exactly what your device receives.
+        </p>
+        <dl class="routes">
+          <div>
+            <dt>Windows</dt>
+            <dd class="how">WASAPI exclusive mode</dd>
+            <dd>Each song goes straight to the device at its own sample rate and bit depth, past the Windows mixer.</dd>
+          </div>
+          <div>
+            <dt>macOS</dt>
+            <dd class="how">Device follows the song</dd>
+            <dd>Cadence switches your output to each song's sample rate, as you would in Audio MIDI Setup, so Core Audio never resamples.</dd>
+          </div>
+          <div>
+            <dt>Linux</dt>
+            <dd class="how">ALSA hardware device</dd>
+            <dd>Plays to your sound card directly, around PulseAudio and PipeWire. USB DACs are picked first.</dd>
+          </div>
+          <div>
+            <dt>Android</dt>
+            <dd class="how">32-bit float to AAudio</dd>
+            <dd>Decoded without loss and handed to Android's audio system in full precision, at the phone's own rate.</dd>
+          </div>
+        </dl>
+      </section>
+
       <section class="grid" aria-labelledby="more-title">
         <h2 id="more-title">Everything else you'd expect</h2>
         <ul>
@@ -138,6 +190,30 @@
         </p>
       </section>
 
+      <section class="faq" aria-labelledby="faq-title">
+        <h2 id="faq-title">Questions</h2>
+        <details>
+          <summary>Does Cadence stream music?</summary>
+          <p>No. Cadence plays files you already have: albums you bought as downloads, ripped from CDs, or recorded yourself. The AI DJ can suggest new music and where to buy it.</p>
+        </details>
+        <details>
+          <summary>What does bit-perfect mean here?</summary>
+          <p>Every sample in the file reaches your device unchanged. That needs Direct output on, with Sound Check, the equalizer and crossfeed off and the volume at 100%. Cadence shows a gold Bit-perfect label when all of that is true.</p>
+        </details>
+        <details>
+          <summary>Is the AI DJ required?</summary>
+          <p>No. Everything else works without it, including mixes by sound, which are made on your computer. The AI DJ only runs after you add your own key for Z.ai GLM or another OpenAI-compatible service.</p>
+        </details>
+        <details>
+          <summary>How much does it cost?</summary>
+          <p>Nothing. Cadence is free and open source under the GNU GPL v3. There are no accounts, ads or subscriptions.</p>
+        </details>
+        <details>
+          <summary>Why does macOS say the app can't be opened?</summary>
+          <p>The macOS build isn't signed by Apple yet. The first time, right-click Cadence in Applications and choose Open; after that it opens normally.</p>
+        </details>
+      </section>
+
       <section class="download" id="download">
         <h2>Download Cadence</h2>
         <p class="fine" id="release-name">Latest release on GitHub</p>
@@ -156,8 +232,8 @@
           </a>
         </div>
         <p class="fine">
-          The macOS app isn't signed by Apple yet: the first time, right-click Cadence in Applications and choose Open. Direct
-          output (bit-perfect mode) works on Windows, macOS and Linux. On Android, allow installs from your browser when asked.
+          On Android, allow installs from your browser when asked. On macOS, right-click Cadence and choose Open the first time.
+          Every release, with notes and checksums, is on <a href="https://github.com/akbarharyadi/cadence/releases">GitHub</a>.
         </p>
       </section>
     </main>

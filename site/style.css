@@ -336,6 +336,110 @@ h2 {
   }
 }
 
+/* ---------- android ---------- */
+.android {
+  max-width: 1240px;
+  margin: clamp(90px, 12vw, 150px) auto 0;
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: clamp(28px, 5vw, 72px);
+  align-items: center;
+}
+.phones {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: clamp(14px, 2.4vw, 28px);
+  padding-bottom: 70px;
+}
+.phone {
+  margin: 0;
+  border-radius: 30px;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 0 0 7px #05060b,
+    0 0 0 8px rgba(196, 200, 255, 0.14),
+    0 30px 70px rgba(0, 0, 0, 0.55);
+}
+.phone.raised {
+  transform: translateY(-36px);
+}
+/* The widget sits across the bottom of both phones, as it would on a home screen. */
+.widget {
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  bottom: 0;
+  margin: 0;
+  border-radius: 22px;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px var(--line),
+    0 24px 60px rgba(0, 0, 0, 0.6);
+}
+@media (max-width: 860px) {
+  .android {
+    grid-template-columns: 1fr;
+  }
+  .phone.raised {
+    transform: none;
+  }
+  .phone {
+    border-radius: 20px;
+  }
+}
+
+/* ---------- audio path per system ---------- */
+.systems {
+  max-width: 1240px;
+  margin: clamp(90px, 12vw, 150px) auto 0;
+}
+.intro {
+  margin: 20px 0 0;
+  color: var(--text-2);
+  max-width: var(--measure);
+}
+.routes {
+  margin: 36px 0 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+.routes div {
+  padding: 22px 22px 24px;
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.routes dt {
+  font-family: var(--display);
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.routes dd {
+  margin: 8px 0 0;
+  color: var(--text-2);
+  font-size: 15px;
+}
+.routes .how {
+  margin-top: 4px;
+  color: var(--gold);
+  font-weight: 600;
+  font-size: 14px;
+}
+@media (max-width: 960px) {
+  .routes {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+@media (max-width: 560px) {
+  .routes {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ---------- more ---------- */
 .grid {
   max-width: 1240px;
@@ -374,6 +478,57 @@ h2 {
   margin: 16px 0 0;
   max-width: var(--measure);
   color: var(--text-2);
+}
+
+/* ---------- questions ---------- */
+.faq {
+  max-width: 860px;
+  margin: clamp(90px, 12vw, 150px) auto 0;
+}
+.faq h2 {
+  margin-bottom: 20px;
+}
+.faq details {
+  border-bottom: 1px solid var(--line);
+}
+.faq summary {
+  position: relative;
+  padding: 20px 40px 20px 0;
+  font-size: 18px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.faq summary::-webkit-details-marker {
+  display: none;
+}
+/* A plus that turns into a minus. */
+.faq summary::before,
+.faq summary::after {
+  content: "";
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  width: 14px;
+  height: 2px;
+  background: var(--violet);
+  transition: transform 0.2s;
+}
+.faq summary::after {
+  transform: rotate(90deg);
+}
+.faq details[open] summary::after {
+  transform: rotate(0deg);
+}
+.faq summary:focus-visible {
+  outline: 2px solid var(--violet);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+.faq details p {
+  margin: 0 0 22px;
+  color: var(--text-2);
+  max-width: var(--measure);
 }
 
 /* ---------- download ---------- */
