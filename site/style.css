@@ -280,16 +280,30 @@ h1 {
 }
 
 /* ---------- features ---------- */
+/* Heading on the left, words on the right, then the screenshot at full width so it reads at
+   (nearly) its real size. */
 .feature {
   max-width: 1240px;
   margin: clamp(90px, 12vw, 150px) auto 0;
+}
+.feature .copy {
   display: grid;
   grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
-  gap: clamp(28px, 5vw, 72px);
-  align-items: center;
+  column-gap: clamp(28px, 5vw, 72px);
+  align-items: start;
 }
-.feature.flip .copy {
-  order: 2;
+.feature .copy h2 {
+  grid-column: 1;
+  grid-row: 1 / span 4;
+}
+.feature .copy > :not(h2) {
+  grid-column: 2;
+}
+.feature .copy > p:first-of-type {
+  margin-top: 6px;
+}
+.feature .shot {
+  margin-top: clamp(32px, 4vw, 48px);
 }
 h2 {
   margin: 0;
@@ -328,11 +342,16 @@ h2 {
   transform: rotate(-45deg);
 }
 @media (max-width: 860px) {
-  .feature {
+  .feature .copy {
     grid-template-columns: 1fr;
   }
-  .feature.flip .copy {
-    order: 0;
+  .feature .copy h2,
+  .feature .copy > :not(h2) {
+    grid-column: 1;
+    grid-row: auto;
+  }
+  .feature .copy > p:first-of-type {
+    margin-top: 20px;
   }
 }
 
