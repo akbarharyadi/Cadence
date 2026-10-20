@@ -196,7 +196,7 @@ struct Cached {
 }
 
 fn http() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
+    crate::net::builder()
         .timeout(Duration::from_secs(12))
         .user_agent(concat!(
             "Cadence/",
@@ -567,7 +567,7 @@ pub fn online(
         urlencoding::encode(album),
         duration.round() as u64
     );
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::net::builder()
         .timeout(Duration::from_secs(10))
         .user_agent(concat!(
             "Cadence/",

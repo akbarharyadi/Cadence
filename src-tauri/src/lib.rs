@@ -7,6 +7,7 @@ mod jobs;
 pub mod library;
 pub mod lyrics;
 mod media;
+mod net;
 pub mod playlists;
 mod scrobble;
 mod secrets;
@@ -229,6 +230,7 @@ pub fn run() {
             commands::get_folders,
             commands::add_folders,
             commands::remove_folder,
+            commands::list_dirs,
             commands::rescan,
             commands::reanalyze,
             commands::play_tracks,

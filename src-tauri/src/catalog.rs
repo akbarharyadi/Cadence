@@ -10,7 +10,7 @@ use crate::ai::Discovery;
 use crate::library::Track;
 
 fn client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
+    crate::net::builder()
         .timeout(Duration::from_secs(10))
         .user_agent(concat!("Cadence/", env!("CARGO_PKG_VERSION")))
         .build()

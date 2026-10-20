@@ -1,12 +1,14 @@
 <script lang="ts">
-  import { open } from "@tauri-apps/plugin-dialog";
   import { api, khz } from "$lib/api";
   import { onMount } from "svelte";
+  import { getVersion } from "@tauri-apps/api/app";
   import AiSettings from "$lib/components/AiSettings.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Toggle from "$lib/components/Toggle.svelte";
   import { app } from "$lib/store.svelte";
 
+  let version = $state("");
+  getVersion().then((v) => (version = v));
   let closeToTray = $state(true);
   let lyricsOnline = $state(true);
   let lbUser = $state("");
@@ -42,8 +44,7 @@
   const src = $derived(app.status?.source);
 
   async function addFolder() {
-    const picked = await open({ directory: true, multiple: true, title: "Add music folders" });
-    if (picked) await app.addFolders(Array.isArray(picked) ? picked : [picked]);
+    await app.pickFolders();
   }
 
   async function remove(path: string) {
@@ -196,8 +197,8 @@
   <section>
     <h2 class="section-title">About</h2>
     <p class="desc">
-      Cadence 0.1, a free, open-source lossless music player for your own files. Rust audio engine with ReplayGain 2.0 leveling,
-      a 64-bit parametric equalizer, crossfeed and high-quality resampling. Not for commercial use.
+      Cadence {version}, a free, open-source lossless music player for your own files. Rust audio engine with ReplayGain 2.0
+      leveling, a 64-bit parametric equalizer, crossfeed and high-quality resampling. Free software under the GNU GPL v3.
     </p>
   </section>
 </div>

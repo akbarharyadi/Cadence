@@ -38,7 +38,7 @@
     animation: fade 0.15s ease-out;
   }
   .panel {
-    max-width: 100%;
+    max-width: calc(100vw - 24px);
     max-height: calc(100vh - 80px);
     display: flex;
     flex-direction: column;
@@ -71,6 +71,28 @@
     gap: 10px;
     padding: 14px 22px 18px;
     border-top: 1px solid var(--line);
+  }
+  /* Phones: a sheet that rises from the bottom, the full width of the screen. */
+  @media (max-width: 720px) {
+    .overlay {
+      align-items: end;
+      padding: 0 8px calc(8px + env(safe-area-inset-bottom));
+    }
+    .panel {
+      width: 100% !important;
+      max-height: 85vh;
+      border-radius: 24px;
+      animation: rise 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+    footer {
+      flex-wrap: wrap;
+    }
+  }
+  @keyframes rise {
+    from {
+      transform: translateY(40px);
+      opacity: 0;
+    }
   }
   @keyframes fade {
     from {

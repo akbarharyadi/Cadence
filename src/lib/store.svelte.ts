@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { flushSync } from "svelte";
 
 /** Top-level places (tabs and sidebar): switching between them crossfades instead of sliding. */
@@ -80,6 +81,8 @@ class AppState {
   picker = $state<Track[] | null>(null);
   /** Songs whose info (tags) is being edited. */
   tagEditing = $state<Track[] | null>(null);
+  /** The open folder browser (Android): call with the chosen folder, or null if cancelled. */
+  folderBrowser = $state<((path: string | null) => void) | null>(null);
   /** The smart playlist being edited (a copy), or null. */
   smartEditing = $state<Playlist | null>(null);
 
@@ -344,6 +347,37 @@ class AppState {
     if (paths.length === 0) return;
     this.folders = await api.addFolders(paths);
     this.showToast("Importing your music…");
+  }
+
+  /** Asks for music folders and adds them. Android uses Cadence's own folder browser. */
+  async pickFolders() {
+    let picked: string[] = [];
+    if (navigator.userAgent.includes("Android")) {
+      // Cadence's own folder browser: the system picker hides or refuses music folders on some phones.
+      const path = await new Promise<string | null>((resolve) => (this.folderBrowser = resolve));
+      if (path) picked = [path];
+    } else {
+      const res = await open({ directory: true, multiple: true, title: "Add music folders" });
+      if (res) picked = Array.isArray(res) ? res : [res];
+    }
+    if (picked.length) await this.addFolders(picked);
+  }
+
+  /** Android's Back button: closes what's on top, else goes back a page. False when there's nothing to go back to. */
+  handleBack(): boolean {
+    if (this.menu) this.menu = null;
+    else if (this.picker) this.picker = null;
+    else if (this.tagEditing) this.tagEditing = null;
+    else if (this.smartEditing) this.smartEditing = null;
+    else if (this.folderBrowser) {
+      this.folderBrowser(null);
+      this.folderBrowser = null;
+    }
+    else if (this.nowPlayingOpen) this.nowPlayingOpen = false;
+    else if (this.queueOpen) this.queueOpen = false;
+    else if (this.history.length > 0) this.back();
+    else return false;
+    return true;
   }
 
   // ---------- playlists ----------

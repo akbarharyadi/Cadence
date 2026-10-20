@@ -45,7 +45,7 @@ pub fn start(queue_file: PathBuf) -> Sender<Job> {
 }
 
 fn client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
+    crate::net::builder()
         .timeout(Duration::from_secs(15))
         .user_agent(concat!("Cadence/", env!("CARGO_PKG_VERSION")))
         .build()

@@ -213,6 +213,15 @@ export interface LyricsHit {
   preview: string;
 }
 
+/** A folder in the in-app folder browser. */
+export interface DirEntry {
+  name: string;
+  path: string;
+  /** Music files directly inside. */
+  songs: number;
+  hasFolders: boolean;
+}
+
 /** A song suggested by the DJ that isn't in the library. */
 export interface NewSong {
   artist: string;
@@ -248,6 +257,7 @@ export const api = {
   addFolders: (paths: string[]) => invoke<string[]>("add_folders", { paths }),
   removeFolder: (path: string) => invoke<string[]>("remove_folder", { path }),
   rescan: () => invoke<void>("rescan"),
+  listDirs: (path: string | null) => invoke<DirEntry[]>("list_dirs", { path }),
   play: (ids: string[], start = 0) => invoke<void>("play_tracks", { ids, start }),
   enqueue: (ids: string[], next: boolean) => invoke<void>("enqueue", { ids, next }),
   player: (action: "play" | "pause" | "toggle" | "next" | "prev") => invoke<void>("player", { action }),

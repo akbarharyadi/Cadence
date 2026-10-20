@@ -1,11 +1,9 @@
 <script lang="ts">
-  import { open } from "@tauri-apps/plugin-dialog";
   import Icon from "$lib/components/Icon.svelte";
   import { app } from "$lib/store.svelte";
 
   async function addFolder() {
-    const picked = await open({ directory: true, multiple: true, title: "Add music folders" });
-    if (picked) await app.addFolders(Array.isArray(picked) ? picked : [picked]);
+    await app.pickFolders();
   }
 </script>
 

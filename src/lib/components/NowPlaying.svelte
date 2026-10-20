@@ -19,11 +19,75 @@
   const quality = $derived(src ? qualityOf(src.codec, src.sampleRate) : "");
   const detail = $derived(src ? `${src.bits ? `${src.bits}-bit/` : ""}${khz(src.sampleRate)} ${src.codec}` : "");
   const sp = $derived(signalPath(s));
+
+  // Swipe down to close (phones), like Apple Music: the sheet follows the finger and the page
+  // behind shows through; past a third of the screen, or a quick flick, it slides away.
+  let pull = $state(0);
+  let pulling = $state(false);
+  let startY = 0;
+  let startX = 0;
+  let startAt = 0;
+  let decided = false;
+
+  function touchStart(e: TouchEvent) {
+    const target = e.target as HTMLElement;
+    // Leave sliders, buttons' own gestures and scrolled lyrics alone.
+    if (target.closest("input, .slider")) return;
+    const scroller = target.closest<HTMLElement>(".lyrics, [data-scroll]");
+    if (scroller && scroller.scrollTop > 0) return;
+    pulling = true;
+    decided = false;
+    startY = e.touches[0].clientY;
+    startX = e.touches[0].clientX;
+    startAt = performance.now();
+  }
+  function touchMove(e: TouchEvent) {
+    if (!pulling) return;
+    const dy = e.touches[0].clientY - startY;
+    const dx = e.touches[0].clientX - startX;
+    if (!decided) {
+      if (Math.abs(dy) < 8 && Math.abs(dx) < 8) return;
+      // Only a mostly-downward drag closes; sideways or upward drags scroll as usual.
+      decided = true;
+      if (dy <= 0 || Math.abs(dx) > dy) {
+        pulling = false;
+        return;
+      }
+    }
+    if (e.cancelable) e.preventDefault();
+    pull = Math.max(0, dy);
+  }
+  function touchEnd() {
+    if (!pulling) return;
+    pulling = false;
+    const speed = pull / Math.max(1, performance.now() - startAt);
+    if (pull > window.innerHeight / 3 || (pull > 60 && speed > 0.6)) {
+      pull = window.innerHeight;
+      setTimeout(() => (app.nowPlayingOpen = false), 260);
+    } else {
+      pull = 0;
+    }
+  }
+  const progress = $derived(Math.min(1, pull / (typeof window === "undefined" ? 800 : window.innerHeight)));
 </script>
 
 <svelte:window onkeydown={(e) => e.key === "Escape" && (app.nowPlayingOpen = false)} />
 
-<div class="np" class:with-lyrics={app.lyricsOpen}>
+{#if pull > 0}<div class="behind" style="opacity: {0.6 * (1 - progress)}" aria-hidden="true"></div>{/if}
+<div
+  class="np"
+  class:with-lyrics={app.lyricsOpen}
+  class:pulled={pull > 0}
+  class:settling={!pulling}
+  role="dialog"
+  aria-label="Now Playing"
+  tabindex="-1"
+  style={pull > 0 ? `transform: translateY(${pull}px); border-radius: ${Math.min(28, pull / 4)}px;` : ""}
+  ontouchstart={touchStart}
+  ontouchmove={touchMove}
+  ontouchend={touchEnd}
+  ontouchcancel={touchEnd}
+>
   {#if art}<div class="bg" style="background-image: url('{art}')"></div>{/if}
   <div class="shade"></div>
 
@@ -105,6 +169,23 @@
     background: var(--ink);
     color: white;
     animation: rise 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  /* While being pulled down: follows the finger; on release it glides to its place. */
+  .np.pulled {
+    animation: none;
+    box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.5);
+  }
+  .np.settling {
+    transition:
+      transform 0.28s cubic-bezier(0.2, 0.8, 0.2, 1),
+      border-radius 0.28s;
+  }
+  .behind {
+    position: fixed;
+    inset: 0;
+    z-index: 39;
+    background: #000;
+    pointer-events: none;
   }
   @keyframes rise {
     from {

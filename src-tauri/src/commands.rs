@@ -61,6 +61,77 @@ pub fn add_folders(app: AppHandle, state: AppStateRef, paths: Vec<String>) -> Ve
     state.settings.lock().folders.clone()
 }
 
+/// A folder in the in-app folder browser (phones have no usable system folder picker).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirEntry {
+    pub name: String,
+    pub path: String,
+    /// Music files directly inside (not in subfolders).
+    pub songs: usize,
+    pub has_folders: bool,
+}
+
+/// The subfolders of `path`, or with no path the places to start from: internal storage and any
+/// SD card or USB drive (on Android), or the user's Music folder and drives elsewhere.
+#[tauri::command]
+pub fn list_dirs(path: Option<String>) -> Result<Vec<DirEntry>, String> {
+    const AUDIO: [&str; 10] = ["flac", "alac", "wav", "aif", "aiff", "mp3", "m4a", "aac", "ogg", "opus"];
+    let is_audio = |p: &Path| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| AUDIO.contains(&e.to_ascii_lowercase().as_str()))
+    };
+    let entry = |dir: PathBuf, name: String| {
+        let mut songs = 0;
+        let mut has_folders = false;
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    has_folders = true;
+                } else if is_audio(&p) {
+                    songs += 1;
+                }
+            }
+        }
+        DirEntry { name, path: dir.to_string_lossy().into_owned(), songs, has_folders }
+    };
+    let Some(path) = path else {
+        let mut roots = Vec::new();
+        #[cfg(target_os = "android")]
+        {
+            roots.push(entry(PathBuf::from("/storage/emulated/0"), "Phone storage".into()));
+            // SD cards and USB drives show up as /storage/XXXX-XXXX.
+            if let Ok(rd) = std::fs::read_dir("/storage") {
+                for e in rd.flatten() {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if name != "emulated" && name != "self" && e.path().is_dir() {
+                        roots.push(entry(e.path(), format!("SD card ({name})")));
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            roots.push(entry(PathBuf::from(home), "Home".into()));
+        }
+        return Ok(roots);
+    };
+    let rd = std::fs::read_dir(&path).map_err(|e| format!("Can't open {path}: {e}"))?;
+    let mut dirs: Vec<DirEntry> = rd
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            // Hidden and app-private folders are never music folders.
+            (!name.starts_with('.') && name != "Android").then(|| entry(e.path(), name))
+        })
+        .collect();
+    dirs.sort_by_key(|d| d.name.to_lowercase());
+    Ok(dirs)
+}
+
 #[tauri::command]
 pub fn remove_folder(app: AppHandle, state: AppStateRef, path: String) -> Vec<String> {
     state.settings.lock().folders.retain(|f| *f != path);

@@ -73,7 +73,7 @@ fn endpoint(s: &AiSettings) -> Result<Endpoint, String> {
 }
 
 fn client(timeout: u64) -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
+    crate::net::builder()
         .timeout(Duration::from_secs(timeout))
         .user_agent(concat!("Cadence/", env!("CARGO_PKG_VERSION")))
         .build()

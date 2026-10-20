@@ -424,8 +424,11 @@
     opacity: 0;
     transition: opacity 0.15s;
   }
-  .art:hover .expand {
-    opacity: 1;
+  /* Only with a mouse: on touch screens the hover state sticks after a tap. */
+  @media (hover: hover) {
+    .art:hover .expand {
+      opacity: 1;
+    }
   }
   .meta {
     min-width: 0;

@@ -303,6 +303,24 @@ input[type="checkbox"] {
 ::view-transition-new(root) {
   animation: none;
 }
+/* The tab bar and the player get layers of their own, painted above the moving page and held
+   still: otherwise the page snapshot slides over them and they flicker. */
+.tabs {
+  view-transition-name: tabbar;
+}
+.dock {
+  view-transition-name: dock;
+}
+::view-transition-group(tabbar),
+::view-transition-group(dock),
+::view-transition-new(tabbar),
+::view-transition-new(dock) {
+  animation: none;
+}
+::view-transition-old(tabbar),
+::view-transition-old(dock) {
+  display: none;
+}
 ::view-transition-group(page) {
   animation-duration: 0.32s;
 }
