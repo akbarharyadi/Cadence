@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Darkens the blurred cover, a little more on the right where the buttons are (like the mini player). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <gradient android:angle="0" android:startColor="#590A0B14" android:endColor="#A60A0B14" />
+</shape>

@@ -230,11 +230,14 @@ impl Renderer {
 
 /// What keeps the device stream alive.
 pub enum Backend {
-    /// Windows shared mode (through the system mixer), via cpal.
+    /// Shared mode (through the system mixer), via cpal.
     Shared(#[allow(dead_code)] cpal::Stream),
     /// WASAPI exclusive mode, straight to the device.
     #[cfg(windows)]
     Exclusive(#[allow(dead_code)] super::exclusive::ExclusiveStream),
+    /// macOS / Linux direct output: the device itself runs at the song's rate (see [`open_direct`]).
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    Direct(#[allow(dead_code)] cpal::Stream),
 }
 
 pub struct Output {
@@ -251,22 +254,150 @@ impl Output {
     pub fn exclusive(&self) -> bool {
         #[cfg(windows)]
         return matches!(self.backend, Backend::Exclusive(_));
-        #[cfg(not(windows))]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        return matches!(self.backend, Backend::Direct(_));
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
         false
     }
 }
 
-/// Opens the default device in Windows shared mode at its mix format.
+/// How much of the music a sample format keeps (lower is better; 9 = unusable).
+fn rank(f: SampleFormat) -> u8 {
+    match f {
+        SampleFormat::F32 => 0,
+        SampleFormat::I32 => 1,
+        SampleFormat::I24 => 2,
+        SampleFormat::F64 => 3,
+        SampleFormat::I16 => 4,
+        SampleFormat::U16 => 5,
+        _ => 9,
+    }
+}
+
+/// The most precise format the device takes at exactly `rate` with `channels`, if any.
+fn config_at(device: &cpal::Device, rate: u32, channels: u16) -> Option<cpal::SupportedStreamConfig> {
+    device
+        .supported_output_configs()
+        .ok()?
+        .filter(|c| c.channels() == channels && c.min_sample_rate() <= rate && rate <= c.max_sample_rate())
+        .filter(|c| rank(c.sample_format()) < 9)
+        .min_by_key(|c| rank(c.sample_format()))
+        .map(|c| c.with_sample_rate(rate))
+}
+
+/// The device's own rate and channels, in the most precise sample format it accepts there.
+/// Some systems (often Linux) suggest 16-bit first, which would cut 24-bit music down; float or
+/// 32/24-bit keeps every bit, and the system mixer takes it from there.
+fn best_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
+    let default = device.default_output_config()?;
+    Ok(match config_at(device, default.sample_rate(), default.channels()) {
+        Some(b) if rank(b.sample_format()) < rank(default.sample_format()) => b,
+        _ => default,
+    })
+}
+
+fn device_name(device: &cpal::Device) -> String {
+    device
+        .description()
+        .map(|d| d.name().to_string())
+        .unwrap_or_else(|_| "Speakers".into())
+}
+
+/// Opens the default device in shared mode (through the system mixer) at its own rate.
 pub fn open_shared(shared: Arc<Shared>) -> Result<Output> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
         .ok_or_else(|| anyhow!("no output device"))?;
-    let name = device
-        .description()
-        .map(|d| d.name().to_string())
-        .unwrap_or_else(|_| "Speakers".into());
-    let supported = device.default_output_config()?;
+    let supported = best_config(&device)?;
+    log::info!("shared output format: {} at {} Hz", supported.sample_format(), supported.sample_rate());
+    let (stream, prod, rate, channels) = start(&device, supported, shared)?;
+    Ok(Output {
+        backend: Backend::Shared(stream),
+        prod,
+        rate,
+        channels,
+        device: device_name(&device),
+        bits: None,
+    })
+}
+
+/// Direct output on macOS and Linux: the device runs at the song's own rate, so nothing resamples it.
+///
+/// - macOS: opening a stream at a rate makes Core Audio switch the device to it (as Audio MIDI Setup
+///   would), in the device's most precise format. Other apps share that rate meanwhile.
+/// - Linux: plays to the sound card's ALSA `hw:` device, around PulseAudio/PipeWire. That needs the
+///   card free; while the sound server holds it, opening fails and Cadence falls back to shared mode.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn open_direct(shared: Arc<Shared>, rate: u32) -> Result<Output> {
+    let host = cpal::default_host();
+    #[cfg(target_os = "macos")]
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| anyhow!("no output device"))?;
+    #[cfg(target_os = "linux")]
+    let device = hardware_device(&host, rate)?;
+    let channels = device.default_output_config().map(|c| c.channels()).unwrap_or(2);
+    let supported = config_at(&device, rate, channels)
+        .or_else(|| config_at(&device, rate, 2))
+        .ok_or_else(|| anyhow!("{} can't play {rate} Hz", device_name(&device)))?;
+    let format = supported.sample_format();
+    log::info!("direct output format: {format} at {rate} Hz");
+    let bits = match format {
+        SampleFormat::I16 | SampleFormat::U16 => Some(16),
+        SampleFormat::I24 => Some(24),
+        SampleFormat::I32 => Some(32),
+        _ => None,
+    };
+    let (stream, prod, rate, channels) = start(&device, supported, shared)?;
+    Ok(Output {
+        backend: Backend::Direct(stream),
+        prod,
+        rate,
+        channels,
+        device: device_name(&device),
+        bits,
+    })
+}
+
+/// The sound card to play to directly: its ALSA `hw:` device (no conversion at all). A USB DAC comes
+/// first, then anything but HDMI (monitors are rarely the speakers), and one that takes `rate`.
+#[cfg(target_os = "linux")]
+fn hardware_device(host: &cpal::Host, rate: u32) -> Result<cpal::Device> {
+    let mut cards: Vec<(u8, cpal::Device)> = host
+        .output_devices()?
+        .filter_map(|d| {
+            let id = d.id().ok()?.to_string();
+            let pcm = id.split_once(':').map_or(id.as_str(), |(_, p)| p).to_string();
+            if !pcm.starts_with("hw:") {
+                return None;
+            }
+            let desc = format!("{} {pcm}", device_name(&d)).to_lowercase();
+            let score = if desc.contains("usb") {
+                0
+            } else if desc.contains("hdmi") {
+                2
+            } else {
+                1
+            };
+            Some((score, d))
+        })
+        .collect();
+    cards.sort_by_key(|(score, _)| *score);
+    cards
+        .iter()
+        .find(|(_, d)| config_at(d, rate, 2).is_some())
+        .or(cards.first())
+        .map(|(_, d)| d.clone())
+        .ok_or_else(|| anyhow!("no sound card found"))
+}
+
+/// Builds and starts a stream in `supported`'s format, fed by a new renderer.
+fn start(
+    device: &cpal::Device,
+    supported: cpal::SupportedStreamConfig,
+    shared: Arc<Shared>,
+) -> Result<(cpal::Stream, HeapProd<f32>, u32, usize)> {
     let format = supported.sample_format();
     let config: StreamConfig = supported.into();
     let (rate, channels) = (config.sample_rate, config.channels as usize);
@@ -275,23 +406,16 @@ pub fn open_shared(shared: Arc<Shared>) -> Result<Output> {
     let (prod, cons) = HeapRb::<f32>::new((rate as usize / 2) * channels).split();
     let renderer = Renderer::new(cons, shared.clone(), channels, rate, !float);
     let stream = match format {
-        SampleFormat::F32 => build_stream::<f32>(&device, config, renderer, shared),
-        SampleFormat::F64 => build_stream::<f64>(&device, config, renderer, shared),
-        SampleFormat::I16 => build_stream::<i16>(&device, config, renderer, shared),
-        SampleFormat::I32 => build_stream::<i32>(&device, config, renderer, shared),
-        SampleFormat::I24 => build_stream::<cpal::I24>(&device, config, renderer, shared),
-        SampleFormat::U16 => build_stream::<u16>(&device, config, renderer, shared),
+        SampleFormat::F32 => build_stream::<f32>(device, config, renderer, shared),
+        SampleFormat::F64 => build_stream::<f64>(device, config, renderer, shared),
+        SampleFormat::I16 => build_stream::<i16>(device, config, renderer, shared),
+        SampleFormat::I32 => build_stream::<i32>(device, config, renderer, shared),
+        SampleFormat::I24 => build_stream::<cpal::I24>(device, config, renderer, shared),
+        SampleFormat::U16 => build_stream::<u16>(device, config, renderer, shared),
         other => return Err(anyhow!("unsupported device sample format {other}")),
     }?;
     stream.play()?;
-    Ok(Output {
-        backend: Backend::Shared(stream),
-        prod,
-        rate,
-        channels,
-        device: name,
-        bits: None,
-    })
+    Ok((stream, prod, rate, channels))
 }
 
 fn build_stream<T>(

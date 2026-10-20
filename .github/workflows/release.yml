@@ -1,4 +1,4 @@
-# Builds Cadence for Windows, macOS and Linux and attaches the installers to a GitHub Release.
+# Builds Cadence for Windows, macOS, Linux and Android and attaches the installers to a GitHub Release.
 # Run it by pushing a version tag (git tag v0.1.0 && git push origin v0.1.0), or by hand from the Actions tab.
 name: Release
 
@@ -66,8 +66,62 @@ jobs:
             - Windows: the `.exe` installer (`_x64-setup.exe`).
             - macOS (Apple Silicon and Intel): the `.dmg`. The app isn't signed by Apple yet: the first time, right-click Cadence in Applications and choose **Open**.
             - Linux: the `.AppImage` (any distro; make it executable) or the `.deb` (Debian/Ubuntu).
+            - Android 8 or newer (64-bit phones): the `.apk`. Allow installs from your browser or file manager when asked.
 
             More at https://cadence.akbarharyadi.com
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+  # Android: a signed APK for 64-bit ARM phones, added to the same release once the desktop builds made it.
+  android:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build the APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          CADENCE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CADENCE_KEY_ALIAS: cadence
+        run: |
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          export CADENCE_KEYSTORE="$RUNNER_TEMP/release.jks"
+          pnpm tauri android build --apk --target aarch64
+
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          tag="${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+          tag="${tag:-v$version}"
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk -name '*release*.apk' | head -1)
+          cp "$apk" "Cadence_${version}_android-arm64.apk"
+          gh release upload "$tag" "Cadence_${version}_android-arm64.apk" --clobber

@@ -29,8 +29,8 @@ if (path) {
 
 // ---------- downloads ----------
 const ua = navigator.userAgent;
-const os = /Windows/.test(ua) ? "windows" : /Mac OS X|Macintosh/.test(ua) ? "mac" : /Linux|X11/.test(ua) && !/Android/.test(ua) ? "linux" : null;
-const names = { windows: "Windows", mac: "macOS", linux: "Linux" };
+const os = /Android/.test(ua) ? "android" : /Windows/.test(ua) ? "windows" : /iPhone|iPad/.test(ua) ? null : /Mac OS X|Macintosh/.test(ua) ? "mac" : /Linux|X11/.test(ua) ? "linux" : null;
+const names = { windows: "Windows", mac: "macOS", linux: "Linux", android: "Android" };
 
 /** Picks the right file from a GitHub release for each system. */
 function assetFor(assets, system) {
@@ -38,6 +38,7 @@ function assetFor(assets, system) {
   if (system === "windows") return find(/x64-setup\.exe$/i) || find(/\.msi$/i);
   if (system === "mac") return find(/universal\.dmg$/i) || find(/\.dmg$/i);
   if (system === "linux") return find(/\.AppImage$/i) || find(/\.deb$/i);
+  if (system === "android") return find(/\.apk$/i);
 }
 
 async function loadRelease() {

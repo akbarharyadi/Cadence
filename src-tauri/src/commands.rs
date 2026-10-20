@@ -72,6 +72,8 @@ pub fn remove_folder(app: AppHandle, state: AppStateRef, path: String) -> Vec<St
 
 #[tauri::command]
 pub fn rescan(app: AppHandle) {
+    // Folders that couldn't be watched before (e.g. no permission yet on a phone) are retried too.
+    crate::jobs::watch_folders(app.clone());
     start_scan(app);
 }
 
@@ -581,12 +583,18 @@ pub fn set_close_to_tray(state: AppStateRef, enabled: bool) {
 // Async on purpose: creating a window from a synchronous command deadlocks on Windows.
 #[tauri::command]
 pub async fn toggle_mini(app: AppHandle) {
+    #[cfg(desktop)]
     crate::tray::toggle_mini(&app);
+    #[cfg(mobile)]
+    let _ = app;
 }
 
 #[tauri::command]
 pub fn show_main(app: AppHandle) {
+    #[cfg(desktop)]
     crate::tray::show_main(&app);
+    #[cfg(mobile)]
+    let _ = app;
 }
 
 #[tauri::command]

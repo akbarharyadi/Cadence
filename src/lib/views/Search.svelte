@@ -16,9 +16,12 @@
 </script>
 
 <div class="page">
-  <h1 class="page-title">“{query}”</h1>
+  <!-- Phones have no sidebar search box, so the page has its own. -->
+  <input class="field page-search" type="search" placeholder="Search your music" value={query} aria-label="Search your music"
+    oninput={(e) => (app.view = { name: "search", query: e.currentTarget.value })} />
+  {#if query.trim()}<h1 class="page-title">“{query}”</h1>{/if}
 
-  {#if !albums.length && !songs.length && !artists.length}
+  {#if q && !albums.length && !songs.length && !artists.length}
     <p class="secondary empty">Nothing in your library matches. Try part of a title, an artist or an album name.</p>
   {/if}
 
@@ -50,6 +53,19 @@
   .empty {
     margin-top: 14px;
   }
+  .page-search {
+    display: none;
+    width: 100%;
+    font-size: 16px;
+    padding: 10px 14px;
+    border-radius: 12px;
+    margin-bottom: 18px;
+  }
+  @media (max-width: 720px) {
+    .page-search {
+      display: block;
+    }
+  }
   .section-title {
     margin: 34px 0 16px;
   }
@@ -73,5 +89,12 @@
   }
   .chip:hover {
     background: var(--active);
+  }
+  /* Phones: two albums per row. */
+  @media (max-width: 720px) {
+    .grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+      gap: 20px 14px !important;
+    }
   }
 </style>

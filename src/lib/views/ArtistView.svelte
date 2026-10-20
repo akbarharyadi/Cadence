@@ -48,7 +48,6 @@
 <style>
   .artist-page {
     padding: 64px 44px 40px;
-    max-width: 1500px;
   }
   .hero {
     display: flex;
@@ -103,5 +102,35 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
     gap: 30px 24px;
+  }
+  /* Phones: cover on top, text below. */
+  @media (max-width: 720px) {
+    .hero {
+      display: flex !important;
+      flex-direction: column;
+      align-items: flex-start !important;
+      gap: 18px !important;
+      margin-bottom: 28px;
+    }
+    .hero .portrait {
+      width: min(56vw, 220px) !important;
+      height: auto !important;
+      aspect-ratio: 1;
+      align-self: center;
+    }
+    h1 {
+      font-size: 30px !important;
+      max-width: none !important;
+    }
+    .actions {
+      flex-wrap: wrap;
+    }
+  }
+  /* Phones: two albums per row. */
+  @media (max-width: 720px) {
+    .grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+      gap: 20px 14px !important;
+    }
   }
 </style>

@@ -293,4 +293,13 @@
       height: 100%;
     }
   }
+  /* Phones: the album column would squeeze the titles; it's still one tap away in the menu. */
+  @media (max-width: 720px) {
+    .album {
+      display: none;
+    }
+    .row {
+      padding: 0 6px;
+    }
+  }
 </style>

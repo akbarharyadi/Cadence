@@ -41,8 +41,9 @@
     { value: "highpass", label: "High cut" },
   ];
 
-  /** Direct output (WASAPI exclusive mode) exists only on Windows. */
-  const isWindows = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
+  /** Direct output: WASAPI exclusive on Windows, device rate switching on macOS, ALSA hw on Linux (not Android). */
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  const platform = ua.includes("Windows") ? "windows" : ua.includes("Android") ? "android" : ua.includes("Mac OS") ? "mac" : ua.includes("Linux") ? "linux" : "other";
 
   const tone = $derived(app.status?.output.tone ?? null);
 
@@ -132,19 +133,35 @@
   <SignalFlow onstage={scrollTo} />
 
   {#if dsp && eq}
-    <!-- Direct output (WASAPI exclusive: Windows only) -->
-    {#if isWindows}
+    <!-- Direct output (not on Android) -->
+    {#if platform === "windows" || platform === "mac" || platform === "linux"}
     <section id="sound-output">
       <div class="title-row">
         <div>
           <h2 class="section-title">Direct output</h2>
-          <p class="desc">
-            Send music straight to your device at each song’s own sample rate, skipping the Windows mixer (WASAPI exclusive mode).
-            With Sound Check, the equalizer and crossfeed off and volume at 100%, every sample arrives exactly as it is in the file.
-          </p>
-          <p class="hint">
-            While Cadence plays, other apps can’t make sound on this device. Cadence lets go of it 20 seconds after you pause.
-          </p>
+          {#if platform === "windows"}
+            <p class="desc">
+              Send music straight to your device at each song’s own sample rate, skipping the Windows mixer (WASAPI exclusive mode).
+              With Sound Check, the equalizer and crossfeed off and volume at 100%, every sample arrives exactly as it is in the file.
+            </p>
+            <p class="hint">
+              While Cadence plays, other apps can’t make sound on this device. Cadence lets go of it 20 seconds after you pause.
+            </p>
+          {:else if platform === "mac"}
+            <p class="desc">
+              Switch your output device to each song’s own sample rate, so macOS never resamples it (like setting the rate in Audio MIDI Setup, done for you).
+              With Sound Check, the equalizer and crossfeed off and volume at 100%, every sample arrives exactly as it is in the file.
+            </p>
+            <p class="hint">Other apps keep playing, at the rate of the current song.</p>
+          {:else}
+            <p class="desc">
+              Play straight to your sound card (its ALSA hw device) at each song’s own sample rate, around PulseAudio or PipeWire.
+              A USB DAC is used first. With Sound Check, the equalizer and crossfeed off and volume at 100%, every sample arrives exactly as it is in the file.
+            </p>
+            <p class="hint">
+              The card has to be free: while another app holds it, Cadence plays through the system mixer instead. Cadence lets go of it 20 seconds after you pause.
+            </p>
+          {/if}
         </div>
         <Toggle checked={dsp.exclusive} label="Direct output" onchange={(v) => app.updateDsp((d) => (d.exclusive = v))} />
       </div>

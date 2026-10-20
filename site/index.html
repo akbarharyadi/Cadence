@@ -6,7 +6,7 @@
     <title>Cadence: a lossless music player for your own files</title>
     <meta
       name="description"
-      content="Cadence plays your FLAC and other music files exactly as they were recorded: bit-perfect output, gapless albums, Sound Check, synced karaoke lyrics, mixes by sound and an optional AI DJ. Free and open source for Windows, macOS and Linux."
+      content="Cadence plays your FLAC and other music files exactly as they were recorded: bit-perfect output, gapless albums, Sound Check, synced karaoke lyrics, mixes by sound and an optional AI DJ. Free and open source for Windows, macOS, Linux and Android."
     />
     <meta property="og:title" content="Cadence: a lossless music player for your own files" />
     <meta property="og:description" content="Bit-perfect, gapless, synced lyrics and mixes by sound. Free and open source." />
@@ -52,10 +52,10 @@
             follows every word of the lyrics, and turns your library into mixes by how the songs sound.
           </p>
           <div class="cta">
-            <a class="button" id="download-main" href="#download">Download for your computer</a>
+            <a class="button" id="download-main" href="#download">Download Cadence</a>
             <a class="ghost" href="https://github.com/akbarharyadi/cadence">Source code on GitHub</a>
           </div>
-          <p class="fine" id="download-note">Free and open source. Windows, macOS and Linux.</p>
+          <p class="fine" id="download-note">Free and open source. Windows, macOS, Linux and Android.</p>
         </div>
         <figure class="shot hero-shot">
           <img src="/assets/home.jpg" width="1650" height="1075" alt="Cadence's Listen Now page with an album, the AI DJ and daily mixes" />
@@ -78,7 +78,7 @@
         <div class="copy">
           <h2>Hear the file, not the player</h2>
           <p>
-            Direct output sends each song to your device at its own sample rate, past the Windows mixer, so 24-bit masters arrive
+            Direct output sends each song to your device at its own sample rate, past the system mixer, so 24-bit masters arrive
             sample for sample. Turn on Sound Check and every song plays at the same loudness, measured with ReplayGain 2.0, and a
             gentle per-song tone keeps quieter songs full without pushing the voice back.
           </p>
@@ -122,7 +122,7 @@
         <h2 id="more-title">Everything else you'd expect</h2>
         <ul>
           <li><h3>Your library, your folders</h3><p>Add folders or drop them on the window. Cadence watches them and picks up new music by itself.</p></li>
-          <li><h3>Media keys and mini player</h3><p>Play from the keyboard, the Windows media overlay or a small always-on-top player.</p></li>
+          <li><h3>Media keys and mini player</h3><p>Play from the keyboard, the system media controls or a small always-on-top player. On Android: lock screen controls and a home screen widget.</p></li>
           <li><h3>Playlists and smart playlists</h3><p>Build them by hand, or with rules like "played often, not this month".</p></li>
           <li><h3>Edit song info</h3><p>Fix titles, artists and albums in the files themselves.</p></li>
           <li><h3>Scrobbling</h3><p>Keep a record of what you listen to on ListenBrainz.</p></li>
@@ -151,10 +151,13 @@
           <a class="platform" data-os="linux" href="https://github.com/akbarharyadi/cadence/releases/latest">
             <span class="os">Linux</span><span class="what">AppImage or .deb</span>
           </a>
+          <a class="platform" data-os="android" href="https://github.com/akbarharyadi/cadence/releases/latest">
+            <span class="os">Android</span><span class="what">Android 8 or newer, .apk</span>
+          </a>
         </div>
         <p class="fine">
           The macOS app isn't signed by Apple yet: the first time, right-click Cadence in Applications and choose Open. Direct
-          output (bit-perfect mode) is available on Windows.
+          output (bit-perfect mode) works on Windows, macOS and Linux. On Android, allow installs from your browser when asked.
         </p>
       </section>
     </main>

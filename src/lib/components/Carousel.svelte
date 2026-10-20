@@ -102,4 +102,10 @@
       scroll-behavior: auto;
     }
   }
+  /* Phones: swipe instead of arrow buttons. */
+  @media (max-width: 720px) {
+    .arrows {
+      display: none;
+    }
+  }
 </style>

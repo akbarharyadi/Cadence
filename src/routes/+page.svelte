@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { api, artUrl } from "$lib/api";
+  import { api, artUrl, khz, qualityOf } from "$lib/api";
   import { app } from "$lib/store.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import Icon from "$lib/components/Icon.svelte";
@@ -12,6 +12,7 @@
   import PlayerBar from "$lib/components/PlayerBar.svelte";
   import QueuePanel from "$lib/components/QueuePanel.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
+  import TabBar from "$lib/components/TabBar.svelte";
   import TitleBar from "$lib/components/TitleBar.svelte";
   import AlbumView from "$lib/views/AlbumView.svelte";
   import Albums from "$lib/views/Albums.svelte";
@@ -32,8 +33,49 @@
   let dropping = $state(false);
   let scrolled = $state(false);
 
+  // Android: report what's playing to the media notification, lock screen and widget, and take
+  // their button presses. Only sent when the song or play/pause changes, or every 15 s.
+  const android = typeof window !== "undefined" ? (window as unknown as { CadenceAndroid?: { update(json: string): void } }).CadenceAndroid : undefined;
+  let lastAndroidKey = "";
+  let lastAndroidAt = 0;
+  $effect(() => {
+    if (!android) return;
+    const t = app.current;
+    const s = app.status;
+    const playing = !!s?.playing;
+    const key = `${t?.id ?? ""}|${playing}|${s?.source?.sampleRate ?? 0}`;
+    const now = Date.now();
+    if (key === lastAndroidKey && now - lastAndroidAt < 15000) return;
+    lastAndroidKey = key;
+    lastAndroidAt = now;
+    android.update(
+      JSON.stringify({
+        title: t?.title ?? "",
+        artist: t?.artist ?? "",
+        album: t?.album ?? "",
+        art: app.currentAlbum?.art ?? "",
+        playing,
+        position: s?.position ?? 0,
+        duration: s?.duration ?? 0,
+        quality: s?.source ? `${qualityOf(s.source.codec, s.source.sampleRate)} ${s.source.bits ? `${s.source.bits}-bit/` : ""}${khz(s.source.sampleRate)}` : "",
+        accent: app.currentAlbum?.accent ?? "",
+      }),
+    );
+  });
+
   onMount(() => {
     app.init();
+    (window as unknown as { __cadenceMedia: (c: string) => void }).__cadenceMedia = (c: string) => {
+      if (c.startsWith("seek:")) app.seek(Number(c.slice(5)));
+      else if (c === "play" || c === "pause" || c === "next" || c === "prev") api.player(c);
+    };
+    // On a phone the first scan can run before the user has allowed access to their music; look
+    // again when Cadence comes back to the foreground while the library is still empty.
+    const retry = () => {
+      if (app.loaded && app.tracks.length === 0 && app.folders.length > 0 && !app.scan) api.rescan();
+    };
+    window.addEventListener("focus", retry);
+    document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && retry());
     // Drop folders or files anywhere on the window to import them.
     const unlisten = getCurrentWebview().onDragDropEvent((e) => {
       if (e.payload.type === "enter" || e.payload.type === "over") dropping = true;
@@ -77,6 +119,18 @@
 
   const empty = $derived(app.loaded && app.tracks.length === 0);
   const showSidebar = $derived(!empty || app.folders.length > 0);
+  // Phones (and very narrow windows) get a bottom tab bar instead of the sidebar.
+  let phone = $state(false);
+  $effect(() => {
+    // Android always gets the phone layout, whatever the width (and in landscape).
+    const android = navigator.userAgent.includes("Android");
+    if (android) document.documentElement.classList.add("phone");
+    const mq = matchMedia("(max-width: 720px)");
+    phone = android || mq.matches;
+    const on = () => (phone = android || mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  });
   const ambient = $derived(artUrl(app.themeAlbum?.artSmall));
 </script>
 
@@ -92,9 +146,9 @@
 
 <TitleBar />
 
-<div class="shell">
+<div class="shell" class:docked={!!app.current}>
   <div class="body">
-    {#if showSidebar}<Sidebar />{/if}
+    {#if showSidebar && !phone}<Sidebar />{/if}
     <div class="column">
     <!-- The top bar's backdrop sits outside the scrolling area so it reaches the window edge
          (over the scrollbar), under the window buttons. -->
@@ -140,6 +194,7 @@
     {#if app.queueOpen}<QueuePanel />{/if}
   </div>
   <PlayerBar />
+  {#if phone && showSidebar}<TabBar />{/if}
 </div>
 
 {#if app.nowPlayingOpen}<NowPlaying />{/if}
@@ -220,7 +275,11 @@
     min-width: 0;
     overflow-y: auto;
     position: relative;
-    /* Leave room for the floating player dock. */
+    padding-bottom: 32px;
+    transition: padding-bottom 0.3s;
+  }
+  /* Leave room for the floating player once something is queued. */
+  .docked .content {
     padding-bottom: 104px;
   }
   .topbar {

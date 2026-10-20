@@ -6,7 +6,7 @@ A music player for the files you own. Cadence plays FLAC and other lossless form
 follows every word of the lyrics, and turns your library into mixes by how the songs sound.
 
 **Website:** https://cadence.akbarharyadi.com · **Download:** [latest release](https://github.com/akbarharyadi/cadence/releases/latest)
-for Windows, macOS and Linux.
+for Windows, macOS, Linux and Android.
 
 ![Listen Now](site/assets/home.jpg)
 
@@ -14,8 +14,9 @@ for Windows, macOS and Linux.
 
 **Sound**
 - Lossless playback of FLAC, ALAC, WAV and AIFF (plus MP3, AAC and Ogg Vorbis), decoded to 32-bit float without loss.
-- **Direct output** (Windows, WASAPI exclusive): each song goes to the device at its own sample rate, past the Windows
-  mixer. With processing off it is bit-perfect, and Cadence says so.
+- **Direct output**: each song goes to the device at its own sample rate, past the system mixer. Windows uses WASAPI
+  exclusive mode, macOS switches the device's rate for you, Linux plays to the card's ALSA `hw:` device. With
+  processing off it is bit-perfect, and Cadence says so.
 - Gapless playback; optional crossfade between albums.
 - **Sound Check**: ReplayGain 2.0 loudness (tags or Cadence's own EBU R128 measurement), by album or by song.
 - **Tone per song**: gentle loudness compensation and a per-song "Smart EQ" from each song's measured tonal balance.
@@ -30,8 +31,10 @@ for Windows, macOS and Linux.
   radio, "songs that sound like this" and automatic mixes.
 - **AI DJ** (optional, your own key; Z.ai GLM by default, any OpenAI-compatible service): ask for music in your own
   words, daily mixes from your listening, and new music to buy.
-- Playlists and smart playlists, tag editing, ListenBrainz scrobbling, media keys and the Windows media overlay, a
+- Playlists and smart playlists, tag editing, ListenBrainz scrobbling, media keys and the system media controls, a
   mini player and the system tray.
+- **Android**: the same app on your phone, with lock screen and notification controls, the HyperOS / Android media
+  island, a home screen widget, and playback that keeps going with the screen off.
 
 ![Lyrics](site/assets/lyrics.jpg)
 
@@ -44,6 +47,7 @@ Download the installer for your system from the [latest release](https://github.
 | Windows 10/11 | `Cadence_<version>_x64-setup.exe` |
 | macOS (Apple Silicon and Intel) | `Cadence_<version>_universal.dmg` (unsigned: the first time, right-click the app and choose **Open**) |
 | Linux | `.AppImage` (any distro) or `.deb` (Debian/Ubuntu) |
+| Android 8+ (64-bit phones) | `Cadence_<version>_android-arm64.apk` (allow installs from your browser when asked) |
 
 ## Build from source
 
@@ -55,6 +59,9 @@ pnpm install
 pnpm tauri dev      # run in development (Vite on port 1430)
 pnpm tauri build    # make installers in src-tauri/target/release/bundle
 ```
+
+Android: `scripts/android-build.sh` (on Windows without Developer Mode; elsewhere `pnpm tauri android build --apk`).
+A release APK is signed with the keystore named in `src-tauri/gen/android/keystore.properties` (not committed).
 
 Releases are built by GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)) when a `v*` tag is pushed.
 

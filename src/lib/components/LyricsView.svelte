@@ -564,4 +564,21 @@
     display: flex;
     gap: 10px;
   }
+  @media (max-width: 720px) {
+    .line {
+      font-size: 24px;
+      padding: 6px 8px;
+    }
+    .pad {
+      height: 24vh;
+    }
+    .foot {
+      flex-wrap: wrap;
+      gap: 8px 14px;
+      padding: 6px 8px 8px;
+    }
+    .sing {
+      margin-left: 0;
+    }
+  }
 </style>

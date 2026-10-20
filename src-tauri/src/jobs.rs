@@ -280,7 +280,14 @@ pub fn watch_folders(app: AppHandle) {
         None,
         move |result: DebounceEventResult| {
             let Ok(events) = result else { return };
-            let relevant = events.iter().any(|e| {
+            // Only real changes count. Linux and Android also report files being *read*, which
+            // would make every scan (it reads the files) trigger the next one, forever.
+            let relevant = events.iter().filter(|e| {
+                matches!(
+                    e.kind,
+                    notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Remove(_)
+                ) && !matches!(e.kind, notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_)))
+            }).any(|e| {
                 e.paths
                     .iter()
                     .any(|p| p.is_dir() || crate::library::is_audio(p) || p.extension().is_none())

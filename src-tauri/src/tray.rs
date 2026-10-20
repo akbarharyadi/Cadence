@@ -81,7 +81,7 @@ pub fn toggle_mini<R: Runtime>(app: &AppHandle<R>) {
         let _ = w.close();
         return;
     }
-    let (w, h) = (380.0, 112.0);
+    let (w, h) = (420.0, 140.0);
     let built = WebviewWindowBuilder::new(app, MINI_LABEL, WebviewUrl::App("mini".into()))
         .title("Cadence mini player")
         .inner_size(w, h)

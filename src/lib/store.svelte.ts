@@ -1,4 +1,19 @@
 import { listen } from "@tauri-apps/api/event";
+import { flushSync } from "svelte";
+
+/** Top-level places (tabs and sidebar): switching between them crossfades instead of sliding. */
+const TOP_LEVEL = new Set(["home", "albums", "artists", "songs", "recent", "search", "sound", "settings"]);
+
+/** Runs a view change inside a view transition (see app.css), when the system allows motion. */
+function animate(kind: "forward" | "back" | "tab", change: () => void) {
+  const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
+  if (!doc.startViewTransition || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    change();
+    return;
+  }
+  document.documentElement.dataset.nav = kind;
+  doc.startViewTransition(() => flushSync(change));
+}
 import { api, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type DspSettings, type HistoryStats, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track } from "./api";
 
 export type View =
@@ -241,15 +256,23 @@ class AppState {
   }
 
   go(view: View) {
-    this.history.push(this.view);
-    this.view = view;
-    this.nowPlayingOpen = false;
-    document.querySelector(".content")?.scrollTo({ top: 0 });
+    // Typing in the search box updates the same page: no animation for that.
+    if (view.name === "search" && this.view.name === "search") {
+      this.view = view;
+      return;
+    }
+    const kind = TOP_LEVEL.has(view.name) ? "tab" : "forward";
+    animate(kind, () => {
+      this.history.push(this.view);
+      this.view = view;
+      this.nowPlayingOpen = false;
+      document.querySelector(".content")?.scrollTo({ top: 0 });
+    });
   }
 
   back() {
     const prev = this.history.pop();
-    if (prev) this.view = prev;
+    if (prev) animate("back", () => (this.view = prev));
   }
 
   showToast(message: string) {

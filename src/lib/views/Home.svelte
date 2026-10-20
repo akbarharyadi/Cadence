@@ -66,6 +66,70 @@
     }
   }
 
+  // ---------- header ----------
+  const hour = new Date().getHours();
+  const greeting = hour < 5 ? "Good night" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  const today = new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+  let djOpen = $state(false);
+
+  // ---------- quick picks: what you played lately, one tap away ----------
+  const quick = $derived.by(() => {
+    const ids = [...new Set([app.currentAlbum?.id, ...app.recentlyPlayed].filter(Boolean) as string[])];
+    const albums = ids.map((id) => app.albumById.get(id)).filter((a): a is Album => !!a);
+    // Fill up with the newest albums when there isn't much history yet.
+    for (const a of newest) {
+      if (albums.length >= 6) break;
+      if (!albums.some((b) => b.id === a.id)) albums.push(a);
+    }
+    return albums.slice(0, 6);
+  });
+
+  // ---------- top picks: a few big cards chosen for you ----------
+  interface Pick {
+    label: string;
+    title: string;
+    sub: string;
+    art: string | null;
+    tint: string | null;
+    open: () => void;
+    play: () => void;
+  }
+  const picks = $derived.by<Pick[]>(() => {
+    const out: Pick[] = [];
+    const fromAlbum = (label: string, a: Album): Pick => ({
+      label,
+      title: a.title,
+      sub: a.artist,
+      art: a.art,
+      tint: a.tint ?? a.accent,
+      open: () => app.go({ name: "album", id: a.id }),
+      play: () => app.playAlbum(a),
+    });
+    const fromTracks = (label: string, title: string, sub: string, tracks: Track[]): Pick => {
+      const album = tracks[0] ? app.albumById.get(tracks[0].albumId) : undefined;
+      return {
+        label,
+        title,
+        sub,
+        art: album?.art ?? null,
+        tint: album?.tint ?? album?.accent ?? null,
+        open: () => app.playTracks(tracks),
+        play: () => app.playTracks(tracks),
+      };
+    };
+    if (hero) out.push(fromAlbum(app.currentAlbum ? "Now playing" : app.recentlyPlayed.length ? "Continue listening" : "Newest in your library", hero));
+    if (app.aiMixes[0]) out.push(fromTracks("Made for you", app.aiMixes[0].title, app.aiMixes[0].reason, aiTracks(app.aiMixes[0])));
+    if (app.mixes[0]) out.push(fromTracks("Mix by sound", app.mixes[0].name, app.mixes[0].description, app.mixTracks(app.mixes[0])));
+    const fresh = newest.find((a) => a.id !== hero?.id);
+    if (fresh) out.push(fromAlbum("Just added", fresh));
+    // Something you haven't played lately, different each day.
+    const played = new Set(app.recentlyPlayed);
+    const unplayed = app.albums.filter((a) => !played.has(a.id) && a.id !== hero?.id && a.id !== fresh?.id);
+    if (unplayed.length) out.push(fromAlbum("Rediscover", unplayed[Math.floor(Date.now() / 86_400_000) % unplayed.length]));
+    if (app.mixes[1]) out.push(fromTracks("Mix by sound", app.mixes[1].name, app.mixes[1].description, app.mixTracks(app.mixes[1])));
+    return out;
+  });
+
   function shuffleAll() {
     app.playTracks(shuffled(app.tracks));
   }
@@ -105,37 +169,23 @@
 {/snippet}
 
 <div class="home">
-  {#if hero}
-    {@const playing = app.currentAlbum?.id === hero.id}
-    <section class="hero">
-      <button class="cover" onclick={() => app.go({ name: "album", id: hero.id })} aria-label="Open {hero.title}">
-        {#if hero.art}<img src={artUrl(hero.art)} alt="" />{:else}<Icon name="album" size={72} />{/if}
-      </button>
-      <div class="info">
-        <p class="state">{heroState}</p>
-        <h1>{hero.title}</h1>
-        <button class="artist" onclick={() => app.go({ name: "artist", artist: app.artistOf(hero.artist) })}>{hero.artist}</button>
-        <div class="facts">
-          <QualityBadge quality={hero.quality} detail={hero.format} />
-          <span>{hero.trackIds.length} songs, {formatDuration(hero.duration)}</span>
-        </div>
-        <div class="actions">
-          {#if playing}
-            <button class="pill" onclick={() => app.togglePlay()}>
-              <Icon name={app.status?.playing ? "pause" : "play"} size={15} />{app.status?.playing ? "Pause" : "Resume"}
-            </button>
-          {:else}
-            <button class="pill" onclick={() => app.playAlbum(hero)}><Icon name="play" size={15} />Play album</button>
-          {/if}
-          <button class="pill ghost" onclick={shuffleAll}><Icon name="shuffle" size={15} />Shuffle everything</button>
-        </div>
-      </div>
-    </section>
-  {/if}
+  <header class="greet">
+    <div>
+      <h1>{greeting}</h1>
+      <p class="date">{today}</p>
+    </div>
+    <div class="greet-actions">
+      {#if app.aiReady}
+        <button class="pill" class:ghost={!djOpen} onclick={() => (djOpen = !djOpen)} aria-expanded={djOpen}>
+          <Icon name="sparkle" size={15} />Ask the DJ
+        </button>
+      {/if}
+      <button class="icon-btn round" onclick={shuffleAll} aria-label="Shuffle everything" title="Shuffle everything"><Icon name="shuffle" size={18} /></button>
+    </div>
+  </header>
 
-  {#if app.aiReady}
+  {#if app.aiReady && (djOpen || asking || answer || askError)}
     <section class="dj">
-      <h2 class="section-title">Ask the DJ</h2>
       <form class="ask" onsubmit={(e) => { e.preventDefault(); ask(); }}>
         <Icon name="sparkle" size={18} />
         <input bind:value={request} placeholder="Describe what you want to hear" aria-label="Ask the DJ" disabled={asking} />
@@ -188,7 +238,59 @@
         </div>
       {/if}
     </section>
+  {/if}
 
+  {#if quick.length}
+    <section class="quick" aria-label="Quick picks">
+      {#each quick as a (a.id)}
+        {@const playing = app.currentAlbum?.id === a.id}
+        <div class="q" class:playing>
+          <button class="q-open" onclick={() => app.go({ name: "album", id: a.id })} oncontextmenu={(e) => app.albumMenu(e, a)}>
+            <span class="q-art">{#if a.artSmall}<img src={artUrl(a.artSmall)} alt="" loading="lazy" />{/if}</span>
+            <span class="q-title">{a.title}</span>
+          </button>
+          <button class="q-play" onclick={() => (playing ? app.togglePlay() : app.playAlbum(a))} aria-label="{playing && app.status?.playing ? 'Pause' : 'Play'} {a.title}">
+            {#if playing && app.status?.playing}<span class="bars" aria-hidden="true"><i></i><i></i><i></i></span>{:else}<Icon name="play" size={14} />{/if}
+          </button>
+        </div>
+      {/each}
+    </section>
+  {/if}
+
+  {#if picks.length}
+    <Carousel title="Top picks for you" gap={16}>
+      {#each picks as p, i (p.label + p.title + i)}
+        <div class="pick" style="--tint: {p.tint ?? '#24273d'}">
+          <button class="pick-art" onclick={p.open} aria-label="Open {p.title}">
+            {#if p.art}<img src={artUrl(p.art)} alt="" loading="lazy" />{:else}<Icon name="album" size={48} />{/if}
+          </button>
+          <div class="pick-body">
+            <span class="pick-label">{p.label}</span>
+            <span class="pick-title">{p.title}</span>
+            <span class="pick-sub">{p.sub}</span>
+            <button class="pick-play" onclick={p.play} aria-label="Play {p.title}"><Icon name="play" size={16} /></button>
+          </div>
+        </div>
+      {/each}
+    </Carousel>
+  {/if}
+
+  {#if app.mostPlayed.length >= 3}
+    <section class="row">
+      <h2 class="section-title">On repeat</h2>
+      <div class="songs">
+        {#each app.mostPlayed.slice(0, 9) as t, i (t.id)}
+          <button class="song" onclick={() => app.playTracks(app.mostPlayed, i)} oncontextmenu={(e) => app.trackMenu(e, app.mostPlayed, i)}>
+            <span class="song-art">{#if app.albumById.get(t.albumId)?.artSmall}<img src={artUrl(app.albumById.get(t.albumId)?.artSmall)} alt="" loading="lazy" />{/if}</span>
+            <span class="song-text"><span class="song-title">{t.title}</span><span class="song-artist">{t.artist}</span></span>
+            <span class="song-plays">{app.listening?.plays[t.id] ?? 0} {app.listening?.plays[t.id] === 1 ? "play" : "plays"}</span>
+          </button>
+        {/each}
+      </div>
+    </section>
+  {/if}
+
+  {#if app.aiReady}
     <Carousel title="Made for you today">
       {#snippet actions()}
         <button class="link" onclick={() => app.loadAiMixes(true)} disabled={app.aiMixesState === "loading"}>{app.aiMixesState === "loading" ? "Making mixes…" : "New mixes"}</button>
@@ -238,20 +340,6 @@
     </Carousel>
   {/if}
 
-  {#if app.mostPlayed.length >= 3}
-    <section class="row">
-      <h2 class="section-title">On repeat</h2>
-      <div class="songs">
-        {#each app.mostPlayed.slice(0, 9) as t, i (t.id)}
-          <button class="song" onclick={() => app.playTracks(app.mostPlayed, i)} oncontextmenu={(e) => app.trackMenu(e, app.mostPlayed, i)}>
-            <span class="song-art">{#if app.albumById.get(t.albumId)?.artSmall}<img src={artUrl(app.albumById.get(t.albumId)?.artSmall)} alt="" loading="lazy" />{/if}</span>
-            <span class="song-text"><span class="song-title">{t.title}</span><span class="song-artist">{t.artist}</span></span>
-            <span class="song-plays">{app.listening?.plays[t.id] ?? 0} {app.listening?.plays[t.id] === 1 ? "play" : "plays"}</span>
-          </button>
-        {/each}
-      </div>
-    </section>
-  {/if}
 
   {#if addedRow.length}
     <Carousel title="Recently added">
@@ -280,82 +368,246 @@
 </div>
 
 <style>
-  .home {
-    padding: 64px 44px 40px;
-    max-width: 1500px;
+  .greet {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 22px;
   }
-  .hero {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    align-items: end;
-    gap: 36px;
-    margin-bottom: 48px;
+  .greet h1 {
+    margin: 0;
+    font-family: var(--display);
+    font-size: clamp(30px, 3.4vw, 46px);
+    font-weight: 760;
+    font-variation-settings: "wdth" 86;
+    letter-spacing: -0.035em;
+    line-height: 1;
   }
-  .cover {
-    width: clamp(220px, 24vw, 320px);
-    aspect-ratio: 1;
-    border-radius: var(--r-lg);
-    overflow: hidden;
-    background: var(--surface);
-    display: grid;
-    place-items: center;
+  .date {
+    margin: 6px 0 0;
     color: var(--text-3);
-    box-shadow:
-      0 30px 60px rgba(0, 0, 0, 0.5),
-      0 10px 60px color-mix(in srgb, var(--accent) 25%, transparent);
-    transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+    font-size: 13.5px;
   }
-  .cover:hover {
-    transform: scale(1.015);
+  .greet-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: none;
   }
-  .cover img {
+  .icon-btn.round {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: var(--hover);
+  }
+
+  /* Quick picks: two or three columns of compact tiles. */
+  .quick {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin-bottom: 36px;
+  }
+  .q {
+    position: relative;
+    display: flex;
+    align-items: center;
+    height: 60px;
+    border-radius: var(--r-md);
+    background: color-mix(in srgb, var(--surface) 80%, transparent);
+    overflow: hidden;
+    transition: background 0.15s, transform 0.12s;
+  }
+  .q:hover {
+    background: var(--surface-2);
+  }
+  .q:active {
+    transform: scale(0.98);
+  }
+  .q-open {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    text-align: left;
+  }
+  .q-art {
+    width: 60px;
+    height: 60px;
+    flex: none;
+    background: var(--surface-2);
+  }
+  .q-art img {
     width: 100%;
     height: 100%;
     object-fit: cover;
   }
-  .info {
-    min-width: 0;
-    padding-bottom: 6px;
-  }
-  .state {
-    margin: 0 0 10px;
-    font-size: 13px;
+  .q-title {
     font-weight: 600;
+    font-size: 13.5px;
+    line-height: 1.25;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    padding-right: 4px;
+  }
+  .q-play {
+    width: 34px;
+    height: 34px;
+    margin-right: 10px;
+    flex: none;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: var(--accent);
+    color: #0d0e17;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .q:hover .q-play,
+  .q.playing .q-play {
+    opacity: 1;
+  }
+  .q.playing .q-title {
     color: var(--accent);
   }
-  h1 {
-    margin: 0;
-    font-family: var(--display);
-    font-size: clamp(28px, 3vw, 46px);
-    font-weight: 750;
-    font-variation-settings: "wdth" 88;
-    line-height: 1.02;
-    letter-spacing: -0.03em;
-    max-width: 22ch;
-    overflow-wrap: anywhere;
-  }
-  .artist {
-    margin-top: 10px;
-    font-size: 19px;
-    color: var(--text-2);
-    text-align: left;
-  }
-  .artist:hover {
-    color: var(--text);
-  }
-  .facts {
+  .bars {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px 18px;
-    margin-top: 14px;
-    font-size: 13px;
+    align-items: flex-end;
+    gap: 2px;
+    height: 12px;
+  }
+  .bars i {
+    width: 3px;
+    background: currentColor;
+    border-radius: 1px;
+    animation: bar 0.9s ease-in-out infinite alternate;
+  }
+  .bars i:nth-child(2) {
+    animation-delay: -0.3s;
+  }
+  .bars i:nth-child(3) {
+    animation-delay: -0.6s;
+  }
+  @keyframes bar {
+    from {
+      height: 3px;
+    }
+    to {
+      height: 12px;
+    }
+  }
+
+  /* Top picks: big cards, the panel below the cover takes the album's colour. */
+  .pick {
+    width: 250px;
+    border-radius: var(--r-lg);
+    overflow: hidden;
+    background: color-mix(in srgb, var(--tint) 70%, #0d0e17);
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.35);
+    transition: transform 0.15s;
+  }
+  .pick:active {
+    transform: scale(0.98);
+  }
+  .pick-art {
+    display: block;
+    width: 100%;
+    aspect-ratio: 1;
+    background: var(--surface);
     color: var(--text-3);
   }
-  .actions {
+  .pick-art img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .pick-body {
+    position: relative;
     display: flex;
-    gap: 10px;
-    margin-top: 22px;
+    flex-direction: column;
+    gap: 2px;
+    padding: 14px 58px 16px 16px;
+    min-height: 92px;
+  }
+  .pick-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.7);
+  }
+  .pick-title {
+    font-family: var(--display);
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.15;
+    letter-spacing: -0.015em;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .pick-sub {
+    font-size: 12.5px;
+    color: rgba(255, 255, 255, 0.65);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pick-play {
+    position: absolute;
+    right: 14px;
+    bottom: 16px;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: rgba(255, 255, 255, 0.92);
+    color: #0d0e17;
+  }
+
+  @media (max-width: 720px) {
+    .greet h1 {
+      font-size: 30px;
+    }
+    .greet .pill {
+      height: 34px;
+      padding: 0 14px;
+      font-size: 13px;
+    }
+    .quick {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-bottom: 30px;
+    }
+    .q {
+      height: 54px;
+    }
+    .q-art {
+      width: 54px;
+      height: 54px;
+    }
+    .q-title {
+      font-size: 12.5px;
+    }
+    .q-play {
+      display: none;
+    }
+    .pick {
+      width: 72vw;
+      max-width: 300px;
+    }
+    .songs {
+      grid-template-columns: 1fr !important;
+    }
+  }
+  .home {
+    padding: 64px 44px 40px;
   }
   .row {
     margin-bottom: 40px;

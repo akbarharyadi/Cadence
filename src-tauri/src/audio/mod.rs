@@ -479,9 +479,23 @@ impl Worker {
                     output::open_shared(self.shared.clone())
                 }
             },
-            #[cfg(not(windows))]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            (true, Some(rate)) => match output::open_direct(self.shared.clone(), self.device_rate(rate)) {
+                Ok(o) => {
+                    self.note = None;
+                    Ok(o)
+                }
+                Err(e) => {
+                    log::warn!("direct output failed: {e:#}");
+                    self.note = Some(format!(
+                        "Direct output isn’t available right now ({e}), so Cadence is playing through the system mixer."
+                    ));
+                    output::open_shared(self.shared.clone())
+                }
+            },
+            #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
             (true, Some(_)) => {
-                self.note = Some("Direct output is only available on Windows; Cadence is playing through the system mixer.".into());
+                self.note = Some("Direct output isn’t available here; Cadence is playing through the system mixer.".into());
                 output::open_shared(self.shared.clone())
             }
             _ => output::open_shared(self.shared.clone()),

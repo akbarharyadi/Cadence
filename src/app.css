@@ -213,7 +213,6 @@ img {
 /* Top padding leaves room for the sticky top bar (Back button, window drag area). */
 .page {
   padding: 60px 44px 56px;
-  max-width: 1500px;
 }
 
 /* ---------- Inputs ---------- */
@@ -273,4 +272,93 @@ input[type="range"].slider:focus {
 }
 input[type="checkbox"] {
   accent-color: var(--accent);
+}
+
+/* ---------- Phones (and very narrow windows) ---------- */
+@media (max-width: 720px) {
+  /* No window buttons on a phone; the system handles that. */
+  .titlebar {
+    display: none !important;
+  }
+  /* Pages: narrower margins, room for the status bar, the player and the tab bar. */
+  .content > :not(.topbar) {
+    padding-left: 16px !important;
+    padding-right: 16px !important;
+    padding-top: calc(52px + env(safe-area-inset-top)) !important;
+  }
+  .content {
+    padding-bottom: calc(150px + env(safe-area-inset-bottom)) !important;
+  }
+  .page-title {
+    font-size: 30px !important;
+  }
+}
+
+/* ---------- Page transitions (view transitions; see `animate` in store.svelte.ts) ---------- */
+/* Only the page area moves; the sidebar, player and tab bar stay put. */
+.content {
+  view-transition-name: page;
+}
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+}
+::view-transition-group(page) {
+  animation-duration: 0.32s;
+}
+/* Opening something: the new page slides in from the right, the old one drifts left and fades. */
+html[data-nav="forward"]::view-transition-old(page) {
+  animation: nav-out-left 0.24s cubic-bezier(0.4, 0, 1, 1) both;
+}
+html[data-nav="forward"]::view-transition-new(page) {
+  animation: nav-in-right 0.34s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+/* Going back: the reverse. */
+html[data-nav="back"]::view-transition-old(page) {
+  animation: nav-out-right 0.24s cubic-bezier(0.4, 0, 1, 1) both;
+}
+html[data-nav="back"]::view-transition-new(page) {
+  animation: nav-in-left 0.34s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+/* Switching tabs: a quick crossfade with a small rise. */
+html[data-nav="tab"]::view-transition-old(page) {
+  animation: nav-fade-out 0.14s ease-out both;
+}
+html[data-nav="tab"]::view-transition-new(page) {
+  animation: nav-rise 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) 0.05s both;
+}
+@keyframes nav-in-right {
+  from { transform: translateX(14%); opacity: 0; }
+}
+@keyframes nav-out-left {
+  to { transform: translateX(-6%); opacity: 0; }
+}
+@keyframes nav-in-left {
+  from { transform: translateX(-14%); opacity: 0; }
+}
+@keyframes nav-out-right {
+  to { transform: translateX(6%); opacity: 0; }
+}
+@keyframes nav-fade-out {
+  to { opacity: 0; }
+}
+@keyframes nav-rise {
+  from { transform: translateY(12px); opacity: 0; }
+}
+
+/* Touch feedback: things you tap give a little. */
+.card:active .art,
+.artist-chip:active .avatar,
+.mix-tile:active,
+.chip:active,
+.pill:active,
+.icon-btn:active {
+  transform: scale(0.96);
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
 }

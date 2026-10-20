@@ -75,4 +75,11 @@
     font-size: 12.5px;
     color: var(--text-2);
   }
+  /* Phones: two artists per row. */
+  @media (max-width: 720px) {
+    .grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+      gap: 20px 14px !important;
+    }
+  }
 </style>

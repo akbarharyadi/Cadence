@@ -13,6 +13,7 @@ mod secrets;
 pub mod sonic;
 mod state;
 pub mod tagedit;
+#[cfg(desktop)]
 mod tray;
 
 use std::sync::Arc;
@@ -90,6 +91,7 @@ fn status_hub(
                     duration: t.duration,
                 })
             });
+            #[cfg(desktop)]
             tray::set_tooltip(
                 &app,
                 now_playing
@@ -119,11 +121,13 @@ fn status_hub(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        // Opening Cadence again brings the running window forward instead of starting a second player.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            tray::show_main(app)
-        }))
+    let builder = tauri::Builder::default();
+    // Opening Cadence again brings the running window forward instead of starting a second player.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        tray::show_main(app)
+    }));
+    builder
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -136,6 +140,8 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(data_dir.join("art"))?;
+            #[cfg(target_os = "android")]
+            secrets::init(&data_dir);
             let settings: Settings = read_json(&data_dir.join("settings.json"));
             let cache: LibraryCache = read_json(&data_dir.join("library.json"));
             let history: History = read_json(&data_dir.join("history.json"));
@@ -188,7 +194,17 @@ pub fn run() {
                 .name("cadence-status".into())
                 .spawn(move || status_hub(handle, state, status_rx, media, scrobbler))?;
 
+            #[cfg(desktop)]
             tray::create(app.handle())?;
+            // On a phone the music lives in the shared Music folder; start with it.
+            #[cfg(target_os = "android")]
+            let has_folders = has_folders || {
+                let music = "/storage/emulated/0/Music".to_string();
+                let st = app.state::<Arc<AppState>>();
+                st.settings.lock().folders.push(music);
+                st.save_settings();
+                true
+            };
             if has_folders {
                 jobs::start_scan(app.handle().clone());
                 jobs::watch_folders(app.handle().clone());
@@ -197,6 +213,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             // Closing the main window keeps the music playing in the tray (unless turned off).
+            #[cfg(desktop)]
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     let state = window.app_handle().state::<Arc<AppState>>();

@@ -300,4 +300,99 @@
   .path.bitperfect {
     color: var(--gold);
   }
+  /* ---------- Phones: one column, like Apple Music on iPhone ---------- */
+  @media (max-width: 720px) {
+    .top {
+      height: 56px;
+      padding: 6px 10px 0;
+    }
+    .stage {
+      flex-direction: column;
+      justify-content: flex-start;
+      align-items: stretch;
+      gap: 0;
+      padding: 60px 24px 22px;
+    }
+    .left,
+    .with-lyrics .left {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 28px;
+      width: 100%;
+      flex: 1;
+      justify-content: center;
+    }
+    .cover,
+    .with-lyrics .cover {
+      width: 100%;
+      max-width: 440px;
+      align-self: center;
+      border-radius: 12px;
+    }
+    .info,
+    .with-lyrics .info {
+      width: 100%;
+    }
+    h1,
+    .with-lyrics h1 {
+      font-size: 24px;
+      margin-bottom: 4px;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .artist {
+      font-size: 17px;
+    }
+    .seek {
+      margin-top: 20px;
+    }
+    .transport {
+      margin-top: 8px;
+    }
+    .facts {
+      margin-top: 14px;
+      justify-content: center;
+      width: 100%;
+    }
+
+    /* Lyrics open: the words fill the screen, a compact player stays at the bottom. */
+    .with-lyrics .stage {
+      padding: 56px 16px 16px;
+    }
+    .with-lyrics .right {
+      order: 1;
+      flex: 1;
+      width: 100%;
+      max-width: none;
+      height: auto;
+      min-height: 0;
+    }
+    .with-lyrics .left {
+      order: 2;
+      flex: none;
+      gap: 0;
+    }
+    .with-lyrics .cover,
+    .with-lyrics .album,
+    .with-lyrics .facts {
+      display: none;
+    }
+    .with-lyrics h1 {
+      font-size: 17px;
+      -webkit-line-clamp: 1;
+      line-clamp: 1;
+    }
+    .with-lyrics .artist {
+      font-size: 14px;
+    }
+    .with-lyrics .seek {
+      margin-top: 10px;
+    }
+    .with-lyrics .transport {
+      margin-top: 2px;
+    }
+  }
 </style>

@@ -49,9 +49,6 @@
 {/if}
 
 <style>
-  .album {
-    max-width: 1500px;
-  }
   .hero {
     display: flex;
     align-items: flex-end;
@@ -127,5 +124,26 @@
     color: var(--text-3);
     font-size: 13px;
     padding: 12px 12px 0;
+  }
+  /* Phones: cover on top, text below. */
+  @media (max-width: 720px) {
+    .hero {
+      display: flex !important;
+      flex-direction: column;
+      align-items: flex-start !important;
+      gap: 18px !important;
+      margin-bottom: 28px;
+    }
+    .hero .cover {
+      width: min(76vw, 320px) !important;
+      align-self: center;
+    }
+    h1 {
+      font-size: 30px !important;
+      max-width: none !important;
+    }
+    .actions {
+      flex-wrap: wrap;
+    }
   }
 </style>
