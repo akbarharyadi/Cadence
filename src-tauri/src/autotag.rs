@@ -394,6 +394,30 @@ mod tests {
         }
     }
 
+    /// Looks up a real file and writes the result into a copy of it:
+    /// `CADENCE_AUTOTAG_FILE=path cargo test --lib autotag::tests::tags_a_copy -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn tags_a_copy() {
+        let Ok(src) = std::env::var("CADENCE_AUTOTAG_FILE") else { return };
+        let dir = std::env::temp_dir().join("cadence-autotag-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join(Path::new(&src).file_name().unwrap());
+        std::fs::copy(&src, &copy).unwrap();
+        let t = crate::library::read_track(&copy).expect("readable");
+        assert!(untagged(&t), "test file should be untagged");
+        let found = lookup(&t).expect("a match");
+        let cover = found.cover_url.as_deref().and_then(|u| download(u).ok());
+        println!("cover: {} bytes", cover.as_ref().map_or(0, Vec::len));
+        write(&copy, &found, cover).unwrap();
+        let after = crate::library::read_track(&copy).unwrap();
+        println!("{} | {} | {} | {:?} | track {:?} | art {}", after.artist, after.title, after.album, after.year, after.track_no, after.has_embedded_art);
+        assert_eq!(after.artist, found.artist);
+        assert!(after.has_embedded_art);
+        // The audio is untouched: same length.
+        assert!((after.duration - t.duration).abs() < 0.05);
+    }
+
     #[test]
     fn only_accepts_real_matches() {
         let hit = |name: &str, by: &str, secs: f64| Hit {

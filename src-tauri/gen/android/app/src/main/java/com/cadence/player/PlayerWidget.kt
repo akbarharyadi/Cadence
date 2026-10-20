@@ -6,13 +6,13 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
+import android.graphics.RectF
 import android.os.Build
 import android.os.SystemClock
 import android.view.View
@@ -57,11 +57,49 @@ class PlayerWidget : AppWidgetProvider() {
       return out
     }
 
+    /**
+     * The song as a row of rounded bars, filled in the album's colour up to where it's playing.
+     * The bar heights come from the song's title, so each song keeps its own shape.
+     */
+    private fun waveOf(title: String, progress: Float, accent: Int): Bitmap {
+      val w = 720
+      val h = 64
+      val bars = 54
+      val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+      val canvas = Canvas(out)
+      val random = java.util.Random(title.hashCode().toLong())
+      val step = w.toFloat() / bars
+      val barW = step * 0.56f
+      val played = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = accent }
+      val rest = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(80, 255, 255, 255) }
+      var level = 0.5f
+      for (i in 0 until bars) {
+        // A smooth random walk, lifted in the middle like most songs.
+        level = (level * 0.55f + random.nextFloat() * 0.45f)
+        val t = i / (bars - 1f)
+        val shape = 0.55f + 0.45f * kotlin.math.sin(Math.PI * t).toFloat()
+        val bh = (h * (0.18f + 0.82f * level * shape)).coerceIn(h * 0.14f, h.toFloat())
+        val x = i * step + (step - barW) / 2
+        val top = (h - bh) / 2
+        canvas.drawRoundRect(RectF(x, top, x + barW, top + bh), barW / 2, barW / 2, if (t <= progress) played else rest)
+      }
+      return out
+    }
+
     private fun command(context: Context, command: String, code: Int): PendingIntent {
       val intent = Intent(context, PlaybackService::class.java)
         .setAction(PlaybackService.ACTION_COMMAND)
         .putExtra("command", command)
       return PendingIntent.getForegroundService(context, 100 + code, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    }
+
+    /** Album colours can be dark; lift them so the played bars stand out on the blurred cover. */
+    private fun lighten(color: Int): Int {
+      val hsv = FloatArray(3)
+      Color.colorToHSV(color, hsv)
+      hsv[1] = hsv[1].coerceAtMost(0.75f)
+      hsv[2] = hsv[2].coerceAtLeast(0.92f)
+      return Color.HSVToColor(hsv)
     }
 
     private fun time(ms: Long): String {
@@ -75,7 +113,7 @@ class PlayerWidget : AppWidgetProvider() {
       return RemoteViews(
         mapOf(
           android.util.SizeF(200f, 50f) to layout(context, art, R.layout.widget_player_compact),
-          android.util.SizeF(200f, 136f) to layout(context, art, R.layout.widget_player),
+          android.util.SizeF(200f, 190f) to layout(context, art, R.layout.widget_player),
         )
       )
     }
@@ -104,12 +142,9 @@ class PlayerWidget : AppWidgetProvider() {
       if (PlaybackService.playing) position += SystemClock.elapsedRealtime() - PlaybackService.reportedAt
       position = position.coerceIn(0, maxOf(duration, 0))
       v.setTextViewText(R.id.widget_time, if (hasSong && duration > 0) "${time(position)} / ${time(duration)}" else "")
-      v.setProgressBar(R.id.widget_progress, 1000, if (duration > 0) (position * 1000 / duration).toInt() else 0, false)
-      v.setViewVisibility(R.id.widget_progress, if (hasSong) View.VISIBLE else View.INVISIBLE)
-      if (Build.VERSION.SDK_INT >= 31) {
-        val accent = runCatching { Color.parseColor(PlaybackService.accent) }.getOrDefault(Color.parseColor("#8B7CFF"))
-        v.setColorStateList(R.id.widget_progress, "setProgressTintList", ColorStateList.valueOf(accent))
-      }
+      val accent = runCatching { Color.parseColor(PlaybackService.accent) }.getOrDefault(Color.parseColor("#B79CFF"))
+      val progress = if (duration > 0) position.toFloat() / duration else 0f
+      v.setImageViewBitmap(R.id.widget_wave, waveOf(PlaybackService.title.ifEmpty { "Cadence" }, if (hasSong) progress else 0f, lighten(accent)))
 
       v.setImageViewResource(R.id.widget_play, if (PlaybackService.playing) R.drawable.ic_w_pause else R.drawable.ic_w_play)
       v.setOnClickPendingIntent(R.id.widget_prev, command(context, "prev", 1))

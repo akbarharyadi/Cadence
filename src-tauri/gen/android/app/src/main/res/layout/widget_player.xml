@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Home-screen player, styled like the desktop mini player: the cover blurred behind everything,
-     a big cover, the song, its quality, and previous / play-pause / next, with a progress line. -->
+<!-- The player widget with room to spare: the cover and the song, its quality, its waveform
+     (filled in as it plays) with the times, and previous / play-pause / next. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
     android:layout_width="match_parent"
@@ -26,135 +26,137 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingStart="14dp"
-        android:paddingTop="14dp"
-        android:paddingEnd="16dp"
-        android:paddingBottom="17dp">
-
-        <ImageView
-            android:id="@+id/widget_art"
-            android:layout_width="96dp"
-            android:layout_height="96dp"
-            android:background="@drawable/widget_art_bg"
-            android:clipToOutline="true"
-            android:contentDescription="Open Cadence"
-            android:scaleType="centerCrop"
-            android:src="@drawable/ic_stat_cadence" />
+        android:orientation="vertical"
+        android:padding="16dp">
 
         <LinearLayout
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="14dp"
-            android:layout_weight="1"
-            android:orientation="vertical">
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-            <TextView
-                android:id="@+id/widget_title"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:ellipsize="end"
-                android:fontFamily="sans-serif-medium"
-                android:maxLines="1"
-                android:text="Cadence"
-                android:textColor="#FFFFFFFF"
-                android:textSize="16sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/widget_artist"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:ellipsize="end"
-                android:maxLines="1"
-                android:text="Tap to open"
-                android:textColor="#B8FFFFFF"
-                android:textSize="13sp" />
+            <ImageView
+                android:id="@+id/widget_art"
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:background="@drawable/widget_art_bg"
+                android:clipToOutline="true"
+                android:contentDescription="Open Cadence"
+                android:scaleType="centerCrop"
+                android:src="@drawable/ic_stat_cadence" />
 
             <LinearLayout
-                android:id="@+id/widget_quality_row"
-                android:layout_width="match_parent"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <ImageView
-                    android:layout_width="13dp"
-                    android:layout_height="13dp"
-                    android:importantForAccessibility="no"
-                    android:src="@drawable/ic_w_quality" />
+                android:layout_marginStart="14dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
 
                 <TextView
-                    android:id="@+id/widget_quality"
+                    android:id="@+id/widget_title"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="5dp"
                     android:ellipsize="end"
+                    android:fontFamily="sans-serif-medium"
                     android:maxLines="1"
-                    android:textColor="#FFF2C26B"
-                    android:textSize="12sp" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <ImageButton
-                    android:id="@+id/widget_prev"
-                    android:layout_width="38dp"
-                    android:layout_height="38dp"
-                    android:background="@drawable/widget_btn_bg"
-                    android:contentDescription="Previous"
-                    android:padding="8dp"
-                    android:scaleType="fitCenter"
-                    android:src="@drawable/ic_w_prev" />
-
-                <ImageButton
-                    android:id="@+id/widget_play"
-                    android:layout_width="44dp"
-                    android:layout_height="44dp"
-                    android:layout_marginStart="6dp"
-                    android:layout_marginEnd="6dp"
-                    android:background="@drawable/widget_play_bg"
-                    android:contentDescription="Play or pause"
-                    android:padding="11dp"
-                    android:scaleType="fitCenter"
-                    android:src="@drawable/ic_w_play" />
-
-                <ImageButton
-                    android:id="@+id/widget_next"
-                    android:layout_width="38dp"
-                    android:layout_height="38dp"
-                    android:background="@drawable/widget_btn_bg"
-                    android:contentDescription="Next"
-                    android:padding="8dp"
-                    android:scaleType="fitCenter"
-                    android:src="@drawable/ic_w_next" />
+                    android:text="Cadence"
+                    android:textColor="#FFFFFFFF"
+                    android:textSize="17sp"
+                    android:textStyle="bold" />
 
                 <TextView
-                    android:id="@+id/widget_time"
-                    android:layout_width="0dp"
+                    android:id="@+id/widget_artist"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:gravity="end"
+                    android:ellipsize="end"
                     android:maxLines="1"
-                    android:textColor="#A6FFFFFF"
-                    android:textSize="11sp" />
+                    android:text="Tap to open"
+                    android:textColor="#B8FFFFFF"
+                    android:textSize="13.5sp" />
+
+                <LinearLayout
+                    android:id="@+id/widget_quality_row"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <ImageView
+                        android:layout_width="13dp"
+                        android:layout_height="13dp"
+                        android:importantForAccessibility="no"
+                        android:src="@drawable/ic_w_quality" />
+
+                    <TextView
+                        android:id="@+id/widget_quality"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="5dp"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:textColor="#FFF2C26B"
+                        android:textSize="12sp" />
+                </LinearLayout>
             </LinearLayout>
         </LinearLayout>
-    </LinearLayout>
 
-    <ProgressBar
-        android:id="@+id/widget_progress"
-        style="@android:style/Widget.ProgressBar.Horizontal"
-        android:layout_width="match_parent"
-        android:layout_height="3dp"
-        android:layout_gravity="bottom"
-        android:max="1000"
-        android:progress="0"
-        android:progressDrawable="@drawable/widget_progress" />
+        <ImageView
+            android:id="@+id/widget_wave"
+            android:layout_width="match_parent"
+            android:layout_height="26dp"
+            android:layout_marginTop="14dp"
+            android:importantForAccessibility="no"
+            android:scaleType="fitXY" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/widget_time"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:maxLines="1"
+                android:textColor="#A6FFFFFF"
+                android:textSize="11.5sp" />
+
+            <ImageButton
+                android:id="@+id/widget_prev"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="@drawable/widget_btn_bg"
+                android:contentDescription="Previous"
+                android:padding="9dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_w_prev" />
+
+            <ImageButton
+                android:id="@+id/widget_play"
+                android:layout_width="50dp"
+                android:layout_height="50dp"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="8dp"
+                android:background="@drawable/widget_play_bg"
+                android:contentDescription="Play or pause"
+                android:elevation="4dp"
+                android:padding="13dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_w_play" />
+
+            <ImageButton
+                android:id="@+id/widget_next"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="@drawable/widget_btn_bg"
+                android:contentDescription="Next"
+                android:padding="9dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_w_next" />
+        </LinearLayout>
+    </LinearLayout>
 </FrameLayout>
