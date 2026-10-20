@@ -24,6 +24,9 @@ pub struct Settings {
     pub listenbrainz_user: String,
     /// The AI DJ (the API key is in Credential Manager).
     pub ai: crate::ai::AiSettings,
+    /// Fill in missing song info (title, artist, album, cover) from the iTunes catalogue when an
+    /// untagged song plays, and save it into the file.
+    pub fix_tags_online: bool,
 }
 
 impl Default for Settings {
@@ -37,6 +40,7 @@ impl Default for Settings {
             lyrics_online: true,
             listenbrainz_user: String::new(),
             ai: Default::default(),
+            fix_tags_online: true,
         }
     }
 }

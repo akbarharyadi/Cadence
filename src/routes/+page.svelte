@@ -33,6 +33,25 @@
 
   let dropping = $state(false);
   let scrolled = $state(false);
+  // Once the page's big title scrolls under the top bar, it shows small in the bar (as on iOS).
+  let barTitle = $state("");
+  let showBarTitle = $state(false);
+  function onScroll(e: Event) {
+    const el = e.currentTarget as HTMLElement;
+    scrolled = el.scrollTop > 4;
+    const h1 = el.querySelector("h1");
+    if (!h1) {
+      showBarTitle = false;
+      return;
+    }
+    barTitle = h1.textContent?.trim() ?? "";
+    showBarTitle = h1.getBoundingClientRect().bottom < el.getBoundingClientRect().top + 56;
+  }
+  // A new page starts with its own title hidden.
+  $effect(() => {
+    void app.view;
+    showBarTitle = false;
+  });
 
   // Android: report what's playing to the media notification, lock screen and widget, and take
   // their button presses. Only sent when the song or play/pause changes, or every 15 s.
@@ -152,15 +171,13 @@
   <div class="body">
     {#if showSidebar && !phone}<Sidebar />{/if}
     <div class="column">
-    <!-- The top bar's backdrop sits outside the scrolling area so it reaches the window edge
-         (over the scrollbar), under the window buttons. -->
-    <div class="topbar-bg" class:scrolled aria-hidden="true"></div>
-    <main class="content" onscroll={(e) => (scrolled = e.currentTarget.scrollTop > 4)}>
+    <main class="content" onscroll={onScroll}>
       <!-- Sticky top bar: Back button, and a place to drag the frameless window from. -->
-      <div class="topbar" data-tauri-drag-region>
+      <div class="topbar" class:scrolled data-tauri-drag-region>
         {#if app.history.length > 0 && !empty}
           <button class="back icon-btn" onclick={() => app.back()} aria-label="Back"><Icon name="back" size={18} /></button>
         {/if}
+        <div class="bar-title" class:on={showBarTitle} aria-hidden={!showBarTitle}>{barTitle}</div>
       </div>
       {#if !app.loaded}
         <div></div>
@@ -260,19 +277,6 @@
     position: relative;
     display: flex;
   }
-  .topbar-bg {
-    position: absolute;
-    inset: 0 0 auto 0;
-    height: 52px;
-    z-index: 21;
-    pointer-events: none;
-    transition: background 0.2s, box-shadow 0.2s;
-  }
-  .topbar-bg.scrolled {
-    background: color-mix(in srgb, var(--ink) 78%, transparent);
-    backdrop-filter: blur(22px) saturate(1.4);
-    box-shadow: 0 1px 0 var(--line);
-  }
   .content {
     flex: 1;
     min-width: 0;
@@ -298,8 +302,45 @@
     padding: 0 20px;
     transition: background 0.2s, box-shadow 0.2s;
   }
+  /* Scrolled: the bar frosts over the page (it lives inside the page, so the Back button and the
+     title stay on top of it during page animations). */
+  .topbar.scrolled {
+    background: color-mix(in srgb, var(--ink) 78%, transparent);
+    backdrop-filter: blur(22px) saturate(1.4);
+    box-shadow: 0 1px 0 var(--line);
+  }
   .back {
     background: var(--hover);
+  }
+  .bar-title {
+    position: absolute;
+    left: 64px;
+    right: 64px;
+    text-align: center;
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: 16px;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(6px);
+    transition:
+      opacity 0.2s,
+      transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .bar-title.on {
+    opacity: 1;
+    transform: none;
+  }
+  /* Desktop: clear of the window buttons in the corner. */
+  @media (min-width: 721px) {
+    .bar-title {
+      left: 170px;
+      right: 170px;
+    }
   }
   .dropzone {
     position: fixed;

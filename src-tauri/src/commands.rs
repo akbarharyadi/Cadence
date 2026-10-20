@@ -566,6 +566,7 @@ pub fn get_history(state: AppStateRef) -> crate::history::HistoryStats {
 pub struct AppSettings {
     close_to_tray: bool,
     lyrics_online: bool,
+    fix_tags_online: bool,
     listenbrainz_user: String,
 }
 
@@ -575,6 +576,7 @@ pub fn get_app_settings(state: AppStateRef) -> AppSettings {
     AppSettings {
         close_to_tray: s.close_to_tray,
         lyrics_online: s.lyrics_online,
+        fix_tags_online: s.fix_tags_online,
         listenbrainz_user: s.listenbrainz_user.clone(),
     }
 }
@@ -582,6 +584,12 @@ pub fn get_app_settings(state: AppStateRef) -> AppSettings {
 #[tauri::command]
 pub fn set_lyrics_online(state: AppStateRef, enabled: bool) {
     state.settings.lock().lyrics_online = enabled;
+    state.save_settings();
+}
+
+#[tauri::command]
+pub fn set_fix_tags_online(state: AppStateRef, enabled: bool) {
+    state.settings.lock().fix_tags_online = enabled;
     state.save_settings();
 }
 

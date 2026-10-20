@@ -11,6 +11,7 @@
   getVersion().then((v) => (version = v));
   let closeToTray = $state(true);
   let lyricsOnline = $state(true);
+  let fixTags = $state(true);
   let lbUser = $state("");
   let lbToken = $state("");
   let lbBusy = $state(false);
@@ -19,6 +20,7 @@
     const s = await api.appSettings();
     closeToTray = s.closeToTray;
     lyricsOnline = s.lyricsOnline;
+    fixTags = s.fixTagsOnline;
     lbUser = s.listenbrainzUser;
   });
 
@@ -162,6 +164,20 @@
         <p class="desc">When a song has no lyrics in the file or a .lrc next to it, look them up on LRCLIB, a free lyrics database. Only the artist, title and album are sent.</p>
       </div>
       <Toggle checked={lyricsOnline} label="Find lyrics online" onchange={(v) => { lyricsOnline = v; api.setLyricsOnline(v); }} />
+    </div>
+  </section>
+
+  <section>
+    <div class="title-row">
+      <div>
+        <h2 class="section-title">Fill in missing song info</h2>
+        <p class="desc">
+          When a song with no tags plays (for example a download named “Artist - Title”), find it in the iTunes catalogue and save
+          its title, artist, album, year and cover into the file. Only the file name is sent, and only matches with the same
+          title and artist are used.
+        </p>
+      </div>
+      <Toggle checked={fixTags} label="Fill in missing song info" onchange={(v) => { fixTags = v; api.setFixTagsOnline(v); }} />
     </div>
   </section>
 

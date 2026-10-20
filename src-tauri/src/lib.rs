@@ -1,4 +1,5 @@
 mod ai;
+mod autotag;
 mod catalog;
 pub mod audio;
 mod commands;
@@ -105,6 +106,7 @@ fn status_hub(
                     let _ = scrobbler.send(scrobble::Job::NowPlaying(l));
                 }
             }
+            autotag::on_track_change(&app, shown_track.as_deref(), current.as_deref());
             shown_track = current;
             shown_at = std::time::Instant::now() - std::time::Duration::from_secs(60);
         }
@@ -250,6 +252,7 @@ pub fn run() {
             commands::get_app_settings,
             commands::set_close_to_tray,
             commands::set_lyrics_online,
+            commands::set_fix_tags_online,
             commands::get_lyrics,
             commands::get_playlists,
             commands::connect_listenbrainz,
