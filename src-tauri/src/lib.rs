@@ -130,6 +130,11 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         tray::show_main(app)
     }));
+    // Updates (desktop): download a signed new version from GitHub Releases, then restart into it.
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
     builder
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -233,6 +238,7 @@ pub fn run() {
             commands::add_folders,
             commands::remove_folder,
             commands::list_dirs,
+            commands::download_update_apk,
             commands::rescan,
             commands::reanalyze,
             commands::play_tracks,

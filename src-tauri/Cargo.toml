@@ -1,6 +1,6 @@
 [package]
 name = "cadence"
-version = "0.2.1"
+version = "0.2.2"
 description = "Cadence — an open-source lossless music player for your own files"
 authors = ["Akbar Priyono Haryadi"]
 license = "GPL-3.0-only"
@@ -51,7 +51,9 @@ bliss-audio = { version = "0.13.0", default-features = false, features = ["analy
 
 # Desktop only: one running window at a time (phones manage that themselves).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-process = "2.4.0"
 tauri-plugin-single-instance = "2.5.4"
+tauri-plugin-updater = "2.14.0"
 
 # Secrets go to each system's own store; Direct output (WASAPI exclusive) is Windows-only.
 [target.'cfg(windows)'.dependencies]

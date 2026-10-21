@@ -2,6 +2,7 @@
   import { api, khz } from "$lib/api";
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
+  import { updates } from "$lib/updates.svelte";
   import AiSettings from "$lib/components/AiSettings.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Toggle from "$lib/components/Toggle.svelte";
@@ -211,6 +212,32 @@
   </section>
 
   <section>
+    <div class="title-row">
+      <div>
+        <h2 class="section-title">Updates</h2>
+        <p class="desc">
+          Cadence {version}.
+          {#if updates.phase === "checking"}Checking…
+          {:else if updates.phase === "current"}You have the latest version.
+          {:else if updates.phase === "downloading"}Downloading {updates.next}… {Math.round(updates.progress * 100)}%
+          {:else if updates.phase === "ready"}Version {updates.next} is downloaded: restart Cadence to finish.
+          {:else if updates.phase === "available"}Version {updates.next} is available.
+          {:else if updates.phase === "error"}{updates.message}{/if}
+        </p>
+        <div class="update-actions">
+          {#if updates.phase === "ready" || updates.phase === "available"}
+            <button class="pill" onclick={() => updates.apply()}>{updates.phase === "ready" ? "Restart to update" : "Update"}</button>
+          {:else}
+            <button class="pill ghost" disabled={updates.phase === "checking" || updates.phase === "downloading"} onclick={() => updates.check()}>Check now</button>
+          {/if}
+        </div>
+      </div>
+      <Toggle checked={updates.auto} label="Update automatically" onchange={(v) => updates.setAuto(v)} />
+    </div>
+    <p class="hint">Checks GitHub for new versions every few hours. Updates are signed, so only genuine releases install.</p>
+  </section>
+
+  <section>
     <h2 class="section-title">About</h2>
     <p class="desc">
       Cadence {version}, a free, open-source lossless music player for your own files. Rust audio engine with ReplayGain 2.0
@@ -361,6 +388,9 @@
     border-radius: inherit;
     background: var(--accent);
     transition: width 0.3s;
+  }
+  .update-actions {
+    margin-top: 12px;
   }
   .hint {
     margin: 8px 0 0;

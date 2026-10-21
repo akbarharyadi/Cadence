@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::audio::eq::{Filter, parse_parametric, presets};
 use crate::audio::{Cmd, DspSettings, Repeat, Status};
@@ -59,6 +59,51 @@ pub fn add_folders(app: AppHandle, state: AppStateRef, paths: Vec<String>) -> Ve
     start_scan(app.clone());
     crate::jobs::watch_folders(app);
     state.settings.lock().folders.clone()
+}
+
+/// Android updates: downloads the new APK into the app's cache (the app then hands it to Android's
+/// installer), reporting progress as `update-progress` events (0..1).
+#[tauri::command]
+pub async fn download_update_apk(app: AppHandle, url: String) -> Result<String, String> {
+    use std::io::{Read, Write};
+    if !url.starts_with("https://github.com/akbarharyadi/cadence/releases/") {
+        return Err("Updates only come from Cadence's GitHub releases.".into());
+    }
+    let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = dir.join("cadence-update.apk");
+        let mut r = crate::net::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .build()
+            .map_err(|e| e.to_string())?
+            .get(&url)
+            .send()
+            .map_err(|e| e.to_string())?;
+        if !r.status().is_success() {
+            return Err(format!("Download failed ({})", r.status()));
+        }
+        let total = r.content_length().unwrap_or(0) as f64;
+        let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut done = 0f64;
+        let mut last = 0f64;
+        loop {
+            let n = r.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            done += n as f64;
+            if total > 0.0 && done / total - last >= 0.02 {
+                last = done / total;
+                let _ = app.emit("update-progress", last);
+            }
+        }
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// A folder in the in-app folder browser (phones have no usable system folder picker).

@@ -9,34 +9,14 @@ import androidx.core.view.WindowInsetsCompat
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.net.Uri
-import android.provider.DocumentsContract
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
 
 class MainActivity : TauriActivity() {
   private var webView: WebView? = null
-
-  /** Android's folder picker (the dialog plugin has none on phones); the folder goes back to the app as a path. */
-  private val folderPicker = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-    val path = uri?.let { pathOf(it) }
-    webView?.evaluateJavascript("window.__cadenceFolder && window.__cadenceFolder(${if (path != null) JSONObject.quote(path) else "null"})", null)
-  }
-
-  /**
-   * The file path of a folder picked in the system picker: "primary:Music/FLAC" is
-   * /storage/emulated/0/Music/FLAC, "1A2B-3C4D:Albums" is the SD card's /storage/1A2B-3C4D/Albums.
-   */
-  private fun pathOf(tree: Uri): String? {
-    val id = runCatching { DocumentsContract.getTreeDocumentId(tree) }.getOrNull() ?: return null
-    val volume = id.substringBefore(':')
-    val rest = id.substringAfter(':', "")
-    val root = if (volume == "primary") "/storage/emulated/0" else "/storage/$volume"
-    return if (rest.isEmpty()) root else "$root/$rest"
-  }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
@@ -107,12 +87,26 @@ class MainActivity : TauriActivity() {
       PlaybackService.update(this@MainActivity)
     }
 
-    /** Opens the system folder picker; the answer arrives in window.__cadenceFolder. */
+    /**
+     * Hands a downloaded update to Android's installer. The first time, Android asks to allow
+     * installs from Cadence; the answer brings the user back here to tap Update again.
+     */
     @JavascriptInterface
-    fun pickFolder() {
-      // Start in the Music folder: some pickers (HyperOS) show an empty list at the top level.
-      val music = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Music")
-      runOnUiThread { folderPicker.launch(music) }
+    fun installApk(path: String): String {
+      if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+        runOnUiThread {
+          startActivity(
+            android.content.Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
+          )
+        }
+        return "permission"
+      }
+      val uri = androidx.core.content.FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", java.io.File(path))
+      val intent = android.content.Intent(android.content.Intent.ACTION_VIEW)
+        .setDataAndType(uri, "application/vnd.android.package-archive")
+        .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+      runOnUiThread { startActivity(intent) }
+      return "installing"
     }
   }
 }

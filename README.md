@@ -58,6 +58,8 @@
   words, daily mixes from your listening, and new music to buy.
 - **Listen Now**: recent albums, top picks, mixes for the day, what's on repeat and what you haven't played in a while.
 - **Player**: full-width seek bar, lists of the previous and next songs, a mini player and the system tray.
+- **Updates itself**: checks GitHub for new versions, downloads them in the background and installs on restart
+  (signed, so only genuine releases install). On Android it downloads the new APK and opens the installer.
 - Playlists and smart playlists, tag editing, ListenBrainz scrobbling, and media keys with the system media controls.
 
 ### Android
@@ -124,6 +126,11 @@ scripts/android-build.sh                          # Windows without Developer Mo
 Release APKs are signed with the keystore named in `src-tauri/gen/android/keystore.properties`
 (`storeFile`, `password`, `keyAlias`; never committed), or the `CADENCE_KEYSTORE`, `CADENCE_KEYSTORE_PASSWORD` and
 `CADENCE_KEY_ALIAS` environment variables.
+
+Updates: release builds are signed for the in-app updater with the key in the
+`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` environment variables (repository secrets in CI).
+Desktop apps install updates from `latest.json` on the latest release; Android downloads the new APK and opens the
+system installer.
 
 Checks:
 

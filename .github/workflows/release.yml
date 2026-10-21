@@ -56,6 +56,9 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the update bundles; tauri-action then publishes latest.json for the in-app updater.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseName: "Cadence ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}"
@@ -67,6 +70,8 @@ jobs:
             - macOS (Apple Silicon and Intel): the `.dmg`. The app isn't signed by Apple yet: the first time, right-click Cadence in Applications and choose **Open**.
             - Linux: the `.AppImage` (any distro; make it executable) or the `.deb` (Debian/Ubuntu).
             - Android 8 or newer (64-bit phones): the `.apk`. Allow installs from your browser or file manager when asked.
+
+            Already have Cadence 0.2.2 or newer? It updates itself (Settings → Updates).
 
             More at https://cadence.akbarharyadi.com
           releaseDraft: false
@@ -109,6 +114,8 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           CADENCE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           CADENCE_KEY_ALIAS: cadence
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"

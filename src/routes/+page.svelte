@@ -5,6 +5,8 @@
   import { app } from "$lib/store.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import FolderBrowser from "$lib/components/FolderBrowser.svelte";
+  import UpdateBanner from "$lib/components/UpdateBanner.svelte";
+  import { updates } from "$lib/updates.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import NowPlaying from "$lib/components/NowPlaying.svelte";
   import PlaylistPicker from "$lib/components/PlaylistPicker.svelte";
@@ -85,6 +87,7 @@
 
   onMount(() => {
     app.init();
+    updates.start();
     (window as unknown as { __cadenceBack: () => boolean }).__cadenceBack = () => app.handleBack();
     (window as unknown as { __cadenceMedia: (c: string) => void }).__cadenceMedia = (c: string) => {
       if (c.startsWith("seek:")) app.seek(Number(c.slice(5)));
@@ -222,6 +225,7 @@
 {#if app.smartEditing}<SmartEditor />{/if}
 {#if app.tagEditing}<TagEditor />{/if}
 {#if app.folderBrowser}<FolderBrowser />{/if}
+<UpdateBanner />
 
 {#if dropping}
   <div class="dropzone">
