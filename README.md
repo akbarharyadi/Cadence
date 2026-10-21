@@ -9,6 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/akbarharyadi/cadence/releases/latest"><img src="https://img.shields.io/github/v/release/akbarharyadi/cadence?label=release&color=8b7cff" alt="Latest release" /></a>
+  <a href="https://github.com/akbarharyadi/cadence/releases"><img src="https://img.shields.io/github/downloads/akbarharyadi/cadence/total?label=downloads&color=6fd3c8" alt="Downloads" /></a>
   <a href="https://github.com/akbarharyadi/cadence/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/akbarharyadi/cadence/release.yml?label=build" alt="Build status" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/akbarharyadi/cadence?color=ef8fd6" alt="License: GPL-3.0" /></a>
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux%20%7C%20Android-1c1e30" alt="Windows, macOS, Linux and Android" />
