@@ -12,6 +12,7 @@
   import PlaylistPicker from "$lib/components/PlaylistPicker.svelte";
   import SmartEditor from "$lib/components/SmartEditor.svelte";
   import TagEditor from "$lib/components/TagEditor.svelte";
+  import FixInfo from "$lib/components/FixInfo.svelte";
   import PlayerBar from "$lib/components/PlayerBar.svelte";
   import QueuePanel from "$lib/components/QueuePanel.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -228,6 +229,7 @@
 {#if app.picker}<PlaylistPicker />{/if}
 {#if app.smartEditing}<SmartEditor />{/if}
 {#if app.tagEditing}<TagEditor />{/if}
+{#if app.fixing}{#key app.fixing.id}<FixInfo />{/key}{/if}
 {#if app.folderBrowser}<FolderBrowser />{/if}
 <UpdateBanner />
 

@@ -278,6 +278,9 @@ export const api = {
   connectListenBrainz: (token: string) => invoke<string>("connect_listenbrainz", { token }),
   disconnectListenBrainz: () => invoke<void>("disconnect_listenbrainz"),
   setLyricsOnline: (enabled: boolean) => invoke<void>("set_lyrics_online", { enabled }),
+  findSongInfo: (id: string, query?: string) => invoke<{ term: string; results: SongInfo[] }>("find_song_info", { id, query: query ?? null }),
+  /** True when the song is playing: its file is written when it finishes. */
+  saveSongInfo: (id: string, info: SongInfo) => invoke<boolean>("save_song_info", { id, info }),
   skips: () => invoke<{ ids: string[]; instrumentals: boolean }>("get_skips"),
   setSkipped: (ids: string[], skip: boolean) => invoke<void>("set_skipped", { ids, skip }),
   setSkipInstrumentals: (enabled: boolean) => invoke<void>("set_skip_instrumentals", { enabled }),
@@ -362,4 +365,21 @@ export function qualityOf(codec: string, sampleRate: number | null): string {
   const lossless = ["FLAC", "ALAC", "WAV", "AIFF", "PCM"].includes(codec.toUpperCase());
   if (!lossless) return codec;
   return (sampleRate ?? 0) > 48000 ? "Hi-Res Lossless" : "Lossless";
+}
+
+/** A catalogue match offered in Fix Song Info. */
+export interface SongInfo {
+  title: string;
+  artist: string;
+  album: string;
+  albumArtist: string;
+  year: number | null;
+  trackNo: number | null;
+  discNo: number | null;
+  genre: string;
+  coverUrl: string | null;
+  thumb: string | null;
+  duration: number;
+  /** Same title (and artist) and about the same length. */
+  likely: boolean;
 }

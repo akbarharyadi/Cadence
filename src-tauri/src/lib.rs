@@ -260,6 +260,8 @@ pub fn run() {
             commands::set_lyrics_online,
             commands::set_fix_tags_online,
             commands::get_skips,
+            commands::find_song_info,
+            commands::save_song_info,
             commands::set_skipped,
             commands::set_skip_instrumentals,
             commands::get_lyrics,

@@ -107,6 +107,11 @@
         {#if t}
           <div class="title-row">
             <h1>{t.title}</h1>
+            {#if app.needsInfo(t)}
+              <button class="icon-btn light skip" onclick={() => (app.fixing = t)} aria-label="Fix song info" title="Fix song info">
+                <Icon name="sparkle" size={20} />
+              </button>
+            {/if}
             <button class="icon-btn light skip" onclick={() => app.setSkipped([t], true)} aria-label="Skip this song from now on" title="Skip this song from now on">
               <Icon name="skip" size={20} />
             </button>

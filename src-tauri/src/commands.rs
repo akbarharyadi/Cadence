@@ -909,6 +909,41 @@ pub async fn write_tags(
     Ok(written)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SongInfoResults {
+    term: String,
+    results: Vec<crate::autotag::Candidate>,
+}
+
+/// Fix Song Info: catalogue matches for a song (searching `query`, or its name).
+#[tauri::command]
+pub async fn find_song_info(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    query: Option<String>,
+) -> Result<SongInfoResults, String> {
+    let track = track_of(&state, &id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let term = query
+            .map(|q| q.trim().to_string())
+            .filter(|q| !q.is_empty())
+            .unwrap_or_else(|| crate::autotag::search_term(&track));
+        let results = crate::autotag::candidates(&track, &term)?;
+        Ok(SongInfoResults { term, results })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Saves the match picked in Fix Song Info; true when the file is written after the song ends.
+#[tauri::command]
+pub async fn save_song_info(app: AppHandle, id: String, info: crate::autotag::Candidate) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::autotag::save_choice(&app, &id, info))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 fn track_of(state: &AppState, id: &str) -> Result<crate::library::Track, String> {
     let lib = state.library.lock();
     lib.by_id

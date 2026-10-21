@@ -160,6 +160,11 @@
           </div>
         {/key}
       </div>
+      {#if app.needsInfo(t)}
+        <button class="icon-btn fix" onclick={() => (app.fixing = t)} aria-label="Fix song info" title="Fix song info: find the title, artist, album and cover">
+          <Icon name="sparkle" size={16} />
+        </button>
+      {/if}
       <button class="icon-btn skip" onclick={() => app.setSkipped([t], true)} aria-label="Skip this song from now on" title="Skip this song from now on: it's left out when albums, playlists and shuffles play">
         <Icon name="skip" size={16} />
       </button>
@@ -474,6 +479,14 @@
   }
   .badge {
     margin-top: 2px;
+  }
+  /* Untagged songs: always shown, so the fix is easy to find. */
+  .fix {
+    flex: none;
+    width: 30px;
+    height: 30px;
+    margin-left: -4px;
+    color: var(--accent);
   }
   /* Shown when the pointer is over the song (or it has keyboard focus). */
   .skip {

@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use lofty::config::WriteOptions;
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::*;
-use serde::Deserialize;
-use tauri::{AppHandle, Manager};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::library::Track;
 use crate::state::AppState;
@@ -57,9 +57,7 @@ pub fn untagged(t: &Track) -> bool {
 /// Called when the playing song changes.
 pub fn on_track_change(app: &AppHandle, previous: Option<&str>, current: Option<&str>) {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    if !state.settings.lock().fix_tags_online {
-        return;
-    }
+    // Info waiting for its song to stop (found automatically, or picked in Fix Song Info).
     let ready = {
         let mut rt = runtime().lock().unwrap();
         rt.playing = current.map(str::to_string);
@@ -68,6 +66,9 @@ pub fn on_track_change(app: &AppHandle, previous: Option<&str>, current: Option<
     if let Some((path, found)) = ready {
         let app = app.clone();
         std::thread::spawn(move || apply(&app, &path, &found));
+    }
+    if !state.settings.lock().fix_tags_online {
+        return;
     }
 
     let Some(id) = current else { return };
@@ -169,6 +170,162 @@ fn download(url: &str) -> Result<Vec<u8>, String> {
         return Err(r.status().to_string());
     }
     r.bytes().map(|b| b.to_vec()).map_err(|e| e.to_string())
+}
+
+// ---------- Fix Song Info: the user picks the match ----------
+
+/// A catalogue result offered in Fix Song Info.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Candidate {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub year: Option<u32>,
+    pub track_no: Option<u32>,
+    pub disc_no: Option<u32>,
+    pub genre: String,
+    /// 600 px cover, written into the file.
+    pub cover_url: Option<String>,
+    /// 100 px cover, for the list.
+    pub thumb: Option<String>,
+    pub duration: f64,
+    /// Same title (and artist, when the file name has one) and about the same length.
+    pub likely: bool,
+}
+
+impl From<Candidate> for Found {
+    fn from(c: Candidate) -> Self {
+        Found {
+            title: c.title,
+            artist: c.artist,
+            album: c.album,
+            album_artist: c.album_artist,
+            year: c.year,
+            track_no: c.track_no,
+            disc_no: c.disc_no,
+            genre: c.genre,
+            cover_url: c.cover_url,
+        }
+    }
+}
+
+/// What to search for: "Artist Title" from the file name (or from the tags, if it has them).
+pub fn search_term(t: &Track) -> String {
+    match wanted(t) {
+        (Some(a), title) => format!("{a} {title}"),
+        (None, title) => title,
+    }
+}
+
+/// The artist (if known) and title the song should have.
+fn wanted(t: &Track) -> (Option<String>, String) {
+    if untagged(t) {
+        guess(&t.title)
+    } else {
+        (Some(t.artist.clone()), t.title.clone())
+    }
+}
+
+/// Catalogue results for `term`, the likeliest matches for `t` first.
+pub fn candidates(t: &Track, term: &str) -> Result<Vec<Candidate>, String> {
+    let (artist, title) = wanted(t);
+    let client = crate::net::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .user_agent(concat!("Cadence/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut seen = HashSet::new();
+    let mut out: Vec<(Rank, Candidate)> = Vec::new();
+    let mut reached = false;
+    for country in ["US", "ID", "JP", "KR", "GB"] {
+        let url = format!(
+            "https://itunes.apple.com/search?media=music&entity=song&limit=15&country={country}&term={}",
+            urlencoding::encode(term)
+        );
+        let Ok(r) = client.get(&url).send() else { continue };
+        let Ok(s) = r.json::<Search>() else { continue };
+        reached = true;
+        for h in s.results {
+            let (Some(name), Some(by)) = (h.track_name.clone(), h.artist_name.clone()) else { continue };
+            let album = h.collection_name.clone().unwrap_or_default();
+            if !seen.insert(norm(&format!("{name}|{by}|{album}"))) {
+                continue;
+            }
+            let length = h.track_time_millis.unwrap_or(0.0) / 1000.0;
+            let off = (length - t.duration).abs();
+            let likely = similar(&name, &title) && artist.as_deref().is_none_or(|a| similar(&by, a)) && off < 75.0;
+            let label = format!("{name} {album}").to_lowercase();
+            let other_version = VERSIONS.iter().any(|v| label.contains(v) && !title.to_lowercase().contains(v));
+            out.push((
+                Rank(!likely as u8, other_version as u8, off),
+                Candidate {
+                    title: name,
+                    album_artist: h.collection_artist_name.clone().unwrap_or_else(|| by.clone()),
+                    artist: by,
+                    album,
+                    year: h.release_date.as_deref().and_then(|d| d.get(..4)?.parse().ok()),
+                    track_no: h.track_number,
+                    disc_no: h.disc_number,
+                    genre: h.primary_genre_name.clone().unwrap_or_default(),
+                    cover_url: h.artwork_url100.as_ref().map(|u| u.replace("100x100bb", "600x600bb")),
+                    thumb: h.artwork_url100.clone(),
+                    duration: length,
+                    likely,
+                },
+            ));
+        }
+        // Enough good matches: no need to ask other stores.
+        if out.iter().filter(|(r, _)| r.0 == 0).count() >= 3 {
+            break;
+        }
+    }
+    if !reached {
+        return Err("Couldn't reach the iTunes catalogue. Check your internet connection.".into());
+    }
+    out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(out.into_iter().take(12).map(|(_, c)| c).collect())
+}
+
+/// Saves the info the user picked. A playing song shows it at once and its file is written
+/// when it stops (returns true then).
+pub fn save_choice(app: &AppHandle, id: &str, choice: Candidate) -> Result<bool, String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let path = {
+        let mut lib = state.library.lock();
+        let i = *lib.by_id.get(id).ok_or("Unknown song")?;
+        let t = &mut lib.snapshot.tracks[i];
+        t.title = choice.title.clone();
+        t.artist = choice.artist.clone();
+        t.album = choice.album.clone();
+        t.album_artist = choice.album_artist.clone();
+        t.year = choice.year;
+        PathBuf::from(&t.path)
+    };
+    let playing = {
+        let s = state.engine.status();
+        s.index.and_then(|i| s.queue.get(i).cloned())
+    };
+    let found: Found = choice.into();
+    let mut rt = runtime().lock().unwrap();
+    let tried = rt.tried.get_or_insert_with(|| load_tried(&state.data_dir));
+    if tried.insert(path.to_string_lossy().into_owned()) {
+        save_tried(&state.data_dir, tried);
+    }
+    if playing.as_deref() == Some(id) {
+        rt.playing = Some(id.to_string());
+        rt.waiting.insert(id.to_string(), (path, found));
+        drop(rt);
+        let _ = app.emit("library-changed", ());
+        return Ok(true);
+    }
+    rt.waiting.remove(id);
+    drop(rt);
+    let cover = found.cover_url.as_deref().and_then(|u| download(u).ok());
+    write(&path, &found, cover)?;
+    crate::jobs::start_scan(app.clone());
+    Ok(false)
 }
 
 // ---------- finding the song ----------
@@ -447,5 +604,26 @@ mod tests {
         // No artist known: the length has to match closely.
         assert!(best(&hits, None, "Haruskah Kumati", 280.0).is_none());
         assert!(best(&hits, None, "Haruskah Kumati", 252.0).is_some());
+    }
+}
+
+#[cfg(test)]
+mod fix_tests {
+    /// Live: `cargo test --lib fix_tests -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn offers_matches_for_a_download() {
+        let t = crate::library::Track {
+            title: "ST12 - Biarkan Jatuh Cinta".into(),
+            artist: "Unknown Artist".into(),
+            duration: 242.0,
+            ..Default::default()
+        };
+        let term = super::search_term(&t);
+        let found = super::candidates(&t, &term).unwrap();
+        for c in &found {
+            println!("{} | {} | {} | {:.0}s | likely {}", c.title, c.artist, c.album, c.duration, c.likely);
+        }
+        assert!(found.first().is_some_and(|c| c.likely));
     }
 }

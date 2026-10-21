@@ -89,6 +89,8 @@ class AppState {
   picker = $state<Track[] | null>(null);
   /** Songs whose info (tags) is being edited. */
   tagEditing = $state<Track[] | null>(null);
+  /** The song open in Fix Song Info. */
+  fixing = $state<Track | null>(null);
   /** The open folder browser (Android): call with the chosen folder, or null if cancelled. */
   folderBrowser = $state<((path: string | null) => void) | null>(null);
   /** The smart playlist being edited (a copy), or null. */
@@ -149,6 +151,11 @@ class AppState {
   skippedSet = $derived(new Set(this.skipped));
   /** Also skip instrumental, karaoke and off-vocal versions. */
   skipInstrumentals = $state(false);
+
+  /** Songs with no real tags (e.g. downloads named "Artist - Title"). */
+  needsInfo(t: Track): boolean {
+    return t.artist === "Unknown Artist";
+  }
 
   /** Whether `t` is left out when a list plays (same rule as the engine's). */
   isSkipped(t: Track): boolean {
@@ -357,6 +364,7 @@ class AppState {
       { label: "Start Sound Radio", icon: "radio", action: () => this.soundRadio(t) },
       { label: "Songs That Sound Like This", icon: "wave", action: () => this.go({ name: "similar", id: t.id }) },
       { label: "Go to Album", icon: "album", action: () => this.go({ name: "album", id: t.albumId }) },
+      { label: "Fix Song Info…", icon: "sparkle", action: () => (this.fixing = t) },
       { label: "Edit Info…", icon: "edit", action: () => (this.tagEditing = [t]) },
       { label: "Go to Artist", icon: "artist", action: () => this.go({ name: "artist", artist: this.artistOf(t.albumArtist) }) },
       this.skippedSet.has(t.id)
@@ -407,6 +415,7 @@ class AppState {
     if (this.menu) this.menu = null;
     else if (this.picker) this.picker = null;
     else if (this.tagEditing) this.tagEditing = null;
+    else if (this.fixing) this.fixing = null;
     else if (this.smartEditing) this.smartEditing = null;
     else if (this.folderBrowser) {
       this.folderBrowser(null);
