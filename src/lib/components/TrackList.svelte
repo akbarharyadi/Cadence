@@ -31,7 +31,7 @@
   const multiDisc = $derived(numbered && new Set(tracks.map((t) => t.discNo ?? 1)).size > 1);
 
   const isCurrent = (t: Track) => app.current?.id === t.id;
-  const play = (i: number) => app.playTracks(tracks, i);
+  const play = (i: number) => app.playTracks(tracks, i, true);
 </script>
 
 <div class="list" class:numbered role="listbox" tabindex="-1">
@@ -42,6 +42,7 @@
     <div
       class="row"
       class:current={isCurrent(t)}
+      class:skipped={app.isSkipped(t)}
       class:selected={selected === t.id}
       class:drop-before={dropAt === i && dragFrom !== null && dragFrom > i}
       class:drop-after={dropAt === i && dragFrom !== null && dragFrom < i}
@@ -76,7 +77,9 @@
         </button>
       </div>
       <div class="main">
-        <div class="title">{t.title}</div>
+        <div class="title">
+          {#if app.isSkipped(t)}<span class="skip-mark" title="Skipped when albums, playlists and shuffles play"><Icon name="skip" size={13} /></span>{/if}{t.title}
+        </div>
         {#if t.artist !== hideArtist}<div class="sub">{t.artist}</div>{/if}
       </div>
       {#if showAlbum}
@@ -152,6 +155,17 @@
   .row.current .title {
     color: var(--accent);
     font-weight: 600;
+  }
+  /* Skipped songs stay listed, but quieter. */
+  .row.skipped .main,
+  .row.skipped .album,
+  .row.skipped .thumb {
+    opacity: 0.45;
+  }
+  .skip-mark {
+    display: inline-grid;
+    vertical-align: -2px;
+    margin-right: 6px;
   }
   .lead {
     position: relative;

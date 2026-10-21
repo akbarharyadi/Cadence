@@ -295,8 +295,10 @@ input[type="checkbox"] {
 }
 
 /* ---------- Page transitions (view transitions; see `animate` in store.svelte.ts) ---------- */
-/* Only the page area moves; the sidebar, player and tab bar stay put. */
-.content {
+/* Only the page area moves; the sidebar, player and tab bar stay put. The names are set only
+   while a page change animates: an element with a view-transition-name stops the blur
+   (backdrop-filter) of the frosted bars inside it from seeing the page behind them. */
+html[data-nav] .content {
   view-transition-name: page;
 }
 ::view-transition-old(root),
@@ -305,10 +307,10 @@ input[type="checkbox"] {
 }
 /* The tab bar and the player get layers of their own, painted above the moving page and held
    still: otherwise the page snapshot slides over them and they flicker. */
-.tabs {
+html[data-nav] .tabs {
   view-transition-name: tabbar;
 }
-.dock {
+html[data-nav] .dock {
   view-transition-name: dock;
 }
 ::view-transition-group(tabbar),

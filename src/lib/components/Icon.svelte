@@ -7,6 +7,7 @@
     pause: '<rect x="6" y="4" width="4" height="16" rx="1.2" fill="currentColor"/><rect x="14" y="4" width="4" height="16" rx="1.2" fill="currentColor"/>',
     next: '<path d="M4 5.2v13.6a.8.8 0 0 0 1.25.66L14 13v5.8a.8.8 0 0 0 1.25.66l8.5-6.8a.8.8 0 0 0 0-1.32l-8.5-6.8A.8.8 0 0 0 14 5.2V11L5.25 4.54A.8.8 0 0 0 4 5.2Z" fill="currentColor" transform="translate(-1.5 0)"/>',
     prev: '<path d="M20 5.2v13.6a.8.8 0 0 1-1.25.66L10 13v5.8a.8.8 0 0 1-1.25.66l-8.5-6.8a.8.8 0 0 1 0-1.32l8.5-6.8A.8.8 0 0 1 10 5.2V11l8.75-6.46A.8.8 0 0 1 20 5.2Z" fill="currentColor" transform="translate(1.5 0)"/>',
+    skip: '<circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="m6 6 12 12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
     shuffle: '<path d="M16 4h4v4M4 20 20 4M20 16v4h-4M15 15l5 5M4 4l5 5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
     repeat: '<path d="M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
     repeatOne: '<path d="M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 10.5 12.5 9.5V15" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',

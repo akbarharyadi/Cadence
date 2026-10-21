@@ -5,6 +5,8 @@ import { flushSync } from "svelte";
 /** Top-level places (tabs and sidebar): switching between them crossfades instead of sliding. */
 const TOP_LEVEL = new Set(["home", "albums", "artists", "songs", "recent", "search", "sound", "settings"]);
 
+let transitions = 0;
+
 /** Runs a view change inside a view transition (see app.css), when the system allows motion. */
 function animate(kind: "forward" | "back" | "tab", change: () => void) {
   const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
@@ -12,8 +14,14 @@ function animate(kind: "forward" | "back" | "tab", change: () => void) {
     change();
     return;
   }
-  document.documentElement.dataset.nav = kind;
-  doc.startViewTransition(() => flushSync(change));
+  const root = document.documentElement;
+  root.dataset.nav = kind;
+  const run = ++transitions;
+  const t = doc.startViewTransition(() => flushSync(change)) as { finished?: Promise<void> } | undefined;
+  // The page's transition names (app.css) are only needed while it animates.
+  t?.finished?.finally(() => {
+    if (run === transitions) delete root.dataset.nav;
+  });
 }
 import { api, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type DspSettings, type HistoryStats, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track } from "./api";
 
@@ -136,6 +144,29 @@ class AppState {
       .map(([id]) => this.trackById.get(id)!),
   );
 
+  /** Songs the user skips: left out when an album, playlist, mix or shuffle plays. */
+  skipped = $state<string[]>([]);
+  skippedSet = $derived(new Set(this.skipped));
+  /** Also skip instrumental, karaoke and off-vocal versions. */
+  skipInstrumentals = $state(false);
+
+  /** Whether `t` is left out when a list plays (same rule as the engine's). */
+  isSkipped(t: Track): boolean {
+    return this.skippedSet.has(t.id) || (this.skipInstrumentals && isInstrumental(t.title));
+  }
+
+  async setSkipped(tracks: Track[], skip: boolean) {
+    const ids = tracks.map((t) => t.id);
+    this.skipped = skip ? [...new Set([...this.skipped, ...ids])] : this.skipped.filter((id) => !ids.includes(id));
+    await api.setSkipped(ids, skip);
+    this.showToast(skip ? `Skipping ${label(tracks, true)} from now on` : `No longer skipping ${label(tracks, true)}`);
+  }
+
+  setSkipInstrumentals(on: boolean) {
+    this.skipInstrumentals = on;
+    api.setSkipInstrumentals(on);
+  }
+
   /** Smoothly advancing position between status updates. */
   position = $state(0);
   private posBase = { pos: 0, at: 0, playing: false };
@@ -163,6 +194,10 @@ class AppState {
         this.loadAiMixes(false);
         this.loadAiNew(false);
       }
+    });
+    api.skips().then((s) => {
+      this.skipped = s.ids;
+      this.skipInstrumentals = s.instrumentals;
     });
     const [lib, folders, status, dsp, history, playlists] = await Promise.all([
       api.library(),
@@ -289,9 +324,10 @@ class AppState {
     return album.trackIds.map((id) => this.trackById.get(id)).filter((t): t is Track => !!t);
   }
 
-  playTracks(tracks: Track[], start = 0) {
+  /** Plays a list; skipped songs are left out, except the start song when the user `picked` it. */
+  playTracks(tracks: Track[], start = 0, picked = false) {
     if (tracks.length === 0) return;
-    api.play(tracks.map((t) => t.id), start);
+    api.play(tracks.map((t) => t.id), start, picked);
   }
 
   togglePlay() {
@@ -314,7 +350,7 @@ class AppState {
     const t = tracks[startIndex];
     this.openMenu(e, [
       ...extra,
-      { label: "Play", icon: "play", action: () => this.playTracks(tracks, startIndex) },
+      { label: "Play", icon: "play", action: () => this.playTracks(tracks, startIndex, true) },
       { label: "Play Next", icon: "playNext", action: () => this.enqueue([t], true) },
       { label: "Add to Queue", icon: "queue", action: () => this.enqueue([t], false) },
       { label: "Add to Playlist…", icon: "playlist", action: () => (this.picker = [t]) },
@@ -323,6 +359,9 @@ class AppState {
       { label: "Go to Album", icon: "album", action: () => this.go({ name: "album", id: t.albumId }) },
       { label: "Edit Info…", icon: "edit", action: () => (this.tagEditing = [t]) },
       { label: "Go to Artist", icon: "artist", action: () => this.go({ name: "artist", artist: this.artistOf(t.albumArtist) }) },
+      this.skippedSet.has(t.id)
+        ? { label: "Stop Skipping", icon: "skip", action: () => this.setSkipped([t], false) }
+        : { label: "Skip This Song", icon: "skip", action: () => this.setSkipped([t], true) },
     ]);
   }
 
@@ -423,8 +462,15 @@ class AppState {
   }
 }
 
-function label(tracks: Track[]) {
-  return tracks.length === 1 ? tracks[0].title : `${tracks.length} songs`;
+function label(tracks: Track[], quoted = false) {
+  if (tracks.length !== 1) return `${tracks.length} songs`;
+  return quoted ? `“${tracks[0].title}”` : tracks[0].title;
+}
+
+/** "Song (Instrumental)", "Song - Off Vocal", "Song (Karaoke Ver.)"… (matches the engine's rule). */
+export function isInstrumental(title: string): boolean {
+  const t = title.toLowerCase();
+  return ["instrumental", "off vocal", "off-vocal", "offvocal", "karaoke", "backing track", "(inst", "[inst", "- inst", "inst.)", "inst.]"].some((w) => t.includes(w));
 }
 
 export function shuffled<T>(list: T[]): T[] {

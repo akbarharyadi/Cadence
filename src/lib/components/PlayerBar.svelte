@@ -151,7 +151,7 @@
         {#if album?.artSmall}<img src={artUrl(album.artSmall)} alt="" />{:else}<Icon name="note" size={22} />{/if}
         <span class="expand"><Icon name="expand" size={16} /></span>
       </button>
-      <div class="meta">
+      <div class="meta" role="group" oncontextmenu={(e) => app.trackMenu(e, [t])}>
         {#key t.id}
           <div class="meta-in">
             <button class="title" onclick={() => app.go({ name: "album", id: t.albumId })}>{t.title}</button>
@@ -160,6 +160,9 @@
           </div>
         {/key}
       </div>
+      <button class="icon-btn skip" onclick={() => app.setSkipped([t], true)} aria-label="Skip this song from now on" title="Skip this song from now on: it's left out when albums, playlists and shuffles play">
+        <Icon name="skip" size={16} />
+      </button>
     </div>
 
     <div class="center">
@@ -471,6 +474,25 @@
   }
   .badge {
     margin-top: 2px;
+  }
+  /* Shown when the pointer is over the song (or it has keyboard focus). */
+  .skip {
+    flex: none;
+    width: 30px;
+    height: 30px;
+    margin-left: -4px;
+    color: var(--text-2);
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .left:hover .skip,
+  .skip:focus-visible {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .skip {
+      display: none;
+    }
   }
 
   /* ---------- transport ---------- */

@@ -349,6 +349,7 @@ struct DjInput {
 }
 
 fn dj_input(state: &AppState, request: &str) -> DjInput {
+    let rule = state.skip_rule();
     let history = state.history.lock().stats();
     let settings = state.settings.lock().ai.clone();
     let lib = state.library.lock();
@@ -368,6 +369,7 @@ fn dj_input(state: &AppState, request: &str) -> DjInput {
         .snapshot
         .tracks
         .iter()
+        .filter(|t| !rule.skips(t))
         .map(|t| crate::ai::Candidate {
             sound: sound.remove(&t.id),
             track: t.clone(),
@@ -482,17 +484,48 @@ pub async fn ai_mixes(state: State<'_, Arc<AppState>>, refresh: bool) -> Result<
 
 // ---------- player ----------
 
+/// Plays a list from `start`. Skipped songs are left out, except the one the user picked (`picked`).
 #[tauri::command]
-pub fn play_tracks(state: AppStateRef, ids: Vec<String>, start: usize) {
+pub fn play_tracks(state: AppStateRef, ids: Vec<String>, start: usize, picked: Option<bool>) {
+    let rule = state.skip_rule();
+    let (ids, start_id) = {
+        let lib = state.library.lock();
+        without_skipped(ids, start, picked.unwrap_or(false), |id| {
+            lib.by_id.get(id).is_some_and(|&k| rule.skips(&lib.snapshot.tracks[k]))
+        })
+    };
+    if ids.is_empty() {
+        return; // Everything in the list is skipped: keep playing what's on.
+    }
     let items = state.queue_items(&ids);
-    let start = ids
-        .get(start)
-        .and_then(|id| items.iter().position(|q| &q.id == id))
+    let start = start_id
+        .and_then(|id| items.iter().position(|q| q.id == id))
         .unwrap_or(0);
     state.engine.send(Cmd::Load {
         items,
         index: start,
     });
+}
+
+/// The list without skipped songs, and the song to start with: the one at `start` if the user
+/// picked it, else the first one from there that isn't skipped.
+fn without_skipped(
+    ids: Vec<String>,
+    start: usize,
+    picked: bool,
+    skips: impl Fn(&str) -> bool,
+) -> (Vec<String>, Option<String>) {
+    let kept: Vec<(usize, String)> = ids
+        .into_iter()
+        .enumerate()
+        .filter(|(i, id)| (picked && *i == start) || !skips(id))
+        .collect();
+    let start_id = kept
+        .iter()
+        .find(|(i, _)| *i >= start)
+        .or(kept.first())
+        .map(|(_, id)| id.clone());
+    (kept.into_iter().map(|(_, id)| id).collect(), start_id)
 }
 
 #[tauri::command]
@@ -629,6 +662,60 @@ pub fn get_app_settings(state: AppStateRef) -> AppSettings {
 #[tauri::command]
 pub fn set_lyrics_online(state: AppStateRef, enabled: bool) {
     state.settings.lock().lyrics_online = enabled;
+    state.save_settings();
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Skips {
+    ids: Vec<String>,
+    instrumentals: bool,
+}
+
+#[tauri::command]
+pub fn get_skips(state: AppStateRef) -> Skips {
+    let s = state.settings.lock();
+    Skips {
+        ids: s.skipped.iter().cloned().collect(),
+        instrumentals: s.skip_instrumentals,
+    }
+}
+
+/// Marks songs to be skipped (or not). Newly skipped songs also leave the queue; if one is
+/// playing, Cadence moves on to the next song.
+#[tauri::command]
+pub fn set_skipped(state: AppStateRef, ids: Vec<String>, skip: bool) {
+    {
+        let mut s = state.settings.lock();
+        for id in &ids {
+            if skip {
+                s.skipped.insert(id.clone());
+            } else {
+                s.skipped.remove(id);
+            }
+        }
+    }
+    state.save_settings();
+    if !skip {
+        return;
+    }
+    let status = state.engine.status();
+    let Some(current) = status.index else {
+        return;
+    };
+    for (i, id) in status.queue.iter().enumerate().rev() {
+        if i > current && ids.contains(id) {
+            state.engine.send(Cmd::Remove(i));
+        }
+    }
+    if status.queue.get(current).is_some_and(|id| ids.contains(id)) {
+        state.engine.send(Cmd::Next);
+    }
+}
+
+#[tauri::command]
+pub fn set_skip_instrumentals(state: AppStateRef, enabled: bool) {
+    state.settings.lock().skip_instrumentals = enabled;
     state.save_settings();
 }
 
@@ -987,4 +1074,32 @@ pub async fn ai_discover(state: State<'_, Arc<AppState>>, refresh: bool) -> Resu
         },
     );
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_skipped;
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn skipped_songs_leave_lists() {
+        let skips = |id: &str| id.starts_with('x');
+        // Play / Shuffle: skipped songs are left out, even the first one.
+        let (list, start) = without_skipped(ids(&["x1", "a", "x2", "b"]), 0, false, skips);
+        assert_eq!(list, ids(&["a", "b"]));
+        assert_eq!(start.as_deref(), Some("a"));
+        // Picking a skipped song plays it, the rest still skip.
+        let (list, start) = without_skipped(ids(&["a", "x1", "b", "x2"]), 1, true, skips);
+        assert_eq!(list, ids(&["a", "x1", "b"]));
+        assert_eq!(start.as_deref(), Some("x1"));
+        // Starting on a skipped song that wasn't picked moves on to the next one.
+        let (_, start) = without_skipped(ids(&["a", "x1", "b"]), 1, false, skips);
+        assert_eq!(start.as_deref(), Some("b"));
+        // Everything skipped: nothing plays.
+        let (list, start) = without_skipped(ids(&["x1", "x2"]), 0, false, skips);
+        assert!(list.is_empty() && start.is_none());
+    }
 }

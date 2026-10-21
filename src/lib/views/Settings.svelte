@@ -43,6 +43,13 @@
     lbUser = "";
   }
 
+  const skippedTracks = $derived(
+    app.skipped
+      .map((id) => app.trackById.get(id))
+      .filter((t) => !!t)
+      .sort((a, b) => a.title.localeCompare(b.title)),
+  );
+
   const out = $derived(app.status?.output);
   const src = $derived(app.status?.source);
 
@@ -183,6 +190,34 @@
   </section>
 
   <section>
+    <div class="title-row">
+      <div>
+        <h2 class="section-title">Skip instrumental versions</h2>
+        <p class="desc">
+          Leave out instrumental, karaoke and off-vocal versions when an album, playlist, mix or shuffle plays. They stay in your
+          library, and play when you pick them yourself.
+        </p>
+      </div>
+      <Toggle checked={app.skipInstrumentals} label="Skip instrumental versions" onchange={(v) => app.setSkipInstrumentals(v)} />
+    </div>
+    <h3 class="sub-title">Songs you skip</h3>
+    <p class="desc">Choose <b>Skip This Song</b> in a song’s menu to add it here.</p>
+    <ul class="folders">
+      {#each skippedTracks as t (t.id)}
+        <li>
+          <Icon name="skip" size={18} />
+          <span class="path" title="{t.title} – {t.artist}">{t.title} <span class="secondary">{t.artist}</span></span>
+          <button class="icon-btn" aria-label="Stop skipping {t.title}" title="Stop skipping" onclick={() => app.setSkipped([t], false)}>
+            <Icon name="close" size={16} />
+          </button>
+        </li>
+      {:else}
+        <li class="none">No songs skipped.</li>
+      {/each}
+    </ul>
+  </section>
+
+  <section>
     <h2 class="section-title">Scrobbling</h2>
     <p class="desc">Keep a record of what you listen to on ListenBrainz, a free and open listening history. A song counts once you’ve heard half of it or four minutes.</p>
     {#if lbUser}
@@ -270,6 +305,11 @@
     margin: 6px 0 0;
     color: var(--text-2);
     max-width: 64ch;
+  }
+  .sub-title {
+    margin: 22px 0 0;
+    font-size: 15px;
+    font-weight: 600;
   }
   .folders {
     list-style: none;

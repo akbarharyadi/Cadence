@@ -105,7 +105,12 @@
 
       <div class="info">
         {#if t}
-          <h1>{t.title}</h1>
+          <div class="title-row">
+            <h1>{t.title}</h1>
+            <button class="icon-btn light skip" onclick={() => app.setSkipped([t], true)} aria-label="Skip this song from now on" title="Skip this song from now on">
+              <Icon name="skip" size={20} />
+            </button>
+          </div>
           <button class="artist" onclick={() => app.go({ name: "artist", artist: app.artistOf(t.albumArtist) })}>{t.artist}</button>
           <button class="album" onclick={() => app.go({ name: "album", id: t.albumId })}>{t.album}{t.year ? `, ${t.year}` : ""}</button>
         {:else}
@@ -161,6 +166,23 @@
 </div>
 
 <style>
+  .title-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .title-row h1 {
+    flex: 1;
+    min-width: 0;
+  }
+  .skip {
+    flex: none;
+    margin-top: 2px;
+    opacity: 0.7;
+  }
+  .skip:hover {
+    opacity: 1;
+  }
   .np {
     position: fixed;
     inset: 0;

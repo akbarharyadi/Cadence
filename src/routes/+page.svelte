@@ -159,7 +159,11 @@
 </script>
 
 <svelte:window onkeydown={onKey} />
-<svelte:document onmouseup={(e) => e.button === 3 && app.back()} />
+<!-- No browser menu (Back, Refresh, Print…) on right-click; text fields keep theirs for copy and paste. -->
+<svelte:document
+  onmouseup={(e) => e.button === 3 && app.back()}
+  oncontextmenu={(e) => !(e.target as HTMLElement).closest("input, textarea, [contenteditable]") && e.preventDefault()}
+/>
 
 <!-- Ambient colour field from the current cover, behind everything. -->
 <div class="ambient" aria-hidden="true">

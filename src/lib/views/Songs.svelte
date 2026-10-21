@@ -4,13 +4,14 @@
   import { app, shuffled } from "$lib/store.svelte";
 
   const songs = $derived([...app.tracks].sort((a, b) => a.title.localeCompare(b.title)));
+  const skipped = $derived(songs.filter((t) => app.isSkipped(t)).length);
 </script>
 
 <div class="page">
   <header>
     <div>
       <h1 class="page-title">Songs</h1>
-      <p class="secondary count">{songs.length} songs</p>
+      <p class="secondary count">{songs.length} songs{#if skipped}, {skipped} skipped{/if}</p>
     </div>
     <div class="actions">
       <button class="pill" onclick={() => app.playTracks(songs)}><Icon name="play" size={15} />Play</button>

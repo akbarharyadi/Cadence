@@ -1,6 +1,6 @@
 //! App state shared by commands and background jobs, plus its persistence.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
@@ -27,6 +27,10 @@ pub struct Settings {
     /// Fill in missing song info (title, artist, album, cover) from the iTunes catalogue when an
     /// untagged song plays, and save it into the file.
     pub fix_tags_online: bool,
+    /// Songs the user chose to skip: left out when an album, playlist, mix or shuffle plays.
+    pub skipped: BTreeSet<String>,
+    /// Also skip instrumental, karaoke and off-vocal versions.
+    pub skip_instrumentals: bool,
 }
 
 impl Default for Settings {
@@ -41,8 +45,30 @@ impl Default for Settings {
             listenbrainz_user: String::new(),
             ai: Default::default(),
             fix_tags_online: true,
+            skipped: BTreeSet::new(),
+            skip_instrumentals: false,
         }
     }
+}
+
+/// Which songs are left out when a list plays.
+pub struct SkipRule {
+    ids: BTreeSet<String>,
+    instrumentals: bool,
+}
+
+impl SkipRule {
+    pub fn skips(&self, t: &Track) -> bool {
+        self.ids.contains(&t.id) || (self.instrumentals && is_instrumental(&t.title))
+    }
+}
+
+/// "Song (Instrumental)", "Song - Off Vocal", "Song (Karaoke Ver.)", "Song (Inst.)"…
+pub fn is_instrumental(title: &str) -> bool {
+    let t = title.to_lowercase();
+    ["instrumental", "off vocal", "off-vocal", "offvocal", "karaoke", "backing track", "(inst", "[inst", "- inst", "inst.)", "inst.]"]
+        .iter()
+        .any(|w| t.contains(w))
 }
 
 #[derive(Default)]
@@ -113,6 +139,14 @@ impl AppState {
         write_json(&self.data_dir.join("sonic.json"), &*self.sonic.lock());
     }
 
+    pub fn skip_rule(&self) -> SkipRule {
+        let s = self.settings.lock();
+        SkipRule {
+            ids: s.skipped.clone(),
+            instrumentals: s.skip_instrumentals,
+        }
+    }
+
     pub fn queue_items(&self, ids: &[String]) -> Vec<QueueItem> {
         let lib = self.library.lock();
         let sonic = self.sonic.lock();
@@ -143,6 +177,28 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) {
     if let Ok(json) = serde_json::to_vec(value) {
         if std::fs::write(&tmp, json).is_ok() {
             let _ = std::fs::rename(&tmp, path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_instrumental;
+
+    #[test]
+    fn spots_instrumental_versions() {
+        for t in [
+            "「拉海洛」之心 Heart of Lahai-Roi (Instrumental)",
+            "A Beautiful Mistake instrumental",
+            "Catch Me If You Can (Instrumental with Backing Vocals)",
+            "Sakura (Off Vocal)",
+            "Lemon (Karaoke Ver.)",
+            "Gurenge (Inst.)",
+        ] {
+            assert!(is_instrumental(t), "{t}");
+        }
+        for t in ["Instinct", "Institute of Sound", "24k Magic", "-FINAL SIGMA-"] {
+            assert!(!is_instrumental(t), "{t}");
         }
     }
 }

@@ -215,7 +215,7 @@
           <ol class="answer-list">
             {#each tracks.slice(0, 8) as t, i (t.id)}
               <li>
-                <button onclick={() => app.playTracks(tracks, i)} oncontextmenu={(e) => app.trackMenu(e, tracks, i)}>
+                <button onclick={() => app.playTracks(tracks, i, true)} oncontextmenu={(e) => app.trackMenu(e, tracks, i)}>
                   <span class="song-art">{#if app.albumById.get(t.albumId)?.artSmall}<img src={artUrl(app.albumById.get(t.albumId)?.artSmall)} alt="" />{/if}</span>
                   <span class="song-text"><span class="song-title">{t.title}</span><span class="song-artist">{t.artist}</span></span>
                 </button>
@@ -280,7 +280,7 @@
       <h2 class="section-title">On repeat</h2>
       <div class="songs">
         {#each app.mostPlayed.slice(0, 9) as t, i (t.id)}
-          <button class="song" onclick={() => app.playTracks(app.mostPlayed, i)} oncontextmenu={(e) => app.trackMenu(e, app.mostPlayed, i)}>
+          <button class="song" onclick={() => app.playTracks(app.mostPlayed, i, true)} oncontextmenu={(e) => app.trackMenu(e, app.mostPlayed, i)}>
             <span class="song-art">{#if app.albumById.get(t.albumId)?.artSmall}<img src={artUrl(app.albumById.get(t.albumId)?.artSmall)} alt="" loading="lazy" />{/if}</span>
             <span class="song-text"><span class="song-title">{t.title}</span><span class="song-artist">{t.artist}</span></span>
             <span class="song-plays">{app.listening?.plays[t.id] ?? 0} {app.listening?.plays[t.id] === 1 ? "play" : "plays"}</span>

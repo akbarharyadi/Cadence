@@ -60,6 +60,8 @@
 - **Player**: full-width seek bar, lists of the previous and next songs, a mini player and the system tray.
 - **Updates itself**: checks GitHub for new versions, downloads them in the background and installs on restart
   (signed, so only genuine releases install). On Android it downloads the new APK and opens the installer.
+- **Skip songs** you don't want in rotation (or every instrumental and karaoke version): they stay in the library but
+  are left out when albums, playlists, mixes and shuffles play.
 - Playlists and smart playlists, tag editing, ListenBrainz scrobbling, and media keys with the system media controls.
 
 ### Android
