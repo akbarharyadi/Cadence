@@ -315,8 +315,9 @@ pub fn save_choice(app: &AppHandle, id: &str, choice: Candidate) -> Result<bool,
     }
     if playing.as_deref() == Some(id) {
         rt.playing = Some(id.to_string());
-        rt.waiting.insert(id.to_string(), (path, found));
+        rt.waiting.insert(id.to_string(), (path, found.clone()));
         drop(rt);
+        show_now(&state, id, &found);
         let _ = app.emit("library-changed", ());
         return Ok(true);
     }
@@ -326,6 +327,24 @@ pub fn save_choice(app: &AppHandle, id: &str, choice: Candidate) -> Result<bool,
     write(&path, &found, cover)?;
     crate::jobs::start_scan(app.clone());
     Ok(false)
+}
+
+/// A playing song's file can't be written yet: show its new album and cover in the library now.
+fn show_now(state: &AppState, id: &str, found: &Found) {
+    let art_dir = state.art_dir();
+    let album_id = crate::library::album_id_for(&found.album_artist, &found.album);
+    let has_art = art_dir.join(format!("{album_id}_s.jpg")).exists();
+    if !has_art {
+        if let Some(bytes) = found.cover_url.as_deref().and_then(|u| download(u).ok()) {
+            crate::library::write_art(&album_id, &bytes, &art_dir);
+        }
+    }
+    let mut lib = state.library.lock();
+    let Some(&i) = lib.by_id.get(id) else { return };
+    lib.snapshot.tracks[i].album_id = album_id;
+    let mut tracks = lib.snapshot.tracks.clone();
+    let albums = crate::library::build_albums(&mut tracks, &art_dir);
+    lib.set_tracks(tracks, albums);
 }
 
 // ---------- finding the song ----------

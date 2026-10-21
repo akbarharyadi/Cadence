@@ -501,7 +501,21 @@ fn ensure_art(
     let Some(bytes) = embedded_cover(tracks).or_else(|| folder_cover(tracks)) else {
         return (None, None);
     };
-    match image::load_from_memory(&bytes) {
+    write_art(album_id, &bytes, art_dir)
+}
+
+/// The album id for an album artist and title (see `album_key` in `read_track`).
+pub fn album_id_for(album_artist: &str, album: &str) -> String {
+    short_hash(&format!("{}|{}", album_artist.to_lowercase(), album.to_lowercase()))
+}
+
+/// Saves a cover image as an album's large and small artwork.
+pub fn write_art(album_id: &str, bytes: &[u8], art_dir: &Path) -> (Option<String>, Option<String>) {
+    let large = art_dir.join(format!("{album_id}.jpg"));
+    let small = art_dir.join(format!("{album_id}_s.jpg"));
+    let as_str = |p: &Path| Some(p.to_string_lossy().into_owned());
+    let _ = std::fs::create_dir_all(art_dir);
+    match image::load_from_memory(bytes) {
         Ok(img) => {
             let save = |size: u32, path: &Path| -> bool {
                 let resized = if img.width() > size || img.height() > size {
