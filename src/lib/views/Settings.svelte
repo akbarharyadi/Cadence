@@ -113,7 +113,7 @@
         <span style="width: {s.total ? (s.analyzed / s.total) * 100 : 0}%"></span>
       </div>
       <p class="hint">
-        {#if s.running}Listening… {s.analyzed} of {s.total} songs{:else if s.analyzed >= s.total}All {s.total} songs analysed{:else}{s.analyzed} of {s.total} songs analysed{/if}{app.mixes.length ? `, ${app.mixes.length} ${app.mixes.length === 1 ? "mix" : "mixes"} on Home` : ""}.
+        {#if s.total === 0}Nothing to analyse yet: add some music first{:else if s.running}Listening… {s.analyzed} of {s.total} songs{:else if s.analyzed >= s.total}All {s.total} songs analysed{:else}{s.analyzed} of {s.total} songs analysed{/if}{app.mixes.length ? `, ${app.mixes.length} ${app.mixes.length === 1 ? "mix" : "mixes"} on Home` : ""}.
       </p>
     {/if}
   </section>

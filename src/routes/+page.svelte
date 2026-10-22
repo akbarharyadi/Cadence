@@ -182,13 +182,17 @@
     <main class="content" onscroll={onScroll}>
       <!-- Sticky top bar: Back button, and a place to drag the frameless window from. -->
       <div class="topbar" class:scrolled data-tauri-drag-region>
-        {#if app.history.length > 0 && !empty}
+        {#if app.history.length > 0 && (!empty || app.view.name === "sound" || app.view.name === "settings")}
           <button class="back icon-btn" onclick={() => app.back()} aria-label="Back"><Icon name="back" size={18} /></button>
         {/if}
         <div class="bar-title" class:on={showBarTitle} aria-hidden={!showBarTitle}>{barTitle}</div>
       </div>
       {#if !app.loaded}
         <div></div>
+      {:else if app.view.name === "sound"}
+        <Sound />
+      {:else if app.view.name === "settings"}
+        <Settings />
       {:else if empty}
         <Welcome />
       {:else if app.view.name === "home"}
@@ -211,10 +215,6 @@
         {#key app.view.id}<PlaylistView id={app.view.id} />{/key}
       {:else if app.view.name === "similar"}
         {#key app.view.id}<SimilarView id={app.view.id} />{/key}
-      {:else if app.view.name === "sound"}
-        <Sound />
-      {:else if app.view.name === "settings"}
-        <Settings />
       {/if}
     </main>
     </div>
