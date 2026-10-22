@@ -50,6 +50,11 @@
     "shortDescription": "Lossless music player",
     "longDescription": "Cadence is an open-source lossless music player for your own files: bit-perfect playback, gapless, Sound Check, EQ, synced lyrics and an AI DJ.",
     "homepage": "https://cadence.akbarharyadi.com",
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/installer-hooks.nsh"
+      }
+    },
     "android": {
       "minSdkVersion": 26
     },
