@@ -89,6 +89,10 @@ class AppState {
   picker = $state<Track[] | null>(null);
   /** Songs whose info (tags) is being edited. */
   tagEditing = $state<Track[] | null>(null);
+  /** Pictures chosen for artists, by lower-case name. */
+  artistImages = $state<Record<string, import("./api").ArtistImage>>({});
+  /** The artist whose picture is being chosen. */
+  artistEditing = $state<string | null>(null);
   /** The song open in Fix Song Info. */
   fixing = $state<Track | null>(null);
   /** The open folder browser (Android): call with the chosen folder, or null if cancelled. */
@@ -152,6 +156,26 @@ class AppState {
   /** Also skip instrumental, karaoke and off-vocal versions. */
   skipInstrumentals = $state(false);
 
+  /** An artist's picture: the one chosen for them, else their latest album's cover. */
+  artistPicture(artist: Artist, size: "large" | "small"): string | null {
+    const own = this.artistImages[artist.name.toLowerCase()];
+    if (own) return size === "large" ? own.large : own.small;
+    const latest = [...artist.albums].filter((a) => a.art).sort((a, b) => (b.year ?? 0) - (a.year ?? 0))[0];
+    return (size === "large" ? latest?.art : latest?.artSmall) ?? null;
+  }
+
+  async setArtistImage(name: string, source: { kind: "url"; url: string } | { kind: "file"; path: string }) {
+    const img = await api.setArtistImage(name, source);
+    this.artistImages = { ...this.artistImages, [name.toLowerCase()]: img };
+    this.showToast(`New picture for ${name}`);
+  }
+
+  async resetArtistImage(name: string) {
+    await api.resetArtistImage(name);
+    const { [name.toLowerCase()]: _, ...rest } = this.artistImages;
+    this.artistImages = rest;
+  }
+
   /** Songs with no real tags (e.g. downloads named "Artist - Title"). */
   needsInfo(t: Track): boolean {
     return t.artist === "Unknown Artist";
@@ -202,6 +226,7 @@ class AppState {
         this.loadAiNew(false);
       }
     });
+    api.artistImages().then((m) => (this.artistImages = m));
     api.skips().then((s) => {
       this.skipped = s.ids;
       this.skipInstrumentals = s.instrumentals;
@@ -416,6 +441,7 @@ class AppState {
     else if (this.picker) this.picker = null;
     else if (this.tagEditing) this.tagEditing = null;
     else if (this.fixing) this.fixing = null;
+    else if (this.artistEditing) this.artistEditing = null;
     else if (this.smartEditing) this.smartEditing = null;
     else if (this.folderBrowser) {
       this.folderBrowser(null);

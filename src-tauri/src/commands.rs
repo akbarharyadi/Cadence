@@ -944,6 +944,38 @@ pub async fn save_song_info(app: AppHandle, id: String, info: crate::autotag::Ca
         .map_err(|e| e.to_string())?
 }
 
+// ---------- artist pictures ----------
+
+#[tauri::command]
+pub fn artist_images(state: AppStateRef) -> std::collections::HashMap<String, crate::artists::ArtistImage> {
+    crate::artists::all(&state.data_dir)
+}
+
+/// Photos of this artist from the online catalogue.
+#[tauri::command]
+pub async fn find_artist_photos(name: String) -> Result<Vec<crate::artists::Photo>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::artists::search(&name))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn set_artist_image(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+    source: crate::artists::Source,
+) -> Result<crate::artists::ArtistImage, String> {
+    let (data, art) = (state.data_dir.clone(), state.art_dir());
+    tauri::async_runtime::spawn_blocking(move || crate::artists::set(&data, &art, &name, source))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn reset_artist_image(state: AppStateRef, name: String) {
+    crate::artists::reset(&state.data_dir, &name);
+}
+
 fn track_of(state: &AppState, id: &str) -> Result<crate::library::Track, String> {
     let lib = state.library.lock();
     lib.by_id

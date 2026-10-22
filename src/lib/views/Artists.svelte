@@ -9,10 +9,18 @@
   <p class="secondary count">{app.artists.length} {app.artists.length === 1 ? "artist" : "artists"}</p>
   <div class="grid">
     {#each app.artists as artist (artist.name)}
-      <button class="artist" onclick={() => app.go({ name: "artist", artist: artist.name })}>
+      {@const picture = app.artistPicture(artist, "small")}
+      <button
+        class="artist"
+        onclick={() => app.go({ name: "artist", artist: artist.name })}
+        oncontextmenu={(e) => app.openMenu(e, [
+          { label: "Go to Artist", icon: "artist", action: () => app.go({ name: "artist", artist: artist.name }) },
+          { label: "Change Picture…", icon: "edit", action: () => (app.artistEditing = artist.name) },
+        ])}
+      >
         <div class="avatar" style="--glow: {artist.albums[0]?.accent ?? 'transparent'}">
-          {#if artist.albums[0]?.artSmall}
-            <img src={artUrl(artist.albums[0].artSmall)} alt="" loading="lazy" />
+          {#if picture}
+            <img src={artUrl(picture)} alt="" loading="lazy" />
           {:else}
             <Icon name="artist" size={40} />
           {/if}

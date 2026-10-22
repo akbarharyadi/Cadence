@@ -1,4 +1,5 @@
 mod ai;
+mod artists;
 mod autotag;
 mod catalog;
 pub mod audio;
@@ -260,6 +261,10 @@ pub fn run() {
             commands::set_lyrics_online,
             commands::set_fix_tags_online,
             commands::get_skips,
+            commands::artist_images,
+            commands::find_artist_photos,
+            commands::set_artist_image,
+            commands::reset_artist_image,
             commands::find_song_info,
             commands::save_song_info,
             commands::set_skipped,

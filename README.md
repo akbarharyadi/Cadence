@@ -63,6 +63,8 @@
   (signed, so only genuine releases install). On Android it downloads the new APK and opens the installer.
 - **Fix song info**: for downloads named "Artist - Title", pick the right match from the iTunes catalogue and
   Cadence writes the title, artist, album, year and cover into the file (or does it by itself when they play).
+- **Artist pictures**: choose a photo from the online catalogue (Deezer), one of the artist's album covers or your
+  own image.
 - **Skip songs** you don't want in rotation (or every instrumental and karaoke version): they stay in the library but
   are left out when albums, playlists, mixes and shuffles play.
 - Playlists and smart playlists, tag editing, ListenBrainz scrobbling, and media keys with the system media controls.

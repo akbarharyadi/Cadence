@@ -281,6 +281,11 @@ export const api = {
   findSongInfo: (id: string, query?: string) => invoke<{ term: string; results: SongInfo[] }>("find_song_info", { id, query: query ?? null }),
   /** True when the song is playing: its file is written when it finishes. */
   saveSongInfo: (id: string, info: SongInfo) => invoke<boolean>("save_song_info", { id, info }),
+  artistImages: () => invoke<Record<string, ArtistImage>>("artist_images"),
+  findArtistPhotos: (name: string) => invoke<ArtistPhoto[]>("find_artist_photos", { name }),
+  setArtistImage: (name: string, source: { kind: "url"; url: string } | { kind: "file"; path: string }) =>
+    invoke<ArtistImage>("set_artist_image", { name, source }),
+  resetArtistImage: (name: string) => invoke<void>("reset_artist_image", { name }),
   skips: () => invoke<{ ids: string[]; instrumentals: boolean }>("get_skips"),
   setSkipped: (ids: string[], skip: boolean) => invoke<void>("set_skipped", { ids, skip }),
   setSkipInstrumentals: (enabled: boolean) => invoke<void>("set_skip_instrumentals", { enabled }),
@@ -382,4 +387,18 @@ export interface SongInfo {
   duration: number;
   /** Same title (and artist) and about the same length. */
   likely: boolean;
+}
+
+/** A picture the user chose for an artist (large and small files). */
+export interface ArtistImage {
+  large: string;
+  small: string;
+}
+
+/** An artist photo from the online catalogue. */
+export interface ArtistPhoto {
+  name: string;
+  picture: string;
+  thumb: string;
+  fans: number;
 }

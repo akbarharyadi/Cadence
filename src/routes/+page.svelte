@@ -13,6 +13,7 @@
   import SmartEditor from "$lib/components/SmartEditor.svelte";
   import TagEditor from "$lib/components/TagEditor.svelte";
   import FixInfo from "$lib/components/FixInfo.svelte";
+  import ArtistPicture from "$lib/components/ArtistPicture.svelte";
   import PlayerBar from "$lib/components/PlayerBar.svelte";
   import QueuePanel from "$lib/components/QueuePanel.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -230,6 +231,7 @@
 {#if app.smartEditing}<SmartEditor />{/if}
 {#if app.tagEditing}<TagEditor />{/if}
 {#if app.fixing}{#key app.fixing.id}<FixInfo />{/key}{/if}
+{#if app.artistEditing}{#key app.artistEditing}<ArtistPicture />{/key}{/if}
 {#if app.folderBrowser}<FolderBrowser />{/if}
 <UpdateBanner />
 

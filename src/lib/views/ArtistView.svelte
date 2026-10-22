@@ -10,15 +10,19 @@
   const albums = $derived([...(artist?.albums ?? [])].sort((a, b) => (b.year ?? 0) - (a.year ?? 0)));
   const songs = $derived(albums.flatMap((a) => app.albumTracks(a)));
   const portrait = $derived(albums[0]);
+  const picture = $derived(artist ? app.artistPicture(artist, "large") : null);
   const time = $derived(songs.reduce((s, t) => s + t.duration, 0));
 </script>
 
 {#if artist}
   <div class="artist-page">
     <header class="hero">
-      <div class="portrait" style="--glow: {portrait?.accent ?? 'transparent'}">
-        {#if portrait?.art}<img src={artUrl(portrait.art)} alt="" />{:else}<Icon name="artist" size={64} />{/if}
-      </div>
+      <button class="portrait" style="--glow: {portrait?.accent ?? 'transparent'}" onclick={() => (app.artistEditing = artist.name)} aria-label="Change the picture for {artist.name}" title="Change picture">
+        {#key picture}
+          {#if picture}<img src={artUrl(picture)} alt="" />{:else}<Icon name="artist" size={64} />{/if}
+        {/key}
+        <span class="edit"><Icon name="edit" size={20} /><span>Change</span></span>
+      </button>
       <div class="info">
         <h1>{artist.name}</h1>
         <p class="facts">{albums.length} {albums.length === 1 ? "album" : "albums"}, {songs.length} songs, {formatDuration(time)}</p>
@@ -69,10 +73,52 @@
       0 20px 50px rgba(0, 0, 0, 0.5),
       0 6px 40px color-mix(in srgb, var(--glow) 30%, transparent);
   }
+  .portrait {
+    position: relative;
+    padding: 0;
+  }
   .portrait img {
     width: 100%;
     height: 100%;
     object-fit: cover;
+    animation: picture-in 0.4s ease-out;
+  }
+  @keyframes picture-in {
+    from {
+      opacity: 0;
+    }
+  }
+  /* "Change" appears over the picture on hover (always reachable by keyboard). */
+  .edit {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    font-size: 13px;
+    font-weight: 600;
+    color: white;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    transition: opacity 0.18s;
+  }
+  .portrait:hover .edit,
+  .portrait:focus-visible .edit {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .edit {
+      inset: auto 0 0;
+      height: 34%;
+      flex-direction: row;
+      opacity: 1;
+      background: linear-gradient(transparent, rgba(0, 0, 0, 0.6));
+    }
+    .edit span {
+      display: none;
+    }
   }
   h1 {
     margin: 0;
