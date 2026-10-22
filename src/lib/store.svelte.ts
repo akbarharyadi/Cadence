@@ -91,6 +91,8 @@ class AppState {
   tagEditing = $state<Track[] | null>(null);
   /** Pictures chosen for artists, by lower-case name. */
   artistImages = $state<Record<string, import("./api").ArtistImage>>({});
+  /** The "Skipped songs" window is open. */
+  skippedOpen = $state(false);
   /** The artist whose picture is being chosen. */
   artistEditing = $state<string | null>(null);
   /** The song open in Fix Song Info. */
@@ -442,6 +444,7 @@ class AppState {
     else if (this.tagEditing) this.tagEditing = null;
     else if (this.fixing) this.fixing = null;
     else if (this.artistEditing) this.artistEditing = null;
+    else if (this.skippedOpen) this.skippedOpen = false;
     else if (this.smartEditing) this.smartEditing = null;
     else if (this.folderBrowser) {
       this.folderBrowser(null);

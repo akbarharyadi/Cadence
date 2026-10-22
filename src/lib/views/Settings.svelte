@@ -6,7 +6,7 @@
   import AiSettings from "$lib/components/AiSettings.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Toggle from "$lib/components/Toggle.svelte";
-  import { app } from "$lib/store.svelte";
+  import { app, isInstrumental } from "$lib/store.svelte";
 
   let version = $state("");
   getVersion().then((v) => (version = v));
@@ -43,12 +43,8 @@
     lbUser = "";
   }
 
-  const skippedTracks = $derived(
-    app.skipped
-      .map((id) => app.trackById.get(id))
-      .filter((t) => !!t)
-      .sort((a, b) => a.title.localeCompare(b.title)),
-  );
+  const skippedCount = $derived(app.skipped.filter((id) => app.trackById.has(id)).length);
+  const instrumentalCount = $derived(app.tracks.filter((t) => isInstrumental(t.title)).length);
 
   const out = $derived(app.status?.output);
   const src = $derived(app.status?.source);
@@ -192,29 +188,27 @@
   <section>
     <div class="title-row">
       <div>
-        <h2 class="section-title">Skip instrumental versions</h2>
+        <h2 class="section-title">Skipped songs</h2>
         <p class="desc">
-          Leave out instrumental, karaoke and off-vocal versions when an album, playlist, mix or shuffle plays. They stay in your
-          library, and play when you pick them yourself.
+          Left out when an album, playlist, mix or shuffle plays. They stay in your library, and play when you pick them yourself.
         </p>
       </div>
-      <Toggle checked={app.skipInstrumentals} label="Skip instrumental versions" onchange={(v) => app.setSkipInstrumentals(v)} />
+      <button class="pill ghost" onclick={() => (app.skippedOpen = true)}><Icon name="skip" size={15} />Manage</button>
     </div>
-    <h3 class="sub-title">Songs you skip</h3>
-    <p class="desc">Choose <b>Skip This Song</b> in a song’s menu to add it here.</p>
-    <ul class="folders">
-      {#each skippedTracks as t (t.id)}
-        <li>
-          <Icon name="skip" size={18} />
-          <span class="path" title="{t.title} – {t.artist}">{t.title} <span class="secondary">{t.artist}</span></span>
-          <button class="icon-btn" aria-label="Stop skipping {t.title}" title="Stop skipping" onclick={() => app.setSkipped([t], false)}>
-            <Icon name="close" size={16} />
-          </button>
-        </li>
-      {:else}
-        <li class="none">No songs skipped.</li>
-      {/each}
-    </ul>
+    <div class="skip-summary">
+      <button class="stat" onclick={() => (app.skippedOpen = true)}>
+        <strong>{skippedCount}</strong>
+        <span>{skippedCount === 1 ? "song" : "songs"} you skip</span>
+      </button>
+      <div class="stat rule">
+        <div>
+          <strong>{instrumentalCount}</strong>
+          <span>instrumental {instrumentalCount === 1 ? "version" : "versions"}{app.skipInstrumentals ? ", skipped" : ""}</span>
+        </div>
+        <Toggle checked={app.skipInstrumentals} label="Skip instrumental versions" onchange={(v) => app.setSkipInstrumentals(v)} />
+      </div>
+    </div>
+    <p class="hint">Instrumental, karaoke and off-vocal versions are found by their titles. Skip any other song from its menu or the ⊘ button in the player.</p>
   </section>
 
   <section>
@@ -306,10 +300,46 @@
     color: var(--text-2);
     max-width: 64ch;
   }
-  .sub-title {
-    margin: 22px 0 0;
-    font-size: 15px;
-    font-weight: 600;
+  .skip-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin-top: 18px;
+  }
+  .stat {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 14px 16px;
+    border-radius: var(--r-md);
+    background: var(--hover);
+    box-shadow: inset 0 0 0 1px var(--line);
+    text-align: left;
+  }
+  button.stat:hover {
+    background: var(--active);
+  }
+  .stat strong {
+    font-family: var(--display);
+    font-size: 24px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat span {
+    font-size: 13px;
+    color: var(--text-2);
+  }
+  .stat.rule {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .stat.rule > div {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
   }
   .folders {
     list-style: none;
