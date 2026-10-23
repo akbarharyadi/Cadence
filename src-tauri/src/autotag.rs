@@ -42,6 +42,13 @@ struct Runtime {
     waiting: HashMap<String, (PathBuf, Found)>,
     /// Files looked up already (kept in autotag.json).
     tried: Option<HashSet<String>>,
+    /// Other writes waiting for their song to stop (e.g. a new cover): track id → jobs.
+    later: HashMap<String, Vec<Box<dyn FnOnce() + Send>>>,
+}
+
+/// Runs `job` (which writes the file of song `id`) once that song is no longer playing.
+pub fn after_song(id: &str, job: Box<dyn FnOnce() + Send>) {
+    runtime().lock().unwrap().later.entry(id.to_string()).or_default().push(job);
 }
 
 fn runtime() -> &'static Mutex<Runtime> {
@@ -58,14 +65,19 @@ pub fn untagged(t: &Track) -> bool {
 pub fn on_track_change(app: &AppHandle, previous: Option<&str>, current: Option<&str>) {
     let state = app.state::<Arc<AppState>>().inner().clone();
     // Info waiting for its song to stop (found automatically, or picked in Fix Song Info).
-    let ready = {
+    let (ready, jobs) = {
         let mut rt = runtime().lock().unwrap();
         rt.playing = current.map(str::to_string);
-        previous.and_then(|p| rt.waiting.remove(p))
+        let ready = previous.and_then(|p| rt.waiting.remove(p));
+        let jobs = previous.and_then(|p| rt.later.remove(p)).unwrap_or_default();
+        (ready, jobs)
     };
     if let Some((path, found)) = ready {
         let app = app.clone();
         std::thread::spawn(move || apply(&app, &path, &found));
+    }
+    if !jobs.is_empty() {
+        std::thread::spawn(move || jobs.into_iter().for_each(|job| job()));
     }
     if !state.settings.lock().fix_tags_online {
         return;

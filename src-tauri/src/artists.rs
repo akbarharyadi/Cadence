@@ -46,15 +46,7 @@ pub fn all(data_dir: &Path) -> HashMap<String, ArtistImage> {
 
 /// Saves `source` as the picture for `artist`, replacing any earlier one.
 pub fn set(data_dir: &Path, art_dir: &Path, artist: &str, source: Source) -> Result<ArtistImage, String> {
-    let bytes = match source {
-        Source::Url { url } => {
-            if !url.starts_with("https://") {
-                return Err("Only https addresses can be used".into());
-            }
-            download(&url)?
-        }
-        Source::File { path } => std::fs::read(&path).map_err(|e| format!("Couldn't read the image: {e}"))?,
-    };
+    let bytes = read_source(source)?;
     let dir = art_dir.join("artists");
     let key = artist.trim().to_lowercase();
     // A new file name each time, so the interface never shows a cached old picture.
@@ -137,6 +129,19 @@ fn client() -> Result<reqwest::blocking::Client, String> {
         .user_agent(concat!("Cadence/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())
+}
+
+/// The image a new picture comes from.
+pub fn read_source(source: Source) -> Result<Vec<u8>, String> {
+    match source {
+        Source::Url { url } => {
+            if !url.starts_with("https://") {
+                return Err("Only https addresses can be used".into());
+            }
+            download(&url)
+        }
+        Source::File { path } => std::fs::read(&path).map_err(|e| format!("Couldn't read the image: {e}")),
+    }
 }
 
 fn download(url: &str) -> Result<Vec<u8>, String> {

@@ -281,6 +281,9 @@ export const api = {
   findSongInfo: (id: string, query?: string) => invoke<{ term: string; results: SongInfo[] }>("find_song_info", { id, query: query ?? null }),
   /** True when the song is playing: its file is written when it finishes. */
   saveSongInfo: (id: string, info: SongInfo) => invoke<boolean>("save_song_info", { id, info }),
+  findCovers: (albumId: string, query?: string) => invoke<{ term: string; results: CoverResult[] }>("find_covers", { albumId, query: query ?? null }),
+  setAlbumCover: (albumId: string, source: { kind: "url"; url: string } | { kind: "file"; path: string }) =>
+    invoke<{ art: string; artSmall: string; later: number; failed: number }>("set_album_cover", { albumId, source }),
   artistImages: () => invoke<Record<string, ArtistImage>>("artist_images"),
   findArtistPhotos: (name: string) => invoke<ArtistPhoto[]>("find_artist_photos", { name }),
   setArtistImage: (name: string, source: { kind: "url"; url: string } | { kind: "file"; path: string }) =>
@@ -317,7 +320,23 @@ export const api = {
   showMain: () => invoke<void>("show_main"),
 };
 
-export const artUrl = (path: string | null | undefined) => (path ? convertFileSrc(path) : "");
+/** Artwork files replaced in place (a new cover): their addresses get a version, so the old image isn't reused. */
+const artVersions: Record<string, number> = (() => {
+  try {
+    return JSON.parse(localStorage.getItem("cadence-art-versions") ?? "{}");
+  } catch {
+    return {};
+  }
+})();
+
+export function artChanged(...paths: string[]) {
+  const v = Date.now();
+  for (const p of paths) artVersions[p] = v;
+  localStorage.setItem("cadence-art-versions", JSON.stringify(artVersions));
+}
+
+export const artUrl = (path: string | null | undefined) =>
+  path ? convertFileSrc(path) + (artVersions[path] ? `?v=${artVersions[path]}` : "") : "";
 
 export function formatTime(secs: number): string {
   if (!isFinite(secs) || secs < 0) secs = 0;
@@ -401,4 +420,16 @@ export interface ArtistPhoto {
   picture: string;
   thumb: string;
   fans: number;
+}
+
+/** A cover offered in Change Cover. */
+export interface CoverResult {
+  title: string;
+  artist: string;
+  year: number | null;
+  url: string;
+  thumb: string;
+  source: string;
+  /** Same album title and artist. */
+  likely: boolean;
 }

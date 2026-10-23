@@ -15,9 +15,10 @@
 {#if album}
   <div class="album" style="--album-accent: {album.accent ?? 'var(--accent)'}">
     <header class="hero">
-      <div class="cover">
+      <button class="cover" onclick={() => (app.coverEditing = album.id)} aria-label="Change the cover of {album.title}" title="Change cover">
         {#if album.art}<img src={artUrl(album.art)} alt="" />{:else}<div class="ph"><Icon name="album" size={64} /></div>{/if}
-      </div>
+        <span class="edit"><Icon name="edit" size={20} /><span>Change cover</span></span>
+      </button>
       <div class="info">
         <h1>{album.title}</h1>
         <button class="artist" onclick={() => app.go({ name: "artist", artist: app.artistOf(album.artist) })}>{album.artist}</button>
@@ -49,6 +50,40 @@
 {/if}
 
 <style>
+  .cover {
+    position: relative;
+    padding: 0;
+    display: block;
+  }
+  /* "Change cover" appears over the cover on hover (and keyboard focus). */
+  .edit {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: white;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    transition: opacity 0.18s;
+  }
+  .cover:hover .edit,
+  .cover:focus-visible .edit {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .edit {
+      inset: auto 0 0;
+      height: 28%;
+      flex-direction: row;
+      opacity: 1;
+      background: linear-gradient(transparent, rgba(0, 0, 0, 0.6));
+    }
+  }
   .hero {
     display: flex;
     align-items: flex-end;

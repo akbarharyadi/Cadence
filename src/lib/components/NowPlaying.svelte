@@ -101,6 +101,11 @@
     <div class="left">
       <div class="cover" class:paused={!s?.playing}>
         {#if art}<img src={art} alt="" />{:else}<div class="ph"><Icon name="note" size={80} /></div>{/if}
+        {#if t}
+          <button class="change-cover" onclick={() => (app.coverEditing = t.albumId)} aria-label="Change cover" title="Change cover">
+            <Icon name="edit" size={16} />
+          </button>
+        {/if}
       </div>
 
       <div class="info">
@@ -112,6 +117,9 @@
                 <Icon name="sparkle" size={20} />
               </button>
             {/if}
+            <button class="icon-btn light skip" onclick={(e) => app.trackMenu(e, [t])} aria-label="More options" title="More options">
+              <Icon name="more" size={20} />
+            </button>
             <button class="icon-btn light skip" onclick={() => app.setSkipped([t], true)} aria-label="Skip this song from now on" title="Skip this song from now on">
               <Icon name="skip" size={20} />
             </button>
@@ -187,6 +195,33 @@
   }
   .skip:hover {
     opacity: 1;
+  }
+  .cover {
+    position: relative;
+  }
+  .change-cover {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    color: white;
+    background: rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(8px);
+    opacity: 0;
+    transition: opacity 0.18s;
+  }
+  .cover:hover .change-cover,
+  .change-cover:focus-visible {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .change-cover {
+      display: none;
+    }
   }
   .np {
     position: fixed;

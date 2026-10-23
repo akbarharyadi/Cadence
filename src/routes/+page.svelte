@@ -15,6 +15,7 @@
   import FixInfo from "$lib/components/FixInfo.svelte";
   import ArtistPicture from "$lib/components/ArtistPicture.svelte";
   import SkippedSongs from "$lib/components/SkippedSongs.svelte";
+  import CoverPicker from "$lib/components/CoverPicker.svelte";
   import PlayerBar from "$lib/components/PlayerBar.svelte";
   import QueuePanel from "$lib/components/QueuePanel.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -38,6 +39,18 @@
 
   let dropping = $state(false);
   let scrolled = $state(false);
+  /** Width of the page's scrollbar: the strip above it is frosted along with the top bar. */
+  let gutter = $state(0);
+  let contentEl = $state<HTMLElement>();
+  $effect(() => {
+    const el = contentEl;
+    if (!el) return;
+    const measure = () => (gutter = el.offsetWidth - el.clientWidth);
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    measure();
+    return () => ro.disconnect();
+  });
   // Once the page's big title scrolls under the top bar, it shows small in the bar (as on iOS).
   let barTitle = $state("");
   let showBarTitle = $state(false);
@@ -181,7 +194,7 @@
   <div class="body">
     {#if showSidebar && !phone}<Sidebar />{/if}
     <div class="column">
-    <main class="content" onscroll={onScroll}>
+    <main class="content" onscroll={onScroll} bind:this={contentEl}>
       <!-- Sticky top bar: Back button, and a place to drag the frameless window from. -->
       <div class="topbar" class:scrolled data-tauri-drag-region>
         {#if app.history.length > 0 && (!empty || app.view.name === "sound" || app.view.name === "settings")}
@@ -219,6 +232,7 @@
         {#key app.view.id}<SimilarView id={app.view.id} />{/key}
       {/if}
     </main>
+    {#if gutter > 0}<div class="bar-cap" class:on={scrolled} style="width: {gutter}px" aria-hidden="true" data-tauri-drag-region></div>{/if}
     </div>
     {#if app.queueOpen}<QueuePanel />{/if}
   </div>
@@ -234,6 +248,7 @@
 {#if app.fixing}{#key app.fixing.id}<FixInfo />{/key}{/if}
 {#if app.artistEditing}{#key app.artistEditing}<ArtistPicture />{/key}{/if}
 {#if app.skippedOpen}<SkippedSongs />{/if}
+{#if app.coverEditing}{#key app.coverEditing}<CoverPicker />{/key}{/if}
 {#if app.folderBrowser}<FolderBrowser />{/if}
 <UpdateBanner />
 
@@ -318,10 +333,21 @@
   }
   /* Scrolled: the bar frosts over the page (it lives inside the page, so the Back button and the
      title stay on top of it during page animations). */
-  .topbar.scrolled {
+  .topbar.scrolled,
+  .bar-cap.on {
     background: color-mix(in srgb, var(--ink) 78%, transparent);
     backdrop-filter: blur(22px) saturate(1.4);
     box-shadow: 0 1px 0 var(--line);
+  }
+  /* Covers the scrollbar's strip beside the top bar (the scrollbar itself starts below the bar,
+     see app.css), so the frosted bar reaches the window's edge. */
+  .bar-cap {
+    position: absolute;
+    top: 0;
+    right: 0;
+    height: 52px;
+    z-index: 21;
+    transition: background 0.2s, box-shadow 0.2s;
   }
   .back {
     background: var(--hover);

@@ -23,7 +23,7 @@ function animate(kind: "forward" | "back" | "tab", change: () => void) {
     if (run === transitions) delete root.dataset.nav;
   });
 }
-import { api, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type DspSettings, type HistoryStats, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track } from "./api";
+import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type DspSettings, type HistoryStats, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track } from "./api";
 
 export type View =
   | { name: "home" }
@@ -91,6 +91,8 @@ class AppState {
   tagEditing = $state<Track[] | null>(null);
   /** Pictures chosen for artists, by lower-case name. */
   artistImages = $state<Record<string, import("./api").ArtistImage>>({});
+  /** The album whose cover is being changed. */
+  coverEditing = $state<string | null>(null);
   /** The "Skipped songs" window is open. */
   skippedOpen = $state(false);
   /** The artist whose picture is being chosen. */
@@ -176,6 +178,14 @@ class AppState {
     await api.resetArtistImage(name);
     const { [name.toLowerCase()]: _, ...rest } = this.artistImages;
     this.artistImages = rest;
+  }
+
+  async setAlbumCover(album: Album, source: { kind: "url"; url: string } | { kind: "file"; path: string }) {
+    const r = await api.setAlbumCover(album.id, source);
+    artChanged(r.art, r.artSmall);
+    await this.loadLibrary();
+    const notes = [r.later ? "the playing song is updated when it finishes" : "", r.failed ? `${r.failed} ${r.failed === 1 ? "file" : "files"} couldn't be changed` : ""].filter(Boolean);
+    this.showToast(`New cover for “${album.title}”${notes.length ? `; ${notes.join(", ")}` : ""}`);
   }
 
   /** Songs with no real tags (e.g. downloads named "Artist - Title"). */
@@ -393,6 +403,7 @@ class AppState {
       { label: "Go to Album", icon: "album", action: () => this.go({ name: "album", id: t.albumId }) },
       { label: "Fix Song Info…", icon: "sparkle", action: () => (this.fixing = t) },
       { label: "Edit Info…", icon: "edit", action: () => (this.tagEditing = [t]) },
+      { label: "Change Cover…", icon: "album", action: () => (this.coverEditing = t.albumId) },
       { label: "Go to Artist", icon: "artist", action: () => this.go({ name: "artist", artist: this.artistOf(t.albumArtist) }) },
       this.skippedSet.has(t.id)
         ? { label: "Stop Skipping", icon: "skip", action: () => this.setSkipped([t], false) }
@@ -408,6 +419,7 @@ class AppState {
       { label: "Add to Queue", icon: "queue", action: () => this.enqueue(this.albumTracks(album), false) },
       { label: "Add to Playlist…", icon: "playlist", action: () => (this.picker = this.albumTracks(album)) },
       { label: "Edit Album Info…", icon: "edit", action: () => (this.tagEditing = this.albumTracks(album)) },
+      { label: "Change Cover…", icon: "album", action: () => (this.coverEditing = album.id) },
       { label: "Go to Artist", icon: "artist", action: () => this.go({ name: "artist", artist: this.artistOf(album.artist) }) },
     ]);
   }
@@ -445,6 +457,7 @@ class AppState {
     else if (this.fixing) this.fixing = null;
     else if (this.artistEditing) this.artistEditing = null;
     else if (this.skippedOpen) this.skippedOpen = false;
+    else if (this.coverEditing) this.coverEditing = null;
     else if (this.smartEditing) this.smartEditing = null;
     else if (this.folderBrowser) {
       this.folderBrowser(null);

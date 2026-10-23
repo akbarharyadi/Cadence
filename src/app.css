@@ -116,6 +116,10 @@ img {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+/* The page's scrollbar starts below the 52 px top bar, which is frosted edge to edge. */
+.content::-webkit-scrollbar-track {
+  margin-top: 52px;
+}
 
 .secondary {
   color: var(--text-2);

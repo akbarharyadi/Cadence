@@ -2,6 +2,7 @@ mod ai;
 mod artists;
 mod autotag;
 mod catalog;
+mod covers;
 pub mod audio;
 mod commands;
 pub mod history;
@@ -262,6 +263,8 @@ pub fn run() {
             commands::set_fix_tags_online,
             commands::get_skips,
             commands::artist_images,
+            commands::find_covers,
+            commands::set_album_cover,
             commands::find_artist_photos,
             commands::set_artist_image,
             commands::reset_artist_image,

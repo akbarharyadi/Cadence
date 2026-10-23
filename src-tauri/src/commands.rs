@@ -944,6 +944,61 @@ pub async fn save_song_info(app: AppHandle, id: String, info: crate::autotag::Ca
         .map_err(|e| e.to_string())?
 }
 
+// ---------- album covers ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverResults {
+    term: String,
+    results: Vec<crate::covers::Cover>,
+}
+
+/// Change Cover: covers from the online catalogues for an album (searching `query`, or its
+/// artist and title).
+#[tauri::command]
+pub async fn find_covers(
+    state: State<'_, Arc<AppState>>,
+    album_id: String,
+    query: Option<String>,
+) -> Result<CoverResults, String> {
+    let (title, artist) = {
+        let lib = state.library.lock();
+        let a = lib.snapshot.albums.iter().find(|a| a.id == album_id).ok_or("Unknown album")?;
+        (a.title.clone(), a.artist.clone())
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        // The user's words, or (when the full name finds nothing) shorter ones.
+        let terms = match query.map(|q| q.trim().to_string()).filter(|q| !q.is_empty()) {
+            Some(q) => vec![q],
+            None => crate::covers::search_terms(&artist, &title),
+        };
+        let mut last = (terms[0].clone(), Vec::new());
+        for term in terms {
+            let results = crate::covers::search(&term, &artist, &title)?;
+            let found = !results.is_empty();
+            last = (term, results);
+            if found {
+                break;
+            }
+        }
+        Ok(CoverResults { term: last.0, results: last.1 })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Sets an album's cover (shown at once, and written into its songs' files).
+#[tauri::command]
+pub async fn set_album_cover(
+    app: AppHandle,
+    album_id: String,
+    source: crate::artists::Source,
+) -> Result<crate::covers::Changed, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::covers::set(&app, &album_id, source))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // ---------- artist pictures ----------
 
 #[tauri::command]
