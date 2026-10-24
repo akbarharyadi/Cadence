@@ -294,6 +294,8 @@ export const api = {
   setSkipInstrumentals: (enabled: boolean) => invoke<void>("set_skip_instrumentals", { enabled }),
   setFixTagsOnline: (enabled: boolean) => invoke<void>("set_fix_tags_online", { enabled }),
   lyrics: (trackId: string) => invoke<Lyrics>("get_lyrics", { trackId }),
+  /** Lines in Latin letters (romaji, pinyin, Korean); "" for lines that need none. */
+  romanize: (lines: string[]) => invoke<string[]>("romanize_lyrics", { lines }),
   writeTags: (ids: string[], changes: Record<string, string>) => invoke<number>("write_tags", { ids, changes }),
   playlists: () => invoke<Playlist[]>("get_playlists"),
   savePlaylist: (playlist: Playlist) => invoke<Playlist>("save_playlist", { playlist }),

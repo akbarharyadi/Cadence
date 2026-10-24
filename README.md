@@ -67,6 +67,7 @@
   into the songs' files.
 - **Artist pictures**: choose a photo from the online catalogue (Deezer), one of the artist's album covers or your
   own image.
+- **Lyrics in Latin letters**: romaji, pinyin or Korean romanization under each line, for scripts you can't read.
 - **Skip songs** you don't want in rotation (or every instrumental and karaoke version): they stay in the library but
   are left out when albums, playlists, mixes and shuffles play.
 - Playlists and smart playlists, tag editing, ListenBrainz scrobbling, and media keys with the system media controls.
@@ -151,7 +152,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ### Releases
 
 [`.github/workflows/release.yml`](.github/workflows/release.yml) builds Windows, macOS (universal), Linux and Android
-when a `v*` tag is pushed and attaches everything to a GitHub Release. Bump the version in `package.json`,
+when a `v*` tag is pushed and attaches everything to a GitHub Release, with that version's section of
+[`CHANGELOG.md`](CHANGELOG.md) as its notes. Bump the version in `package.json`,
 `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` first. The Android job needs the `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD` repository secrets.
 

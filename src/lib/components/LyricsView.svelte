@@ -29,6 +29,29 @@
       .finally(() => (loading = false));
   });
 
+  // Pronunciation: the lyrics in Latin letters under each line, for scripts you can't read.
+  const allText = $derived(lyrics ? lyrics.synced.map((l) => l.text).join("\n") + "\n" + (lyrics.plain ?? "") : "");
+  /** What the Latin letters are called for this song's script, or "" if it needs none. */
+  const romanName = $derived(
+    /[\u3040-\u30ff]/.test(allText) ? "Romaji" : /[\uac00-\ud7a3]/.test(allText) ? "Romanization" : /[\u3400-\u9fff]/.test(allText) ? "Pinyin" : "",
+  );
+  let pronounce = $state(typeof localStorage !== "undefined" && localStorage.getItem("cadence-pronounce") === "on");
+  let roman = $state<string[]>([]);
+  const plainLines = $derived(lyrics?.plain ? lyrics.plain.split("\n") : []);
+  $effect(() => {
+    const l = lyrics;
+    roman = [];
+    if (!pronounce || !romanName || !l) return;
+    const lines = l.synced.length ? l.synced.map((x) => x.text) : (l.plain ?? "").split("\n");
+    api.romanize(lines).then((r) => {
+      if (lyrics === l) roman = r;
+    });
+  });
+  function togglePronounce() {
+    pronounce = !pronounce;
+    localStorage.setItem("cadence-pronounce", pronounce ? "on" : "off");
+  }
+
   /** Index of the line being sung (slightly early, so the eye gets there in time). */
   const active = $derived.by(() => {
     const lines = lyrics?.synced ?? [];
@@ -41,6 +64,7 @@
   // Keep the current line in the middle, unless the user has just scrolled to read ahead.
   $effect(() => {
     const i = active;
+    void roman; // pronunciation lines change the layout: centre again
     if (i < 0 || !box || Date.now() - userScrolledAt < 4000) return;
     const el = box.querySelectorAll<HTMLElement>(".line")[i];
     el?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -237,11 +261,18 @@
             {:else}
               {line.text || "♪"}
             {/if}
+            {#if roman[i]}<span class="roman">{roman[i]}</span>{/if}
           </button>
         {/each}
         <div class="pad"></div>
       {:else if lyrics?.plain}
-        <p class="plain">{lyrics.plain}</p>
+        {#if roman.length}
+          <div class="plain">
+            {#each plainLines as text, i}<p>{text}{#if roman[i]}<span class="roman">{roman[i]}</span>{/if}</p>{/each}
+          </div>
+        {:else}
+          <p class="plain">{lyrics.plain}</p>
+        {/if}
       {:else}
         <div class="status">
           {#if lyrics?.lookup === "hidden"}
@@ -273,6 +304,11 @@
         <button class="link small" onclick={openSearch} title="These lyrics have no timing, so they can't follow the song">Find timed lyrics</button>
       {:else if lyrics && !lyrics.instrumental && lyrics.synced.length}
         <button class="link small" onclick={openSearch}>Wrong lyrics?</button>
+      {/if}
+      {#if romanName && lyrics && (lyrics.synced.length || lyrics.plain)}
+        <button class="chip" class:on={pronounce} aria-pressed={pronounce} onclick={togglePronounce} title="Show the lyrics in Latin letters">
+          <span class="aa">Aa</span>{romanName}
+        </button>
       {/if}
       {#if lyrics && (lyrics.synced.length || lyrics.plain)}
         <button class="link small" onclick={hideLyrics} title="Don’t show these lyrics for this song again">Hide these lyrics</button>
@@ -396,6 +432,52 @@
   }
   .foot .link {
     color: rgba(255, 255, 255, 0.7);
+  }
+  /* The pronunciation under each line: smaller and lighter, but following the line's state. */
+  .roman {
+    display: block;
+    margin-top: 3px;
+    font-family: var(--sans, inherit);
+    font-size: 0.52em;
+    font-weight: 500;
+    letter-spacing: 0;
+    line-height: 1.35;
+    opacity: 0.82;
+  }
+  .line.active .roman {
+    color: rgba(255, 255, 255, 0.85);
+  }
+  .plain p {
+    margin: 0 0 10px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 10px 0 6px;
+    border-radius: 99px;
+    font-size: 12.5px;
+    color: rgba(255, 255, 255, 0.75);
+    background: rgba(255, 255, 255, 0.08);
+    transition: background 0.15s, color 0.15s;
+  }
+  .chip:hover {
+    background: rgba(255, 255, 255, 0.14);
+  }
+  .chip.on {
+    color: #10111a;
+    background: rgba(255, 255, 255, 0.9);
+  }
+  .aa {
+    font-weight: 700;
+    font-size: 11px;
+    padding: 1px 4px;
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.14);
+  }
+  .chip.on .aa {
+    background: rgba(16, 17, 26, 0.12);
   }
   .sing-along {
     display: inline-flex;

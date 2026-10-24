@@ -53,6 +53,14 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        shell: bash
+        run: |
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          notes=$(awk -v v="## $version " 'index($0, v) == 1 {on = 1; next} /^## / {on = 0} on' CHANGELOG.md)
+          { echo "body<<NOTES_EOF"; echo "$notes"; echo "NOTES_EOF"; } >> "$GITHUB_OUTPUT"
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -63,9 +71,12 @@ jobs:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseName: "Cadence ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}"
           releaseBody: |
+            ## What's new
+            ${{ steps.notes.outputs.body }}
+
+            ## Download
             Cadence, a lossless music player for your own files.
 
-            **Download**
             - Windows: the `.exe` installer (`_x64-setup.exe`).
             - macOS (Apple Silicon and Intel): the `.dmg`. The app isn't signed by Apple yet: the first time, right-click Cadence in Applications and choose **Open**.
             - Linux: the `.AppImage` (any distro; make it executable) or the `.deb` (Debian/Ubuntu).

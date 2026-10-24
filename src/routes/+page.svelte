@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { api, artUrl, khz, qualityOf } from "$lib/api";
-  import { app } from "$lib/store.svelte";
+  import { android as androidBridge, app } from "$lib/store.svelte";
   import ContextMenu from "$lib/components/ContextMenu.svelte";
   import FolderBrowser from "$lib/components/FolderBrowser.svelte";
   import UpdateBanner from "$lib/components/UpdateBanner.svelte";
@@ -16,6 +16,7 @@
   import ArtistPicture from "$lib/components/ArtistPicture.svelte";
   import SkippedSongs from "$lib/components/SkippedSongs.svelte";
   import CoverPicker from "$lib/components/CoverPicker.svelte";
+  import AccessBanner from "$lib/components/AccessBanner.svelte";
   import PlayerBar from "$lib/components/PlayerBar.svelte";
   import QueuePanel from "$lib/components/QueuePanel.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -110,8 +111,18 @@
       else if (c === "play" || c === "pause" || c === "next" || c === "prev") api.player(c);
     };
     // On a phone the first scan can run before the user has allowed access to their music; look
-    // again when Cadence comes back to the foreground while the library is still empty.
+    // again when Cadence comes back to the foreground with access newly given, or the library
+    // still empty.
+    const checkAccess = () => {
+      const droid = androidBridge();
+      if (!droid?.hasMusicPermission) return;
+      const ok = droid.hasMusicPermission();
+      if (ok && !app.musicAccess && app.folders.length > 0) api.rescan();
+      app.musicAccess = ok;
+    };
+    checkAccess();
     const retry = () => {
+      checkAccess();
       if (app.loaded && app.tracks.length === 0 && app.folders.length > 0 && !app.scan) api.rescan();
     };
     window.addEventListener("focus", retry);
@@ -248,6 +259,7 @@
 {#if app.fixing}{#key app.fixing.id}<FixInfo />{/key}{/if}
 {#if app.artistEditing}{#key app.artistEditing}<ArtistPicture />{/key}{/if}
 {#if app.skippedOpen}<SkippedSongs />{/if}
+<AccessBanner />
 {#if app.coverEditing}{#key app.coverEditing}<CoverPicker />{/key}{/if}
 {#if app.folderBrowser}<FolderBrowser />{/if}
 <UpdateBanner />

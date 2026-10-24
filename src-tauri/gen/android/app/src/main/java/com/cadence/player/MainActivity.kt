@@ -38,7 +38,10 @@ class MainActivity : TauriActivity() {
     )
     if (Build.VERSION.SDK_INT >= 33) wanted += Manifest.permission.POST_NOTIFICATIONS
     val missing = wanted.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-    if (missing.isNotEmpty()) ActivityCompat.requestPermissions(this, missing.toTypedArray(), 1)
+    if (missing.isNotEmpty()) {
+      prefs().edit().putBoolean("askedMusic", true).apply()
+      ActivityCompat.requestPermissions(this, missing.toTypedArray(), 1)
+    }
 
     // Back goes back inside Cadence (closes Now Playing, returns to the last page). With nowhere
     // left to go, Cadence moves to the background like other music players, so playback and the
@@ -64,6 +67,11 @@ class MainActivity : TauriActivity() {
     }
   }
 
+  private fun prefs() = getSharedPreferences("cadence", MODE_PRIVATE)
+
+  private val musicPermission =
+    if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
+
   override fun onWebViewCreate(webView: WebView) {
     this.webView = webView
     webView.addJavascriptInterface(Bridge(), "CadenceAndroid")
@@ -71,6 +79,36 @@ class MainActivity : TauriActivity() {
 
   /** Called from the app's JavaScript with what's playing. */
   inner class Bridge {
+    /** Whether Cadence may read the music on the phone. */
+    @JavascriptInterface
+    fun hasMusicPermission(): Boolean =
+      ContextCompat.checkSelfPermission(this@MainActivity, musicPermission) == PackageManager.PERMISSION_GRANTED
+
+    /** Asks for it; once Android stops asking (denied before), opens Cadence's settings page instead. */
+    @JavascriptInterface
+    fun requestMusicPermission() {
+      runOnUiThread {
+        val canAsk = !prefs().getBoolean("askedMusic", false) ||
+          ActivityCompat.shouldShowRequestPermissionRationale(this@MainActivity, musicPermission)
+        if (canAsk) {
+          prefs().edit().putBoolean("askedMusic", true).apply()
+          ActivityCompat.requestPermissions(this@MainActivity, arrayOf(musicPermission), 2)
+        } else {
+          startActivity(
+            android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+          )
+        }
+      }
+    }
+
+    @JavascriptInterface
+    fun getPlayOnBluetooth(): Boolean = PlaybackService.playOnBluetooth(this@MainActivity)
+
+    @JavascriptInterface
+    fun setPlayOnBluetooth(on: Boolean) {
+      prefs().edit().putBoolean("playOnBluetooth", on).apply()
+    }
+
     @JavascriptInterface
     fun update(json: String) {
       val o = JSONObject(json)

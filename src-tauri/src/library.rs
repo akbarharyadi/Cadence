@@ -106,23 +106,49 @@ pub fn is_audio(path: &Path) -> bool {
         .is_some_and(|e| AUDIO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// A folder that lists no music although it had some: is it just unreadable right now (no
+/// permission to read music on Android, a drive that isn't plugged in) rather than emptied?
+/// Then its songs are kept, instead of the library losing them (and their measurements).
+fn unreadable(folder: &Path, songs: &[Track]) -> bool {
+    let Some(first) = songs.first() else { return false };
+    if !folder.exists() {
+        return true;
+    }
+    match std::fs::metadata(&first.path) {
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Scans the folders, reusing cached entries for files that haven't changed.
 pub fn scan(
     folders: &[String],
     previous: Vec<Track>,
     progress: impl Fn(usize, usize) + Sync,
 ) -> Vec<Track> {
-    let files: Vec<PathBuf> = folders
-        .iter()
-        .flat_map(|f| {
-            walkdir::WalkDir::new(f)
-                .follow_links(true)
-                .into_iter()
-                .filter_map(|e| e.ok())
-        })
-        .filter(|e| e.file_type().is_file() && is_audio(e.path()))
-        .map(|e| e.into_path())
-        .collect();
+    let mut files: Vec<PathBuf> = Vec::new();
+    // Songs of folders that can't be read right now: kept as they were.
+    let mut kept: Vec<Track> = Vec::new();
+    let mut previous = previous;
+    for folder in folders {
+        let found: Vec<PathBuf> = walkdir::WalkDir::new(folder)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file() && is_audio(e.path()))
+            .map(|e| e.into_path())
+            .collect();
+        if found.is_empty() {
+            let (mine, rest): (Vec<Track>, Vec<Track>) =
+                previous.into_iter().partition(|t| Path::new(&t.path).starts_with(folder));
+            previous = rest;
+            if unreadable(Path::new(folder), &mine) {
+                log::warn!("can't read {folder} right now; keeping its {} songs", mine.len());
+                kept.extend(mine);
+            }
+        }
+        files.extend(found);
+    }
     let mut cached: HashMap<String, Track> =
         previous.into_iter().map(|t| (t.path.clone(), t)).collect();
     let total = files.len();
@@ -164,6 +190,7 @@ pub fn scan(
             }
         })
         .collect();
+    tracks.extend(kept);
     tracks.sort_by(|a, b| {
         (
             a.album_artist.to_lowercase(),
@@ -617,5 +644,37 @@ mod art_tests {
         assert!(super::complete_image(&[0xFF, 0xD8, 1, 2, 3, 0xFF, 0xD9]));
         assert!(super::complete_image(&[0xFF, 0xD8, 1, 2, 3, 0xFF, 0xD9, 0, 0]));
         assert!(!super::complete_image(&[0xFF, 0xD8, 1, 2, 3, 4, 5]));
+    }
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+
+    fn song(path: &Path) -> Track {
+        Track { id: "x".into(), path: path.to_string_lossy().into_owned(), gain_measured: true, ..Default::default() }
+    }
+
+    #[test]
+    fn keeps_songs_of_folders_it_cannot_read() {
+        let root = std::env::temp_dir().join("cadence-scan-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // A drive that isn't plugged in: its songs stay.
+        let gone = root.join("usb-drive");
+        let kept = scan(&[gone.to_string_lossy().into_owned()], vec![song(&gone.join("a.flac"))], |_, _| {});
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].gain_measured);
+        // The folder lists nothing, but the file is still there (no permission to list it): stays.
+        let hidden = root.join("hidden");
+        std::fs::create_dir_all(&hidden).unwrap();
+        let file = hidden.join("b.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(scan(&[hidden.to_string_lossy().into_owned()], vec![song(&file)], |_, _| {}).len(), 1);
+        // The songs were really deleted: they go.
+        let emptied = root.join("emptied");
+        std::fs::create_dir_all(&emptied).unwrap();
+        assert!(scan(&[emptied.to_string_lossy().into_owned()], vec![song(&emptied.join("c.flac"))], |_, _| {}).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

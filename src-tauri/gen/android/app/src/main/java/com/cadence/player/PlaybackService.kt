@@ -5,6 +5,11 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -18,6 +23,7 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 
 /**
@@ -51,6 +57,18 @@ class PlaybackService : Service() {
     /** The album's accent colour (#rrggbb), for the widget's progress line. */
     @Volatile var accent = ""
 
+    /** Outputs that count as "Bluetooth connected" (a car, headphones, a speaker). */
+    private val BLUETOOTH_OUTPUTS = setOf(
+      AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+      AudioDeviceInfo.TYPE_BLE_HEADSET,
+      AudioDeviceInfo.TYPE_BLE_SPEAKER,
+      AudioDeviceInfo.TYPE_BLE_BROADCAST,
+    )
+
+    /** "Play when Bluetooth connects" (Settings; on unless turned off). */
+    fun playOnBluetooth(context: Context): Boolean =
+      context.getSharedPreferences("cadence", Context.MODE_PRIVATE).getBoolean("playOnBluetooth", true)
+
     fun update(context: Context) {
       val intent = Intent(context, PlaybackService::class.java).setAction(ACTION_UPDATE)
       if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
@@ -68,6 +86,31 @@ class PlaybackService : Service() {
       if (!playing || !PlayerWidget.any(this@PlaybackService)) return
       PlayerWidget.updateAll(this@PlaybackService, artBitmap)
       ticker.postDelayed(this, 5000)
+    }
+  }
+
+  /** The music leaves the headphones or the car (Bluetooth disconnects, a cable is pulled):
+   *  pause, rather than carry on through the phone's speaker. */
+  private val noisy = object : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+      if (intent.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && playing) send("pause")
+    }
+  }
+
+  /** A Bluetooth output connects (getting into the car): play, if that's allowed in Settings. */
+  private var devicesListed = false
+  private val devices = object : AudioDeviceCallback() {
+    override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) {
+      // The first call lists what was already connected; only new connections count.
+      if (!devicesListed) {
+        devicesListed = true
+        return
+      }
+      val bluetooth = added.any { it.isSink && it.type in BLUETOOTH_OUTPUTS }
+      if (bluetooth && !playing && title.isNotEmpty() && onCommand != null && playOnBluetooth(this@PlaybackService)) {
+        // Give Android a moment to move the sound to the new device first.
+        ticker.postDelayed({ if (!playing) send("play") }, 1500)
+      }
     }
   }
 
@@ -93,6 +136,8 @@ class PlaybackService : Service() {
       })
       isActive = true
     }
+    ContextCompat.registerReceiver(this, noisy, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY), ContextCompat.RECEIVER_EXPORTED)
+    getSystemService(AudioManager::class.java).registerAudioDeviceCallback(devices, ticker)
     wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
       .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Cadence:playback")
       .apply { setReferenceCounted(false) }
@@ -187,6 +232,8 @@ class PlaybackService : Service() {
   }
 
   override fun onDestroy() {
+    runCatching { unregisterReceiver(noisy) }
+    getSystemService(AudioManager::class.java).unregisterAudioDeviceCallback(devices)
     ticker.removeCallbacks(tick)
     wakeLock?.release()
     session.release()

@@ -11,6 +11,7 @@ pub mod library;
 pub mod lyrics;
 mod media;
 mod net;
+mod romanize;
 pub mod playlists;
 mod scrobble;
 mod secrets;
@@ -263,6 +264,7 @@ pub fn run() {
             commands::set_fix_tags_online,
             commands::get_skips,
             commands::artist_images,
+            commands::romanize_lyrics,
             commands::find_covers,
             commands::set_album_cover,
             commands::find_artist_photos,

@@ -6,11 +6,13 @@
   import AiSettings from "$lib/components/AiSettings.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Toggle from "$lib/components/Toggle.svelte";
-  import { app, isInstrumental } from "$lib/store.svelte";
+  import { android, app, isInstrumental } from "$lib/store.svelte";
 
   let version = $state("");
   getVersion().then((v) => (version = v));
   let closeToTray = $state(true);
+  const droid = android();
+  let playOnBluetooth = $state(droid?.getPlayOnBluetooth?.() ?? true);
   let lyricsOnline = $state(true);
   let fixTags = $state(true);
   let lbUser = $state("");
@@ -150,6 +152,21 @@
       <p class="desc">{app.status?.error ?? "No audio device found. Connect speakers or headphones and Cadence will pick them up."}</p>
     {/if}
   </section>
+
+  {#if droid?.getPlayOnBluetooth}
+    <section>
+      <div class="title-row">
+        <div>
+          <h2 class="section-title">Play when Bluetooth connects</h2>
+          <p class="desc">
+            When your car, headphones or a speaker connects, carry on playing. When they disconnect, Cadence always pauses instead of
+            playing through the phone’s speaker.
+          </p>
+        </div>
+        <Toggle checked={playOnBluetooth} label="Play when Bluetooth connects" onchange={(v) => { playOnBluetooth = v; droid.setPlayOnBluetooth(v); }} />
+      </div>
+    </section>
+  {/if}
 
   <section>
     <div class="title-row">

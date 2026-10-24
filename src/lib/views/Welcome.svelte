@@ -1,10 +1,12 @@
 <script lang="ts">
   import { api } from "$lib/api";
   import Icon from "$lib/components/Icon.svelte";
-  import { app } from "$lib/store.svelte";
+  import { android, app } from "$lib/store.svelte";
 
   /** Folders were added but no music was found in them. */
   const nothingFound = $derived(app.folders.length > 0 && !app.scan);
+  /** Android: not allowed to read the music yet. */
+  const noAccess = $derived(!app.musicAccess && app.folders.length > 0);
 
   async function addFolder() {
     await app.pickFolders();
@@ -14,7 +16,11 @@
 <div class="welcome">
   <div class="drop">
     <div class="logo"><Icon name="note" size={40} /></div>
-    {#if nothingFound}
+    {#if noAccess}
+      <h1>Allow Cadence to read your music</h1>
+      <p>Cadence needs permission to read the music on this phone. It only reads your music folders.</p>
+      <button class="pill" onclick={() => android()?.requestMusicPermission()}><Icon name="folder" size={16} />Allow access</button>
+    {:else if nothingFound}
       <h1>No music found yet</h1>
       <p>
         Cadence found no songs in {app.folders.length === 1 ? "this folder" : "these folders"} or the folders inside them. It plays FLAC,

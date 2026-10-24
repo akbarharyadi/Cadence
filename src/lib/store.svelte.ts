@@ -7,6 +7,21 @@ const TOP_LEVEL = new Set(["home", "albums", "artists", "songs", "recent", "sear
 
 let transitions = 0;
 
+/** What the Android app offers the page (see MainActivity.Bridge). */
+export interface AndroidBridge {
+  update(json: string): void;
+  installApk(path: string): string;
+  hasMusicPermission(): boolean;
+  requestMusicPermission(): void;
+  getPlayOnBluetooth(): boolean;
+  setPlayOnBluetooth(on: boolean): void;
+}
+
+/** The Android bridge, on phones (undefined on the desktop). */
+export function android(): AndroidBridge | undefined {
+  return typeof window === "undefined" ? undefined : (window as unknown as { CadenceAndroid?: AndroidBridge }).CadenceAndroid;
+}
+
 /** Runs a view change inside a view transition (see app.css), when the system allows motion. */
 function animate(kind: "forward" | "back" | "tab", change: () => void) {
   const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
@@ -91,6 +106,8 @@ class AppState {
   tagEditing = $state<Track[] | null>(null);
   /** Pictures chosen for artists, by lower-case name. */
   artistImages = $state<Record<string, import("./api").ArtistImage>>({});
+  /** Android: Cadence may read the music on the phone. */
+  musicAccess = $state(true);
   /** The album whose cover is being changed. */
   coverEditing = $state<string | null>(null);
   /** The "Skipped songs" window is open. */

@@ -944,6 +944,15 @@ pub async fn save_song_info(app: AppHandle, id: String, info: crate::autotag::Ca
         .map_err(|e| e.to_string())?
 }
 
+/// Lyrics lines in Latin letters (Japanese romaji, Chinese pinyin, Korean); empty for lines
+/// that need none.
+#[tauri::command]
+pub async fn romanize_lyrics(lines: Vec<String>) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::romanize::lines(&lines))
+        .await
+        .unwrap_or_default()
+}
+
 // ---------- album covers ----------
 
 #[derive(Serialize)]
