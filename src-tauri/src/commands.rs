@@ -66,7 +66,8 @@ pub fn add_folders(app: AppHandle, state: AppStateRef, paths: Vec<String>) -> Ve
 #[tauri::command]
 pub async fn download_update_apk(app: AppHandle, url: String) -> Result<String, String> {
     use std::io::{Read, Write};
-    if !url.starts_with("https://github.com/akbarharyadi/cadence/releases/") {
+    // GitHub names are case-insensitive (the repository is now "Cadence"; it was "cadence").
+    if !url.to_ascii_lowercase().starts_with("https://github.com/akbarharyadi/cadence/releases/") {
         return Err("Updates only come from Cadence's GitHub releases.".into());
     }
     let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;

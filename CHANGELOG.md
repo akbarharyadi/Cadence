@@ -2,8 +2,10 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
-## 0.2.13 (unreleased)
+## 0.2.13 (2026-10-24)
 
+- **Android updates work again.** Since the GitHub repository was renamed to "Cadence", the app refused its own download
+  links; it now accepts them. Phones on 0.2.8 to 0.2.12 need to install this version once from the release page.
 - The "new version" card now sits at the bottom right, above the player, instead of covering the sidebar's Sound and
   Settings buttons.
 
