@@ -32,9 +32,10 @@
 {/if}
 
 <style>
+  /* Bottom right, above the player: clear of the sidebar and its Sound / Settings buttons. */
   .update {
     position: fixed;
-    left: 24px;
+    right: 24px;
     bottom: 112px;
     z-index: 35;
     display: flex;

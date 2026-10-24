@@ -2,6 +2,11 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.13 (unreleased)
+
+- The "new version" card now sits at the bottom right, above the player, instead of covering the sidebar's Sound and
+  Settings buttons.
+
 ## 0.2.12 (2026-10-24)
 
 - **Themes** in Settings → **Appearance**: **Album colours** (as before: colours from the album that's playing),
