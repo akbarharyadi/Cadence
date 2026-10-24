@@ -2,7 +2,7 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
-## 0.2.11 (unreleased)
+## 0.2.11 (2026-10-24)
 
 - **Karaoke for the pronunciation too:** the romaji, pinyin or romanization under the line being sung now fills in word by
   word along with it.
