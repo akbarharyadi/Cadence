@@ -304,7 +304,9 @@ input[type="checkbox"] {
     display: none !important;
   }
   /* Pages: narrower margins, room for the status bar, the player and the tab bar. */
-  .content > :not(.topbar) {
+  /* (On Android each page sits inside .page-in, the wrapper that animates it in.) */
+  .content > :not(.topbar, .page-in),
+  .content > .page-in > * {
     padding-left: 16px !important;
     padding-right: 16px !important;
     padding-top: calc(52px + env(safe-area-inset-top)) !important;
@@ -387,6 +389,26 @@ html[data-nav="tab"]::view-transition-new(page) {
 }
 @keyframes nav-rise {
   from { transform: translateY(12px); opacity: 0; }
+}
+
+/* Phones: no view transitions (see `animate`); the new page eases in on its own, using only
+   transform and opacity so it runs on the GPU without a stall. */
+html.phone .page-in {
+  min-height: 100%;
+}
+html.phone .page-in[data-kind="forward"] {
+  animation: nav-in-right 0.32s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+html.phone .page-in[data-kind="back"] {
+  animation: nav-in-left 0.32s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+html.phone .page-in[data-kind="tab"] {
+  animation: nav-rise 0.26s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  html.phone .page-in {
+    animation: none !important;
+  }
 }
 
 /* Touch feedback: things you tap give a little. */

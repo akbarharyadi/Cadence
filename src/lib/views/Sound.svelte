@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, db, EQ_BANDS, type Filter, type FilterKind, type LevelingMode, type Preset } from "$lib/api";
@@ -294,8 +295,9 @@
             <div>
               <div class="profile-name">{eq.profile || "No headphone profile yet"}</div>
               <div class="hint">
-                Get one for your headphones from AutoEq (github.com/jaakkopasanen/AutoEq, “results”, then your model’s ParametricEQ.txt).
-                Equalizer APO files work too.
+                Get one for your headphones from
+                <button class="link inline" onclick={() => openUrl("https://github.com/jaakkopasanen/AutoEq/tree/master/results")}>AutoEq</button>
+                (find your model, then its ParametricEQ.txt). Equalizer APO files work too.
               </div>
             </div>
           </div>
@@ -499,19 +501,28 @@
     text-decoration: line-through;
     opacity: 0.6;
   }
+  /* Profile text and buttons side by side; the buttons move below when there's no room. */
   .correction {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: 20px;
+    gap: 12px 20px;
     margin-top: 16px;
   }
   .profile {
+    flex: 1 1 300px;
     display: flex;
     gap: 12px;
     align-items: flex-start;
     color: var(--text-2);
     min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .link.inline {
+    display: inline;
+    padding: 0;
+    font-size: inherit;
   }
   .profile-name {
     font-weight: 600;
@@ -519,8 +530,8 @@
   }
   .buttons {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
-    flex: none;
     margin-top: 10px;
   }
   .paste {

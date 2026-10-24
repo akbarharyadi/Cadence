@@ -2,6 +2,14 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.14 (unreleased)
+
+- **Smoother on phones.** Long song lists only build the rows on screen (Songs went from about 5,000 elements to 500 on a
+  300-song phone, and far fewer freezes with thousands of songs), Search shows nothing until you type, and Android
+  pages slide in with a lighter animation, so tab switches no longer freeze for 40 to 80 ms. The blurred cover behind
+  Now Playing stays still on phones.
+- The headphone profile buttons on the Sound page no longer cover their text on narrow screens; AutoEq is a link.
+
 ## 0.2.13 (2026-10-24)
 
 - **Android updates work again.** Since the GitHub repository was renamed to "Cadence", the app refused its own download

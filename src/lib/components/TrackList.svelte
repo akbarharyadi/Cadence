@@ -1,6 +1,7 @@
 <script lang="ts">
   import { artUrl, formatTime, type Track } from "$lib/api";
   import { app, type MenuItem } from "$lib/store.svelte";
+  import { untrack } from "svelte";
   import Icon from "./Icon.svelte";
 
   let {
@@ -32,10 +33,51 @@
 
   const isCurrent = (t: Track) => app.current?.id === t.id;
   const play = (i: number) => app.playTracks(tracks, i, true);
+
+  // Long lists only build the rows on screen (plus a margin), so opening Songs with thousands of
+  // songs stays quick and page animations don't stall. Rows are all ROW px tall; the space of
+  // the rows that aren't built is kept as padding, so the page scrolls and sizes as before.
+  const ROW = 54;
+  const MARGIN = 12;
+  const virtual = $derived(tracks.length > 80 && !multiDisc);
+  let listEl = $state<HTMLDivElement>();
+  let first = $state(0);
+  let last = $state(60);
+  $effect(() => {
+    const el = listEl;
+    if (!virtual || !el) return;
+    const scroller = (el.closest(".content") as HTMLElement | null) ?? document.documentElement;
+    const count = tracks.length;
+    const update = () => {
+      const top = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+      const from = Math.max(0, Math.floor(-top / ROW) - MARGIN);
+      const to = Math.min(count, Math.ceil((scroller.clientHeight - top) / ROW) + MARGIN);
+      if (from !== first) first = from;
+      if (to !== last) last = Math.max(from, to);
+    };
+    untrack(update); // reading first/last here mustn't make this effect re-run on every scroll
+    scroller.addEventListener("scroll", update, { passive: true });
+    const resize = new ResizeObserver(update);
+    resize.observe(scroller);
+    return () => {
+      scroller.removeEventListener("scroll", update);
+      resize.disconnect();
+    };
+  });
+  const start = $derived(virtual ? first : 0);
+  const shown = $derived(virtual ? tracks.slice(first, last) : tracks);
 </script>
 
-<div class="list" class:numbered role="listbox" tabindex="-1">
-  {#each tracks as t, i (t.id + i)}
+<div
+  class="list"
+  class:numbered
+  role="listbox"
+  tabindex="-1"
+  bind:this={listEl}
+  style={virtual ? `padding-top: ${first * ROW}px; padding-bottom: ${Math.max(0, tracks.length - last) * ROW}px` : undefined}
+>
+  {#each shown as t, k (t.id + (k + start))}
+    {@const i = k + start}
     {#if multiDisc && (i === 0 || (tracks[i - 1].discNo ?? 1) !== (t.discNo ?? 1))}
       <div class="disc">Disc {t.discNo ?? 1}</div>
     {/if}

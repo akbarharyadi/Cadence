@@ -269,6 +269,10 @@
       transform: scale(1.25) rotate(4deg);
     }
   }
+  /* Phones can't redraw a cover blurred this much at 120 Hz while it drifts: keep it still there. */
+  :global(html.phone) .bg {
+    animation: none;
+  }
   .shade {
     position: absolute;
     inset: 0;

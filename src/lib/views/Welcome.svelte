@@ -48,6 +48,8 @@
 <style>
   .welcome {
     height: 100%;
+    /* Phones wrap pages for their page animation, so 100% has nothing to fill there. */
+    min-height: min(100%, calc(100dvh - 220px));
     display: grid;
     place-items: center;
     padding: 40px;

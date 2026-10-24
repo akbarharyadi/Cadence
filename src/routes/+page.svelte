@@ -177,6 +177,8 @@
     mq.addEventListener("change", on);
     return () => mq.removeEventListener("change", on);
   });
+  /** Android uses the light page animation (html.phone); narrow desktop windows keep view transitions. */
+  const onAndroid = typeof navigator !== "undefined" && navigator.userAgent.includes("Android");
   const ambient = $derived(app.theme === "album" ? artUrl(app.themeAlbum?.artSmall) : "");
 </script>
 
@@ -186,6 +188,38 @@
   onmouseup={(e) => e.button === 3 && app.back()}
   oncontextmenu={(e) => !(e.target as HTMLElement).closest("input, textarea, [contenteditable]") && e.preventDefault()}
 />
+
+{#snippet pageView()}
+{#if !app.loaded}
+  <div></div>
+{:else if app.view.name === "sound"}
+  <Sound />
+{:else if app.view.name === "settings"}
+  <Settings />
+{:else if empty}
+  <Welcome />
+{:else if app.view.name === "home"}
+  <Home />
+{:else if app.view.name === "albums"}
+  <Albums />
+{:else if app.view.name === "recent"}
+  <Albums recent />
+{:else if app.view.name === "album"}
+  {#key app.view.id}<AlbumView id={app.view.id} />{/key}
+{:else if app.view.name === "artists"}
+  <Artists />
+{:else if app.view.name === "artist"}
+  {#key app.view.artist}<ArtistView name={app.view.artist} />{/key}
+{:else if app.view.name === "songs"}
+  <Songs />
+{:else if app.view.name === "search"}
+  <Search query={app.view.query} />
+{:else if app.view.name === "playlist"}
+  {#key app.view.id}<PlaylistView id={app.view.id} />{/key}
+{:else if app.view.name === "similar"}
+  {#key app.view.id}<SimilarView id={app.view.id} />{/key}
+{/if}
+{/snippet}
 
 <!-- Ambient colour field from the current cover, behind everything. -->
 <div class="ambient" aria-hidden="true">
@@ -208,34 +242,14 @@
         {/if}
         <div class="bar-title" class:on={showBarTitle} aria-hidden={!showBarTitle}>{barTitle}</div>
       </div>
-      {#if !app.loaded}
-        <div></div>
-      {:else if app.view.name === "sound"}
-        <Sound />
-      {:else if app.view.name === "settings"}
-        <Settings />
-      {:else if empty}
-        <Welcome />
-      {:else if app.view.name === "home"}
-        <Home />
-      {:else if app.view.name === "albums"}
-        <Albums />
-      {:else if app.view.name === "recent"}
-        <Albums recent />
-      {:else if app.view.name === "album"}
-        {#key app.view.id}<AlbumView id={app.view.id} />{/key}
-      {:else if app.view.name === "artists"}
-        <Artists />
-      {:else if app.view.name === "artist"}
-        {#key app.view.artist}<ArtistView name={app.view.artist} />{/key}
-      {:else if app.view.name === "songs"}
-        <Songs />
-      {:else if app.view.name === "search"}
-        <Search query={app.view.query} />
-      {:else if app.view.name === "playlist"}
-        {#key app.view.id}<PlaylistView id={app.view.id} />{/key}
-      {:else if app.view.name === "similar"}
-        {#key app.view.id}<SimilarView id={app.view.id} />{/key}
+      <!-- Phones: each new page animates in by itself (see .page-in in app.css); desktops use view
+           transitions (see `animate` in store.svelte.ts). -->
+      {#if onAndroid}
+        {#key app.navSeq}
+          <div class="page-in" data-kind={app.navKind}>{@render pageView()}</div>
+        {/key}
+      {:else}
+        {@render pageView()}
       {/if}
     </main>
     {#if gutter > 0}<div class="bar-cap" class:on={scrolled} style="width: {gutter}px" aria-hidden="true" data-tauri-drag-region></div>{/if}

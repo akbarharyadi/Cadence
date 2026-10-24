@@ -8,11 +8,12 @@
   // Case- and accent-insensitive matching, so "pokemon" finds "Pokémon".
   const fold = (s: string) => s.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
   const q = $derived(fold(query.trim()));
-  const albums = $derived(app.albums.filter((a) => fold(a.title).includes(q) || fold(a.artist).includes(q)).slice(0, 24));
+  // Nothing is listed until something is typed (an empty search would match the whole library).
+  const albums = $derived(!q ? [] : app.albums.filter((a) => fold(a.title).includes(q) || fold(a.artist).includes(q)).slice(0, 24));
   const songs = $derived(
-    app.tracks.filter((t) => fold(t.title).includes(q) || fold(t.artist).includes(q) || fold(t.album).includes(q)).slice(0, 200),
+    !q ? [] : app.tracks.filter((t) => fold(t.title).includes(q) || fold(t.artist).includes(q) || fold(t.album).includes(q)).slice(0, 200),
   );
-  const artists = $derived(app.artists.filter((a) => fold(a.name).includes(q)).slice(0, 12));
+  const artists = $derived(!q ? [] : app.artists.filter((a) => fold(a.name).includes(q)).slice(0, 12));
 </script>
 
 <div class="page">
@@ -21,7 +22,9 @@
     oninput={(e) => (app.view = { name: "search", query: e.currentTarget.value })} />
   {#if query.trim()}<h1 class="page-title">“{query}”</h1>{/if}
 
-  {#if q && !albums.length && !songs.length && !artists.length}
+  {#if !q}
+    <p class="secondary empty">Find songs, albums and artists in your library by any part of their name.</p>
+  {:else if !albums.length && !songs.length && !artists.length}
     <p class="secondary empty">Nothing in your library matches. Try part of a title, an artist or an album name.</p>
   {/if}
 

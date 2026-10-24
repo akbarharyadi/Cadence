@@ -36,7 +36,9 @@ export function android(): AndroidBridge | undefined {
 /** Runs a view change inside a view transition (see app.css), when the system allows motion. */
 function animate(kind: "forward" | "back" | "tab", change: () => void) {
   const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
-  if (!doc.startViewTransition || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  // Phones skip view transitions: snapshotting both pages stalls a frame for ~50 ms there. The
+  // new page animates in by itself instead (.page-in in app.css), which costs nothing.
+  if (!doc.startViewTransition || matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.classList.contains("phone")) {
     change();
     return;
   }
@@ -86,6 +88,9 @@ class AppState {
   loaded = $state(false);
 
   view = $state<View>({ name: "home" });
+  /** Counts page changes, and how the last one went, for the phone's page animation. */
+  navSeq = $state(0);
+  navKind = $state<"forward" | "back" | "tab">("tab");
   history = $state<View[]>([]);
   nowPlayingOpen = $state(false);
   lyricsOpen = $state(false);
@@ -395,6 +400,8 @@ class AppState {
     animate(kind, () => {
       this.history.push(this.view);
       this.view = view;
+      this.navKind = kind;
+      this.navSeq++;
       this.nowPlayingOpen = false;
       document.querySelector(".content")?.scrollTo({ top: 0 });
     });
@@ -402,7 +409,12 @@ class AppState {
 
   back() {
     const prev = this.history.pop();
-    if (prev) animate("back", () => (this.view = prev));
+    if (prev)
+      animate("back", () => {
+        this.view = prev;
+        this.navKind = "back";
+        this.navSeq++;
+      });
   }
 
   showToast(message: string) {
