@@ -2,6 +2,11 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.11 (unreleased)
+
+- **Karaoke for the pronunciation too:** the romaji, pinyin or romanization under the line being sung now fills in word by
+  word along with it.
+
 ## 0.2.10 (2026-10-24)
 
 - **Open-source licenses** in Settings → About: the license and notice of every library Cadence is built from, shipped

@@ -107,6 +107,32 @@
   const sweep = $derived(active >= 0 && lyrics ? pieces(lyrics.synced[active], lyrics.synced[active + 1]) : []);
   const progress = (p: Piece) => Math.min(1, Math.max(0, (app.position + 0.1 - p.start) / (p.end - p.start)));
 
+  /** How much of the sung line has been swept (0 to 1), weighted by each piece's length. */
+  const lineFill = $derived.by(() => {
+    let total = 0;
+    let done = 0;
+    for (const p of sweep) {
+      const n = p.text.trim().length || 0.5;
+      total += n;
+      done += n * progress(p);
+    }
+    return total ? done / total : 0;
+  });
+
+  /** The pronunciation line in words, each with its share of the line, to sweep along with it. */
+  function romanWords(text: string) {
+    const words = text.split(/(?<=\s)/);
+    const total = words.reduce((n, w) => n + w.trim().length, 0) || 1;
+    let at = 0;
+    return words.map((w) => {
+      const from = at / total;
+      at += w.trim().length;
+      return { text: w, from, to: at / total };
+    });
+  }
+  const wordFill = (w: { from: number; to: number }) =>
+    Math.min(1, Math.max(0, (lineFill - w.from) / Math.max(w.to - w.from, 0.001))) * 100;
+
   // ---------- find / fix lyrics ----------
 
   let panel = $state<"search" | "paste" | null>(null);
@@ -261,7 +287,15 @@
             {:else}
               {line.text || "♪"}
             {/if}
-            {#if roman[i]}<span class="roman">{roman[i]}</span>{/if}
+            {#if roman[i]}
+              <span class="roman">
+                {#if i === active}
+                  {#each romanWords(roman[i]) as w}<span class="w" style="--p: {wordFill(w)}%">{w.text}</span>{/each}
+                {:else}
+                  {roman[i]}
+                {/if}
+              </span>
+            {/if}
           </button>
         {/each}
         <div class="pad"></div>
