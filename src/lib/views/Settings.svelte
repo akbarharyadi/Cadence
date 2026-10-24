@@ -7,6 +7,7 @@
   import Icon from "$lib/components/Icon.svelte";
   import Toggle from "$lib/components/Toggle.svelte";
   import Licenses from "$lib/components/Licenses.svelte";
+  import Segmented from "$lib/components/Segmented.svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { android, app, isInstrumental } from "$lib/store.svelte";
 
@@ -154,6 +155,29 @@
     {:else}
       <p class="desc">{app.status?.error ?? "No audio device found. Connect speakers or headphones and Cadence will pick them up."}</p>
     {/if}
+  </section>
+
+  <section>
+    <div class="title-row">
+      <div>
+        <h2 class="section-title">Appearance</h2>
+        <p class="desc">
+          {#if app.theme === "album"}Cadence takes its colours from the album that’s playing.
+          {:else if app.theme === "dark"}Cadence stays dark grey with its own violet, whatever plays.
+          {:else}True black with neutral greys, whatever plays. On phones with an OLED screen it also saves battery.{/if}
+        </p>
+      </div>
+      <Segmented
+        label="Theme"
+        options={[
+          { value: "album", label: "Album colours" },
+          { value: "dark", label: "Dark" },
+          { value: "black", label: "Black" },
+        ]}
+        value={app.theme}
+        onchange={(v) => app.setTheme(v)}
+      />
+    </div>
   </section>
 
   {#if droid?.getPlayOnBluetooth}

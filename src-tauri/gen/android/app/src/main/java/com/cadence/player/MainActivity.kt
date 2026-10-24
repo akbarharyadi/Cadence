@@ -101,6 +101,14 @@ class MainActivity : TauriActivity() {
       }
     }
 
+    /** The colour behind the status and navigation bars, to match the theme (e.g. true black). */
+    @JavascriptInterface
+    fun setBackground(color: String) {
+      runCatching { android.graphics.Color.parseColor(color) }.onSuccess { c ->
+        runOnUiThread { findViewById<android.view.View>(android.R.id.content).setBackgroundColor(c) }
+      }
+    }
+
     @JavascriptInterface
     fun getPlayOnBluetooth(): Boolean = PlaybackService.playOnBluetooth(this@MainActivity)
 

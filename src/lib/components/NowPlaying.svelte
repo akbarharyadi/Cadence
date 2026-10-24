@@ -88,7 +88,7 @@
   ontouchend={touchEnd}
   ontouchcancel={touchEnd}
 >
-  {#if art}<div class="bg" style="background-image: url('{art}')"></div>{/if}
+  {#if art && app.theme === "album"}<div class="bg" style="background-image: url('{art}')"></div>{/if}
   <div class="shade"></div>
 
   <div class="top" data-tauri-drag-region>

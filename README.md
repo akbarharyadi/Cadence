@@ -68,6 +68,7 @@
   into the songs' files.
 - **Artist pictures**: choose a photo from the online catalogue (Deezer), one of the artist's album covers or your
   own image.
+- **Themes**: colours from the album that's playing, or a fixed Dark or true Black theme.
 - **Lyrics in Latin letters**: romaji, pinyin or Korean romanization under each line, for scripts you can't read.
 - **Skip songs** you don't want in rotation (or every instrumental and karaoke version): they stay in the library but
   are left out when albums, playlists, mixes and shuffles play.

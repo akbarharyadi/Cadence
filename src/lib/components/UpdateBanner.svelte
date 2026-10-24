@@ -44,7 +44,7 @@
     padding: 12px 12px 12px 14px;
     border-radius: 16px;
     overflow: hidden;
-    background: color-mix(in srgb, var(--tint) 30%, #1a1b2b);
+    background: color-mix(in srgb, var(--tint) 30%, var(--panel));
     box-shadow:
       0 0 0 1px var(--line-strong),
       0 16px 40px rgba(0, 0, 0, 0.5);

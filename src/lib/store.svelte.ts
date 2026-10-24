@@ -15,6 +15,17 @@ export interface AndroidBridge {
   requestMusicPermission(): void;
   getPlayOnBluetooth(): boolean;
   setPlayOnBluetooth(on: boolean): void;
+  /** The colour behind the status and navigation bars (newer app versions). */
+  setBackground?(color: string): void;
+}
+
+/** "album": colours from the song playing; "dark" / "black": the same for every song. */
+export type Theme = "album" | "dark" | "black";
+const DEFAULT_ACCENT = "#8b7cff";
+const DEFAULT_TINT = "#1b1c33";
+function savedTheme(): Theme {
+  const t = typeof localStorage === "undefined" ? null : localStorage.getItem("cadence-theme");
+  return t === "dark" || t === "black" ? t : "album";
 }
 
 /** The Android bridge, on phones (undefined on the desktop). */
@@ -106,6 +117,24 @@ class AppState {
   tagEditing = $state<Track[] | null>(null);
   /** Pictures chosen for artists, by lower-case name. */
   artistImages = $state<Record<string, import("./api").ArtistImage>>({});
+  /** Settings > Appearance. */
+  theme = $state<Theme>(savedTheme());
+
+  setTheme(theme: Theme) {
+    this.theme = theme;
+    localStorage.setItem("cadence-theme", theme);
+  }
+
+  /** Paints the window: album colours for the "album" theme, fixed ones otherwise. */
+  paintTheme(album: Album | null) {
+    const root = document.documentElement;
+    const fixed = this.theme !== "album";
+    root.dataset.theme = this.theme;
+    root.style.setProperty("--accent", (!fixed && album?.accent) || DEFAULT_ACCENT);
+    root.style.setProperty("--tint", fixed ? (this.theme === "black" ? "#000000" : DEFAULT_TINT) : (album?.tint ?? DEFAULT_TINT));
+    android()?.setBackground?.(this.theme === "black" ? "#000000" : "#10111A");
+  }
+
   /** Android: Cadence may read the music on the phone. */
   musicAccess = $state(true);
   /** The album whose cover is being changed. */
@@ -256,6 +285,8 @@ class AppState {
       }
     });
     api.artistImages().then((m) => (this.artistImages = m));
+    // The mini player is another window: follow a theme changed in the main one.
+    window.addEventListener("storage", (e) => e.key === "cadence-theme" && (this.theme = savedTheme()));
     api.skips().then((s) => {
       this.skipped = s.ids;
       this.skipInstrumentals = s.instrumentals;

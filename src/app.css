@@ -30,6 +30,9 @@
 
   --accent: #8b7cff;
   --tint: #1b1c33;
+  /* Raised cards (banners, menus) and the deepest wells, kept apart from the album tint. */
+  --panel: #1a1b2b;
+  --well: #0d0e17;
   /* Lossless / bit-perfect: champagne, like a gold record. Never used for anything else. */
   --gold: #e8c77a;
   --good: #5fd39a;
@@ -44,6 +47,22 @@
   --r-lg: 16px;
   color-scheme: dark;
   transition: --accent 0.8s ease, --tint 0.8s ease;
+}
+
+/* Black theme (Settings > Appearance): true black and neutral greys, the same for every song. */
+:root[data-theme="black"] {
+  --ink: #000000;
+  --ink-2: #0a0a0b;
+  --surface: #141416;
+  --surface-2: #1d1d20;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.15);
+  --hover: rgba(255, 255, 255, 0.06);
+  --active: rgba(255, 255, 255, 0.1);
+  --text-2: #a1a1aa;
+  --text-3: #6b6b74;
+  --panel: #161618;
+  --well: #000000;
 }
 
 * {

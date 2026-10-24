@@ -35,8 +35,6 @@
   import Sound from "$lib/views/Sound.svelte";
   import Welcome from "$lib/views/Welcome.svelte";
 
-  const DEFAULT_ACCENT = "#8b7cff";
-  const DEFAULT_TINT = "#1b1c33";
 
   let dropping = $state(false);
   let scrolled = $state(false);
@@ -141,12 +139,9 @@
     };
   });
 
-  // The whole app takes its colour from the album that's playing (or open).
-  $effect(() => {
-    const root = document.documentElement.style;
-    root.setProperty("--accent", app.themeAlbum?.accent ?? DEFAULT_ACCENT);
-    root.setProperty("--tint", app.themeAlbum?.tint ?? DEFAULT_TINT);
-  });
+  // The whole app takes its colour from the album that's playing (or open), unless a fixed theme
+  // is chosen in Settings.
+  $effect(() => app.paintTheme(app.themeAlbum));
 
   function onKey(e: KeyboardEvent) {
     const target = e.target as HTMLElement;
@@ -182,7 +177,7 @@
     mq.addEventListener("change", on);
     return () => mq.removeEventListener("change", on);
   });
-  const ambient = $derived(artUrl(app.themeAlbum?.artSmall));
+  const ambient = $derived(app.theme === "album" ? artUrl(app.themeAlbum?.artSmall) : "");
 </script>
 
 <svelte:window onkeydown={onKey} />

@@ -12,11 +12,7 @@
     app.init();
   });
 
-  $effect(() => {
-    const root = document.documentElement.style;
-    root.setProperty("--accent", app.currentAlbum?.accent ?? "#8b7cff");
-    root.setProperty("--tint", app.currentAlbum?.tint ?? "#1b1c33");
-  });
+  $effect(() => app.paintTheme(app.currentAlbum));
 
   const t = $derived(app.current);
   const s = $derived(app.status);
@@ -101,7 +97,7 @@
     padding: 14px 16px 18px 14px;
     border-radius: 18px;
     overflow: hidden;
-    background: color-mix(in srgb, var(--tint) 70%, #0d0e17);
+    background: color-mix(in srgb, var(--tint) 70%, var(--well));
     box-shadow: inset 0 0 0 1px var(--line-strong);
   }
   /* The cover, blurred, fills the player with the album's colours. */

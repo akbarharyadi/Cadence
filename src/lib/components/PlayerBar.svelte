@@ -562,7 +562,7 @@
     padding: 10px 6px 6px;
     border-radius: 16px;
     /* Solid: a blur can't see through the player's own blur. */
-    background: color-mix(in srgb, var(--tint) 30%, #1a1b2b);
+    background: color-mix(in srgb, var(--tint) 30%, var(--panel));
     box-shadow:
       0 0 0 1px var(--line-strong),
       0 16px 40px rgba(0, 0, 0, 0.55);

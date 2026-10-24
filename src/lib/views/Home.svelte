@@ -508,7 +508,7 @@
     width: 250px;
     border-radius: var(--r-lg);
     overflow: hidden;
-    background: color-mix(in srgb, var(--tint) 70%, #0d0e17);
+    background: color-mix(in srgb, var(--tint) 70%, var(--well));
     box-shadow: 0 14px 34px rgba(0, 0, 0, 0.35);
     transition: transform 0.15s;
   }

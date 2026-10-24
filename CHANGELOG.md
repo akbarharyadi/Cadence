@@ -2,6 +2,12 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.12 (2026-10-24)
+
+- **Themes** in Settings → **Appearance**: **Album colours** (as before: colours from the album that's playing),
+  **Dark** (Cadence's dark grey and violet, whatever plays) or **Black** (true black with neutral greys, kind to OLED
+  phone screens). On Android, Black also blackens the strips behind the status and navigation bars.
+
 ## 0.2.11 (2026-10-24)
 
 - **Karaoke for the pronunciation too:** the romaji, pinyin or romanization under the line being sung now fills in word by
