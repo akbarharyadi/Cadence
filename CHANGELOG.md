@@ -2,7 +2,7 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
-## 0.2.14 (unreleased)
+## 0.2.14 (2026-10-24)
 
 - **Smoother on phones.** Long song lists only build the rows on screen (Songs went from about 5,000 elements to 500 on a
   300-song phone, and far fewer freezes with thousands of songs), Search shows nothing until you type, and Android
