@@ -32,6 +32,7 @@
 - [Architecture](#architecture)
 - [Privacy](#privacy)
 - [Contributing](#contributing)
+- [Credits](#credits)
 - [License](#license)
 
 ## Features
@@ -61,7 +62,7 @@
 - **Player**: full-width seek bar, lists of the previous and next songs, a mini player and the system tray.
 - **Updates itself**: checks GitHub for new versions, downloads them in the background and installs on restart
   (signed, so only genuine releases install). On Android it downloads the new APK and opens the installer.
-- **Fix song info**: for downloads named "Artist - Title", pick the right match from the iTunes catalogue and
+- **Fix song info**: for songs without tags (files named "Artist - Title"), pick the right match from the iTunes catalogue and
   Cadence writes the title, artist, album, year and cover into the file (or does it by itself when they play).
 - **Change cover**: pick an album cover from iTunes or Deezer (or an image file); it's shown at once and written
   into the songs' files.
@@ -183,10 +184,19 @@ Design notes and research: [docs/research-features-and-ai.md](docs/research-feat
 
 ## Privacy
 
-- No account, no analytics, no tracking.
-- Sound analysis runs on your device.
-- Lyrics lookups send only the artist, title and duration to [LRCLIB](https://lrclib.net).
-- The AI DJ is off until you add a key, and Settings shows exactly what it would send.
+The app has no account, no analytics and no tracking. Sound analysis and lyrics pronunciation run on your device.
+It only goes online for these, and sends only what's listed:
+
+| Service | When | What it sends |
+|---|---|---|
+| [LRCLIB](https://lrclib.net) | A song has no lyrics (can be turned off) | Artist, title, album and length |
+| iTunes Search (Apple) | Fill in missing song info (can be turned off), Fix Song Info, Change Cover | The file name, or the words you search for |
+| [Deezer](https://developers.deezer.com/api) | Change Cover, artist pictures, checking AI music suggestions | Artist and album or song names |
+| GitHub | Checking for updates | Nothing beyond the request itself |
+| Your AI service (Z.ai GLM or another) | Only if you add your own key | What Settings shows before you turn it on |
+| [ListenBrainz](https://listenbrainz.org) | Only if you connect it | The songs you listen to |
+
+The website counts visits with Cloudflare Web Analytics, which uses no cookies and keeps no personal data.
 
 ## Contributing
 
@@ -194,10 +204,29 @@ Bug reports and pull requests are welcome. For a bug, include your system, the a
 (Settings and the signal path show it) and the steps to reproduce. Please run `pnpm check` and `cargo test` before
 opening a pull request.
 
+## Credits
+
+Cadence stands on the work of many open-source projects. The main ones:
+
+| Project | What it does in Cadence | License |
+|---|---|---|
+| [Tauri](https://tauri.app) and [Svelte](https://svelte.dev) | The app and its interface | MIT / Apache-2.0 |
+| [Symphonia](https://github.com/pdeljanov/Symphonia) | Decoding FLAC, ALAC, MP3, AAC, Ogg and WAV | MPL-2.0 |
+| [cpal](https://github.com/RustAudio/cpal) and [wasapi](https://github.com/HEnquist/wasapi-rs) | Sound output, and Direct output on Windows | Apache-2.0 / MIT |
+| [lofty](https://github.com/Serial-ATA/lofty-rs) | Reading and writing tags and covers | MIT / Apache-2.0 |
+| [bliss](https://github.com/Polochon-street/bliss-rs) | Sound analysis behind mixes and sound radio | GPL-3.0 |
+| [kakasi](https://github.com/Theta-Dev/kakasi) and [pinyin](https://github.com/mozillazg/rust-pinyin) | Lyrics pronunciation | GPL-3.0 / MIT |
+| [LRCLIB](https://lrclib.net) | Synced lyrics | Free service |
+
+Every library's license and notice is in [`static/third-party-notices.txt`](static/third-party-notices.txt), which
+also ships inside the app (Settings → About → Open-source licenses). It's regenerated for each release by
+`scripts/third-party-notices.py`.
+
+### How it's made
+
+Cadence is designed and maintained by Akbar Priyono Haryadi. Much of the code was written together with Claude, an AI
+assistant from Anthropic; commits it helped with say so. Bug reports and questions are answered by a person.
+
 ## License
 
 Cadence is free software under the [GNU General Public License v3.0](LICENSE).
-
-It builds on many open-source projects, including Tauri, Svelte, Symphonia, cpal, lofty and
-[bliss-audio](https://github.com/Polochon-street/bliss-rs) (GPL-3.0); see `src-tauri/Cargo.toml` and `package.json`
-for the full list.

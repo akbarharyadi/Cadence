@@ -2,6 +2,11 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.10 (unreleased)
+
+- **Open-source licenses** in Settings → About: the license and notice of every library Cadence is built from, shipped
+  with the app. About also credits the main projects and services Cadence uses.
+
 ## 0.2.9 (2026-10-24)
 
 - **Lyrics in Latin letters.** Japanese, Chinese and Korean lyrics can show their pronunciation (romaji, pinyin or

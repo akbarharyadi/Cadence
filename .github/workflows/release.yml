@@ -53,6 +53,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Open-source license notices (shipped in the app)
+        shell: bash
+        run: |
+          cargo fetch --manifest-path src-tauri/Cargo.toml --locked
+          python3 scripts/third-party-notices.py || python scripts/third-party-notices.py
+
       - name: Release notes from CHANGELOG.md
         id: notes
         shell: bash
@@ -119,6 +125,12 @@ jobs:
           workspaces: "./src-tauri -> target"
 
       - run: pnpm install --frozen-lockfile
+
+      - name: Open-source license notices (shipped in the app)
+        shell: bash
+        run: |
+          cargo fetch --manifest-path src-tauri/Cargo.toml --locked
+          python3 scripts/third-party-notices.py
 
       - name: Build the APK
         env:

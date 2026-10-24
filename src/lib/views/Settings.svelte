@@ -6,9 +6,12 @@
   import AiSettings from "$lib/components/AiSettings.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Toggle from "$lib/components/Toggle.svelte";
+  import Licenses from "$lib/components/Licenses.svelte";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { android, app, isInstrumental } from "$lib/store.svelte";
 
   let version = $state("");
+  let showLicenses = $state(false);
   getVersion().then((v) => (version = v));
   let closeToTray = $state(true);
   const droid = android();
@@ -193,7 +196,7 @@
       <div>
         <h2 class="section-title">Fill in missing song info</h2>
         <p class="desc">
-          When a song with no tags plays (for example a download named “Artist - Title”), find it in the iTunes catalogue and save
+          When a song with no tags plays (for example a file named “Artist - Title”), find it in the iTunes catalogue and save
           its title, artist, album, year and cover into the file. Only the file name is sent, and only matches with the same
           title and artist are used.
         </p>
@@ -289,7 +292,17 @@
       Cadence {version}, a free, open-source lossless music player for your own files. Rust audio engine with ReplayGain 2.0
       leveling, a 64-bit parametric equalizer, crossfeed and high-quality resampling. Free software under the GNU GPL v3.
     </p>
+    <p class="desc">
+      Built on open-source projects, among them Tauri, Svelte, Symphonia, lofty, cpal, bliss-audio, kakasi and pinyin, with
+      lyrics from LRCLIB and song info from the iTunes and Deezer catalogues. Written with the help of Claude, an AI assistant.
+    </p>
+    <div class="row about-links">
+      <button class="link small" onclick={() => (showLicenses = true)}>Open-source licenses</button>
+      <button class="link small" onclick={() => openUrl("https://github.com/akbarharyadi/cadence")}>Source code</button>
+      <button class="link small" onclick={() => openUrl("https://github.com/akbarharyadi/cadence/issues")}>Report a problem</button>
+    </div>
   </section>
+  {#if showLicenses}<Licenses onclose={() => (showLicenses = false)} />{/if}
 </div>
 
 <style>
