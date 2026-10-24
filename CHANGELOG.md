@@ -2,7 +2,7 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
-## 0.2.10 (unreleased)
+## 0.2.10 (2026-10-24)
 
 - **Open-source licenses** in Settings → About: the license and notice of every library Cadence is built from, shipped
   with the app. About also credits the main projects and services Cadence uses.

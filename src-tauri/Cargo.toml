@@ -1,6 +1,6 @@
 [package]
 name = "cadence"
-version = "0.2.9"
+version = "0.2.10"
 description = "Cadence — an open-source lossless music player for your own files"
 authors = ["Akbar Priyono Haryadi"]
 license = "GPL-3.0-only"
