@@ -62,6 +62,9 @@ android {
         }
         getByName("release") {
             signingConfigs.findByName("release")?.let { signingConfig = it }
+            // `-PcadenceDebuggable`: a signed release that `adb run-as` can reach, used to move a
+            // phone's data over from a development build (they're signed differently).
+            if (project.hasProperty("cadenceDebuggable")) isDebuggable = true
             optimization {
                enable = true
             }
