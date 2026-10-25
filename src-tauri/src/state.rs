@@ -51,6 +51,15 @@ impl Default for Settings {
     }
 }
 
+/// What was playing: restored, paused, when Cadence opens again.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Session {
+    pub queue: Vec<String>,
+    pub index: Option<usize>,
+    pub position: f64,
+}
+
 /// Which songs are left out when a list plays.
 pub struct SkipRule {
     ids: BTreeSet<String>,
@@ -121,6 +130,31 @@ impl AppState {
             &self.data_dir.join("playlists.json"),
             &*self.playlists.lock(),
         );
+    }
+
+    pub fn save_session(&self, s: &crate::audio::Status) {
+        write_json(
+            &self.data_dir.join("session.json"),
+            &Session {
+                queue: s.queue.clone(),
+                index: s.index,
+                position: s.position,
+            },
+        );
+    }
+
+    /// Puts the last session's queue back, paused where it was left (songs no longer in the
+    /// library are left out).
+    pub fn restore_session(&self) {
+        let session: Session = read_json(&self.data_dir.join("session.json"));
+        let Some(current) = session.index.and_then(|i| session.queue.get(i)).cloned() else { return };
+        let items = self.queue_items(&session.queue);
+        let Some(index) = items.iter().position(|q| q.id == current) else { return };
+        self.engine.send(crate::audio::Cmd::Restore {
+            items,
+            index,
+            position: session.position,
+        });
     }
 
     pub fn save_history(&self) {

@@ -53,11 +53,28 @@ fn status_hub(
         })
     };
     let mut tracker = Tracker::default();
+    // The session is saved when the song, the queue or play/pause changes, and every 10 s while
+    // playing. Nothing is saved until there has been a queue, so the empty player of a fresh
+    // start never overwrites the session it's about to restore.
+    let mut had_queue = false;
+    let mut saved: (Option<usize>, usize, bool) = (None, 0, false);
+    let mut saved_at = std::time::Instant::now();
+    let mut saved_pos = 0.0f64;
     let mut shown_track: Option<String> = None;
     let mut shown_playing = false;
     let mut shown_at = std::time::Instant::now();
     for s in rx {
         let _ = app.emit("player-status", &s);
+
+        had_queue |= !s.queue.is_empty();
+        let key = (s.index, s.queue.len(), s.playing);
+        let moved = (s.position - saved_pos).abs() > 1.0; // e.g. a seek while paused
+        if had_queue && (key != saved || (moved && (!s.playing || saved_at.elapsed() > std::time::Duration::from_secs(10)))) {
+            state.save_session(&s);
+            saved = key;
+            saved_at = std::time::Instant::now();
+            saved_pos = s.position;
+        }
 
         let album_of = |id: &str| {
             let lib = state.library.lock();
@@ -186,6 +203,8 @@ pub fn run() {
                 watcher: Mutex::new(None),
             });
             app.manage(state.clone());
+            // Carry on where the last session left off (paused).
+            state.restore_session();
 
             let main = app.get_webview_window("main").expect("main window");
             // Windows' media overlay is tied to the window; macOS and Linux don't need it.

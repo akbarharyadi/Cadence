@@ -158,6 +158,12 @@ pub enum Cmd {
         items: Vec<QueueItem>,
         index: usize,
     },
+    /// The queue from the last session, paused at the song and position it was left at.
+    Restore {
+        items: Vec<QueueItem>,
+        index: usize,
+        position: f64,
+    },
     Play,
     Pause,
     Toggle,
@@ -601,6 +607,14 @@ impl Worker {
                 self.queue = items;
                 if index < self.queue.len() {
                     self.start_at(index, 0.0, true);
+                }
+            }
+            Cmd::Restore { items, index, position } => {
+                self.queue = items;
+                if let Some(item) = self.queue.get(index) {
+                    // Not right at the very end, or it would simply move on to the next song.
+                    let at = position.clamp(0.0, (item.duration - 2.0).max(0.0));
+                    self.start_at(index, at, false);
                 }
             }
             Cmd::Play => self.play(),

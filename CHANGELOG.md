@@ -4,6 +4,9 @@ Each release's section here becomes the "What's new" of its GitHub release.
 
 ## 0.2.15 (unreleased)
 
+- **Carries on where you left off.** Cadence remembers the queue, the song and the position; when you open it again
+  (even after a crash or a restart) the song is ready where it was, paused. Press play to continue.
+
 - **Karaoke sweep at the singer's pace.** Lines without word timing used to fill far too fast (about 0.16 s per
   character, so a slow Japanese line was done in 2 seconds); the sweep now carries the line until shortly before the next
   one, as singers do.
