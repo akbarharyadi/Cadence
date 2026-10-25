@@ -2,7 +2,7 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
-## 0.2.15 (unreleased)
+## 0.2.15 (2026-10-25)
 
 - **Carries on where you left off.** Cadence remembers the queue, the song and the position; when you open it again
   (even after a crash or a restart) the song is ready where it was, paused. Press play to continue.
