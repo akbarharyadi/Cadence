@@ -57,8 +57,20 @@ pub fn owned(d: &Discovery, library: &[Track]) -> bool {
         })
 }
 
-/// Fills in the cover (or the artist's picture). Returns false when the catalogue knows neither
-/// the song nor the artist, which usually means the suggestion was made up.
+/// A song with this title is in the library, but by another artist. The AI sometimes credits a
+/// song to the wrong artist ("Anytime Anywhere" by Aimer instead of milet); such a suggestion is
+/// only kept if the catalogue confirms that artist really has a song of that name.
+pub fn title_clash(d: &Discovery, library: &[Track]) -> bool {
+    let title = core_title(&d.title);
+    title.len() >= 3
+        && library.iter().any(|t| {
+            core_title(&t.title) == title && !same_artist(&t.artist, &d.artist) && !same_artist(&t.album_artist, &d.artist)
+        })
+}
+
+/// Fills in the cover (or the artist's picture when the song has no cover). Returns false when
+/// neither Deezer nor iTunes has this song by this artist, which means the suggestion was made up
+/// or credited to the wrong artist.
 fn enrich(http: &reqwest::blocking::Client, d: &mut Discovery) -> bool {
     let get = |url: String| -> Option<Value> { http.get(url).send().ok()?.json().ok() };
     let q = urlencoding::encode(&format!("{} {}", d.artist, d.title)).into_owned();
@@ -79,17 +91,20 @@ fn enrich(http: &reqwest::blocking::Client, d: &mut Discovery) -> bool {
             return true;
         }
     }
-    // The song isn't listed: show the artist instead, if they exist.
-    let a = urlencoding::encode(&d.artist).into_owned();
-    if let Some(v) = get(format!("https://api.deezer.com/search/artist?q={a}&limit=3")) {
-        let hit = v["data"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|h| same_artist(h["name"].as_str().unwrap_or(""), &d.artist));
+    // Not on Deezer: the iTunes catalogue (Japanese releases are often only there).
+    for country in ["US", "JP"] {
+        let Some(v) = get(format!("https://itunes.apple.com/search?media=music&entity=song&limit=15&country={country}&term={q}")) else {
+            continue;
+        };
+        let want = core_title(&d.title);
+        let hit = v["results"].as_array().into_iter().flatten().find(|h| {
+            let title = core_title(h["trackName"].as_str().unwrap_or(""));
+            same_artist(h["artistName"].as_str().unwrap_or(""), &d.artist)
+                && (title == want || title.starts_with(&want) || want.starts_with(&title))
+        });
         if let Some(h) = hit {
-            d.image = h["picture_medium"].as_str().unwrap_or("").to_string();
-            d.image_is_artist = true;
+            d.image = h["artworkUrl100"].as_str().unwrap_or("").replace("100x100bb", "300x300bb");
+            d.album = h["collectionName"].as_str().unwrap_or("").to_string();
             return true;
         }
     }
@@ -102,7 +117,8 @@ pub fn check(picks: Vec<Discovery>, library: &[Track]) -> Vec<Discovery> {
     let http = client();
     let mut out = Vec::new();
     for mut d in picks.into_iter().filter(|d| !owned(d, library)) {
-        if d.checked || enrich(&http, &mut d) {
+        // Checked before, unless it's a title the listener owns by another artist (see title_clash).
+        if (d.checked && !title_clash(&d, library)) || enrich(&http, &mut d) {
             d.checked = true;
             out.push(d);
         } else {
@@ -140,5 +156,25 @@ mod tests {
         assert!(owned(&pick("Aimer", "Brave Shine"), &lib));
         assert!(!owned(&pick("Fall Out Boy", "Immortals"), &lib));
         assert!(!owned(&pick("Someone Else", "Centuries"), &lib));
+    }
+
+    #[test]
+    fn notices_a_song_credited_to_the_wrong_artist() {
+        let lib = vec![track("Anytime Anywhere", "milet")];
+        assert!(title_clash(&pick("Aimer", "Anytime Anywhere"), &lib));
+        assert!(!title_clash(&pick("milet", "Anytime Anywhere"), &lib));
+        assert!(!title_clash(&pick("Aimer", "Brave Shine"), &lib));
+    }
+
+    /// Live: `cargo test --lib catalog -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn drops_misattributed_and_keeps_real_suggestions() {
+        let lib = vec![track("Anytime Anywhere", "milet")];
+        let out = check(vec![pick("Aimer", "Anytime Anywhere"), pick("YOASOBI", "Idol"), pick("Linkin Park", "The Emptiness Machine")], &lib);
+        let titles: Vec<_> = out.iter().map(|d| format!("{} - {}", d.artist, d.title)).collect();
+        println!("{titles:?}");
+        assert!(!titles.iter().any(|t| t.contains("Anytime")));
+        assert!(titles.iter().any(|t| t.contains("Idol")) && titles.iter().any(|t| t.contains("Emptiness")));
     }
 }

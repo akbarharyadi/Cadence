@@ -1154,7 +1154,7 @@ pub async fn ai_discover(state: State<'_, Arc<AppState>>, refresh: bool) -> Resu
     if !refresh && cache.day == crate::ai::today() {
         if !cache.picks.is_empty() {
             // Picks saved before they were checked against the library and catalogue get checked now.
-            if cache.picks.iter().any(|p| !p.checked) {
+            if cache.picks.iter().any(|p| !p.checked || crate::catalog::title_clash(p, &library)) {
                 let picks = cache.picks;
                 let lib = library.clone();
                 let checked = tauri::async_runtime::spawn_blocking(move || crate::catalog::check(picks, &lib))

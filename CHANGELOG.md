@@ -2,6 +2,16 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.15 (unreleased)
+
+- **Karaoke sweep at the singer's pace.** Lines without word timing used to fill far too fast (about 0.16 s per
+  character, so a slow Japanese line was done in 2 seconds); the sweep now carries the line until shortly before the next
+  one, as singers do.
+- **Lyrics timing nudge:** if a song's lyrics run early or late (made for another version), tap − or + next to
+  **Timing** at the bottom of the lyrics; it's remembered for that song.
+- **New music for you** no longer suggests songs you own under a wrong artist (the AI once credited milet's
+  "Anytime Anywhere" to Aimer), and drops suggestions that neither Deezer nor iTunes can find.
+
 ## 0.2.14 (2026-10-24)
 
 - **Smoother on phones.** Long song lists only build the rows on screen (Songs went from about 5,000 elements to 500 on a

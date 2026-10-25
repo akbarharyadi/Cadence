@@ -52,10 +52,34 @@
     localStorage.setItem("cadence-pronounce", pronounce ? "on" : "off");
   }
 
+  // Timing nudge for this song (lyrics made for another version can run early or late), kept
+  // per song on this device. Positive: the lyrics come later.
+  const OFFSETS = "cadence-lyric-offsets";
+  const readOffsets = (): Record<string, number> => {
+    try {
+      return JSON.parse(localStorage.getItem(OFFSETS) ?? "{}");
+    } catch {
+      return {};
+    }
+  };
+  let offset = $state(0);
+  $effect(() => {
+    offset = readOffsets()[songId] ?? 0;
+  });
+  function nudge(by: number) {
+    offset = by === 0 ? 0 : Math.round((offset + by) * 100) / 100;
+    const all = readOffsets();
+    if (offset) all[songId] = offset;
+    else delete all[songId];
+    localStorage.setItem(OFFSETS, JSON.stringify(all));
+  }
+  /** Where the song is, as the lyrics see it. */
+  const pos = $derived(app.position - offset);
+
   /** Index of the line being sung (slightly early, so the eye gets there in time). */
   const active = $derived.by(() => {
     const lines = lyrics?.synced ?? [];
-    const t = app.position + 0.25;
+    const t = pos + 0.25;
     let i = -1;
     for (let k = 0; k < lines.length && lines[k].time <= t; k++) i = k;
     return i;
@@ -80,8 +104,11 @@
 
   /**
    * The words of a line with their timing. Word-timed lyrics use their own timings; otherwise the
-   * line's time is shared out by length (per character for text without spaces, like Chinese),
-   * and a line never sweeps for longer than it takes to sing it.
+   * line's time is shared out by length (per character for text without spaces, like Japanese).
+   * Singers usually carry a line until just before the next one, so the sweep fills that time;
+   * only after a long gap (an instrumental break) does it use an estimate of the singing time
+   * instead: about a third of a second per Japanese, Chinese or Korean character, much less per
+   * Latin letter.
    */
   function pieces(line: LyricLine, next: LyricLine | undefined): Piece[] {
     if (line.words?.length) {
@@ -93,8 +120,10 @@
     }
     const parts = /\s/.test(line.text) ? line.text.split(/(?<=\s)/) : [...line.text];
     const chars = parts.reduce((n, p) => n + p.trim().length, 0) || 1;
-    const end = Math.min(next?.time ?? line.time + 4, line.time + Math.max(1.6, chars * 0.16));
-    const span = Math.max(0.3, end - line.time - 0.15);
+    const cjk = (line.text.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7a3]/g) ?? []).length;
+    const sung = Math.max(1.2, cjk * 0.33 + (chars - cjk) * 0.07);
+    const gap = next ? next.time - line.time : sung + 1;
+    const span = Math.max(0.3, gap <= sung * 1.8 + 1.5 ? gap - 0.25 : sung);
     let t = line.time;
     return parts.map((p) => {
       const d = (span * Math.max(p.trim().length, 0.5)) / chars;
@@ -105,7 +134,7 @@
   }
 
   const sweep = $derived(active >= 0 && lyrics ? pieces(lyrics.synced[active], lyrics.synced[active + 1]) : []);
-  const progress = (p: Piece) => Math.min(1, Math.max(0, (app.position + 0.1 - p.start) / (p.end - p.start)));
+  const progress = (p: Piece) => Math.min(1, Math.max(0, (pos + 0.1 - p.start) / (p.end - p.start)));
 
   /** How much of the sung line has been swept (0 to 1), weighted by each piece's length. */
   const lineFill = $derived.by(() => {
@@ -347,6 +376,15 @@
       {#if lyrics && (lyrics.synced.length || lyrics.plain)}
         <button class="link small" onclick={hideLyrics} title="Don’t show these lyrics for this song again">Hide these lyrics</button>
       {/if}
+      {#if lyrics?.synced.length}
+        <span class="timing" title="Lyrics early or late for this song? Nudge them.">
+          <button class="nudge" onclick={() => nudge(-0.25)} aria-label="Lyrics earlier">−</button>
+          <button class="value" onclick={() => nudge(0)} title="Back to the lyrics' own timing">
+            {offset === 0 ? "Timing" : `${offset > 0 ? "+" : ""}${offset.toFixed(2)} s`}
+          </button>
+          <button class="nudge" onclick={() => nudge(0.25)} aria-label="Lyrics later">+</button>
+        </span>
+      {/if}
       {#if lyrics?.synced.length && app.dsp && !instrumentalTrack}
         <label class="sing" title="Turn the singer down to sing along yourself">
           <Icon name="song" size={15} />
@@ -483,6 +521,32 @@
   }
   .plain p {
     margin: 0 0 10px;
+  }
+  .timing {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    height: 26px;
+    padding: 0 2px;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .timing .nudge {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    font-size: 15px;
+    line-height: 1;
+    color: rgba(255, 255, 255, 0.8);
+  }
+  .timing .nudge:hover {
+    background: rgba(255, 255, 255, 0.14);
+  }
+  .timing .value {
+    min-width: 54px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.75);
+    font-variant-numeric: tabular-nums;
   }
   .chip {
     display: inline-flex;
