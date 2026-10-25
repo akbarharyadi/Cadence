@@ -2,6 +2,12 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.16 (2026-10-25)
+
+- **Karaoke stays with the singer on slow lines.** A held chorus (like "Maju 'tak gentar…" in Tetap Semangat) no longer
+  fills in a few seconds while it's still being sung: the sweep runs until just before the next line, and only a much
+  longer gap is taken as an instrumental break.
+
 ## 0.2.15 (2026-10-25)
 
 - **Carries on where you left off.** Cadence remembers the queue, the song and the position; when you open it again

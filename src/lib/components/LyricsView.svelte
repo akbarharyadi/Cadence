@@ -105,10 +105,11 @@
   /**
    * The words of a line with their timing. Word-timed lyrics use their own timings; otherwise the
    * line's time is shared out by length (per character for text without spaces, like Japanese).
-   * Singers usually carry a line until just before the next one, so the sweep fills that time;
-   * only after a long gap (an instrumental break) does it use an estimate of the singing time
-   * instead: about a third of a second per Japanese, Chinese or Korean character, much less per
-   * Latin letter.
+   * Singers usually carry a line until just before the next one, so the sweep fills that time.
+   * `quick` is how long the line takes sung quickly (a third of a second per Japanese, Chinese or
+   * Korean character, much less per Latin letter); real lines take about 1.8 times that, and slow
+   * ones (a held chorus) up to 5 times. Only a gap longer than even that means an instrumental
+   * break follows, and the sweep then takes the usual singing time.
    */
   function pieces(line: LyricLine, next: LyricLine | undefined): Piece[] {
     if (line.words?.length) {
@@ -121,9 +122,9 @@
     const parts = /\s/.test(line.text) ? line.text.split(/(?<=\s)/) : [...line.text];
     const chars = parts.reduce((n, p) => n + p.trim().length, 0) || 1;
     const cjk = (line.text.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7a3]/g) ?? []).length;
-    const sung = Math.max(1.2, cjk * 0.33 + (chars - cjk) * 0.07);
-    const gap = next ? next.time - line.time : sung + 1;
-    const span = Math.max(0.3, gap <= sung * 1.8 + 1.5 ? gap - 0.25 : sung);
+    const quick = Math.max(1.2, cjk * 0.33 + (chars - cjk) * 0.07);
+    const gap = next ? next.time - line.time : Infinity;
+    const span = Math.max(0.3, gap <= quick * 5 + 1 ? gap - 0.25 : quick * 1.8);
     let t = line.time;
     return parts.map((p) => {
       const d = (span * Math.max(p.trim().length, 0.5)) / chars;
