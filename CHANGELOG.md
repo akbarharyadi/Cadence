@@ -2,6 +2,14 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.17 (2026-10-26)
+
+- **Android, SD cards.** "Add a music folder" lists SD cards and USB drives again (newer Android versions hid them from
+  Cadence), by the name Android gives them.
+- **Android, Open with Cadence.** Songs in a file manager can be opened in Cadence: it plays them at once, in Now Playing.
+  A song outside your music folders is added to the library on its own (not its whole folder); it shows in Settings
+  → Music folders, where it can be removed.
+
 ## 0.2.16 (2026-10-25)
 
 - **Karaoke stays with the singer on slow lines.** A held chorus (like "Maju 'tak gentar…" in Tetap Semangat) no longer
