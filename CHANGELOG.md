@@ -2,6 +2,15 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.18 (2026-10-26)
+
+- **Android, Direct output to a USB DAC.** With **Direct output** on (Sound page), Cadence plays bit-perfect to a USB
+  DAC: each song at its own sample rate, in the DAC's most precise format, with nothing mixed, resampled or
+  volume-scaled by Android. It needs Android 14 or later and a phone whose maker enabled bit-perfect USB playback;
+  otherwise Cadence plays through Android's mixer as before and says why. The phone's volume may not change the level
+  while it's on: use Cadence's volume or the DAC's.
+- The Sound page and Settings name the right system mixer on each platform (they said "Windows mixer" everywhere).
+
 ## 0.2.17 (2026-10-26)
 
 - **Android, SD cards.** "Add a music folder" lists SD cards and USB drives again (newer Android versions hid them from
