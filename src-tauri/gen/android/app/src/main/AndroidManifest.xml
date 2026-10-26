@@ -16,6 +16,8 @@
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
+    <!-- USB exclusive: Cadence's own driver for USB DACs (phones without USB host still install it). -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <application
         android:icon="@mipmap/ic_launcher"

@@ -85,6 +85,8 @@ export interface OutputInfo {
   bitPerfect: boolean;
   /** Integer bits sent to the device (exclusive mode). */
   bits: number | null;
+  /** The DAC's own volume Cadence applies (dB) when below full: Android's USB exclusive, where the volume keys move it. */
+  deviceVolumeDb: number | null;
   /** E.g. exclusive mode fell back to shared. */
   note: string | null;
   peakDb: number;

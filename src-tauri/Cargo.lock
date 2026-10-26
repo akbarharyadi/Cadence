@@ -538,6 +538,7 @@ dependencies = [
  "jni 0.21.1",
  "kakasi",
  "keyring",
+ "libc",
  "lofty",
  "log",
  "ndk",

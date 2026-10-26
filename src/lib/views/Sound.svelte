@@ -156,12 +156,13 @@
             <p class="hint">Other apps keep playing, at the rate of the current song.</p>
           {:else if platform === "android"}
             <p class="desc">
-              Send music to a USB DAC at each song’s own sample rate, without Android mixing, resampling or changing its volume (bit-perfect USB, Android 14 and later).
+              Send music straight to a USB DAC at each song’s own sample rate, without Android mixing, resampling or changing its volume.
+              Phones with bit-perfect USB (Android 14 and later) do it themselves; on others Cadence drives the DAC with its own USB driver, after you allow it to use the DAC.
               With Sound Check, the equalizer and crossfeed off and volume at 100%, every sample arrives exactly as it is in the file.
             </p>
             <p class="hint">
-              It needs a USB DAC and a phone that offers bit-perfect USB playback; otherwise Cadence plays through Android’s mixer as usual.
-              While it plays, other sounds may be silenced and the phone’s volume may not change the level: use Cadence’s volume or the DAC’s. Cadence lets go of the DAC 20 seconds after you pause.
+              While Cadence drives the DAC, other apps’ sound comes from the phone’s speaker and the volume keys change Cadence’s volume. Cadence lets go of the DAC 20 seconds after you pause.
+              Without a DAC it can use, Cadence plays through Android’s mixer, still at each song’s own rate.
             </p>
           {:else}
             <p class="desc">

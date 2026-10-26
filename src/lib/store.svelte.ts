@@ -642,6 +642,7 @@ export function signalPath(s: Status | null): SignalPath | null {
   if (o.remixing) steps.push(`${src.channels} → ${o.channels} channels`);
   if (o.resampling) steps.push(`${khz(src.sampleRate)} → ${khz(o.sampleRate)}`);
   if (s.volume < 1) steps.push(`Volume ${Math.round(Math.sqrt(s.volume) * 100)}%`);
+  if (o.deviceVolumeDb != null) steps.push(`DAC volume ${db(o.deviceVolumeDb)}`);
   if (o.bitPerfect) return { tier: "bitperfect", label: "Bit-perfect", steps };
   const mixer = systemMixer[0].toUpperCase() + systemMixer.slice(1);
   if (o.unaltered) return { tier: "lossless", label: "Lossless", steps: ["Unaltered by Cadence", ...(o.mode === "shared" ? [mixer] : [])] };

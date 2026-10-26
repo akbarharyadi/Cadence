@@ -29,3 +29,4 @@
 
 # Called from the audio engine (Rust) over JNI, so R8 can't see it's used.
 -keep class com.cadence.player.DirectOutput { public static *; }
+-keep class com.cadence.player.UsbDac { public static *; }

@@ -12,6 +12,10 @@ pub mod eq;
 mod exclusive;
 #[cfg(target_os = "android")]
 mod android_direct;
+#[cfg(target_os = "android")]
+mod usb_dac;
+#[cfg(any(target_os = "android", test))]
+mod usb_audio;
 #[cfg(any(windows, target_os = "android"))]
 mod pcm;
 pub mod loudness;
@@ -224,6 +228,9 @@ pub struct OutputInfo {
     pub bit_perfect: bool,
     /// Integer bits sent to the device (exclusive mode).
     pub bits: Option<u32>,
+    /// The DAC's own volume Cadence applies, in dB, when it's below full (Android's USB exclusive:
+    /// Android's volume doesn't reach the DAC, so the volume keys move this).
+    pub device_volume_db: Option<f32>,
     /// Something worth telling the user about the output (e.g. exclusive mode fell back to shared).
     pub note: Option<String>,
     /// Peak output level since the last update, in dBFS.
@@ -372,6 +379,11 @@ struct Worker {
     switch_pending: Option<usize>,
     /// Exclusive mode: when playback paused (the device is released after a while).
     idle_since: Option<Instant>,
+    /// When the output was last opened, and how many times in a row it failed right after.
+    opened_at: Option<Instant>,
+    quick_failures: u32,
+    /// The output kept failing as soon as it opened: plain shared mode until the mode changes.
+    plain: bool,
     note: Option<String>,
     peak: f32,
     dirty: bool,
@@ -426,6 +438,9 @@ impl Worker {
             exclusive_rate: dsp.exclusive_rate,
             switch_pending: None,
             idle_since: None,
+            opened_at: None,
+            quick_failures: 0,
+            plain: false,
             note: None,
             peak: 0.0,
             dirty: true,
@@ -454,6 +469,18 @@ impl Worker {
             if self.shared.failed.swap(false, Ordering::AcqRel) {
                 self.recover_output();
             }
+            #[cfg(target_os = "android")]
+            {
+                // The user just allowed Cadence to use the USB DAC: switch to it.
+                if self.exclusive && usb_dac::allowed() {
+                    log::info!("allowed to use the USB DAC");
+                    self.note = None;
+                    self.reopen(false);
+                }
+                if self.out.as_ref().is_some_and(|o| matches!(o.backend, output::Backend::Usb(_))) {
+                    usb_dac::sync_volume();
+                }
+            }
             self.fill();
             self.update_position();
             self.release_if_idle();
@@ -474,7 +501,12 @@ impl Worker {
     fn open_output(&mut self, rate: Option<u32>) {
         // Release the current device first: exclusive mode needs it free.
         self.out = None;
+        // The last output held for a while: earlier failures right after opening don't count any more.
+        if !self.opened_at.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
+            self.quick_failures = 0;
+        }
         let opened = match (self.exclusive, rate) {
+            _ if self.plain => output::open_shared(self.shared.clone()),
             #[cfg(windows)]
             (true, Some(rate)) => match exclusive::open(self.shared.clone(), self.device_rate(rate)) {
                 Ok(o) => {
@@ -503,8 +535,12 @@ impl Worker {
                     output::open_shared(self.shared.clone())
                 }
             },
+            // Android's own bit-perfect USB where the phone offers it, else Cadence's USB driver.
             #[cfg(target_os = "android")]
-            (true, Some(rate)) => match android_direct::open(self.shared.clone(), self.device_rate(rate)) {
+            (true, Some(rate)) => match android_direct::open(self.shared.clone(), self.device_rate(rate)).or_else(|e| {
+                log::info!("no bit-perfect USB from Android ({e:#}); trying Cadence's own driver");
+                usb_dac::open(self.shared.clone(), self.device_rate(rate))
+            }) {
                 Ok(o) => {
                     self.note = None;
                     Ok(o)
@@ -512,11 +548,14 @@ impl Worker {
                 Err(e) => {
                     log::warn!("direct output failed: {e:#}");
                     self.note = Some(format!(
-                        "Direct output isn’t available right now ({e}), so Cadence is playing through Android’s mixer."
+                        "Direct output isn’t available right now ({e}), so Cadence is playing through Android’s mixer, at the song’s own rate."
                     ));
-                    output::open_shared(self.shared.clone())
+                    android_direct::open_native(self.shared.clone(), self.device_rate(rate))
                 }
             },
+            // Android's mixer takes each song at its own rate (see `android_direct::open_native`).
+            #[cfg(target_os = "android")]
+            (false, Some(rate)) => android_direct::open_native(self.shared.clone(), rate),
             #[cfg(not(any(windows, target_os = "macos", target_os = "linux", target_os = "android")))]
             (true, Some(_)) => {
                 self.note = Some("Direct output isn’t available here; Cadence is playing through the system mixer.".into());
@@ -534,6 +573,7 @@ impl Worker {
                     out.exclusive()
                 );
                 self.out = Some(out);
+                self.opened_at = Some(Instant::now());
                 self.error = None;
             }
             Err(e) => {
@@ -547,9 +587,33 @@ impl Worker {
 
     /// The device changed (unplugged, new default...): reopen and continue where we were.
     fn recover_output(&mut self) {
+        // A device that fails as soon as it's opened would otherwise be reopened forever (e.g. a
+        // system that keeps interrupting a stream at the song's rate): fall back to plain shared mode.
+        let quick = self.opened_at.is_some_and(|t| t.elapsed() < Duration::from_secs(3));
+        self.quick_failures = if quick { self.quick_failures + 1 } else { 0 };
+        #[cfg(target_os = "android")]
+        if let Some(o) = self.out.as_ref().filter(|_| quick) {
+            android_direct::interrupted(o);
+        }
+        if self.quick_failures >= 3 && !self.plain {
+            log::warn!("the output keeps failing right after opening; using plain shared mode");
+            self.plain = true;
+            self.note = Some(format!(
+                "Playback kept being interrupted, so Cadence is playing through the {} at its usual rate.",
+                if cfg!(target_os = "android") { "Android mixer" } else { "system mixer" }
+            ));
+        }
+        self.reopen(true);
+    }
+
+    /// Opens the output again and carries on where playback was (`settle`: after a failure, give the
+    /// system a moment first).
+    fn reopen(&mut self, settle: bool) {
         let playing = self.shared.playing.load(Ordering::Relaxed);
         self.out = None;
-        std::thread::sleep(Duration::from_millis(300));
+        if settle {
+            std::thread::sleep(Duration::from_millis(300));
+        }
         match self.play_index {
             // start_at reopens the device at the song's rate.
             Some(i) => self.start_at(i, self.position, playing),
@@ -558,14 +622,22 @@ impl Worker {
         }
     }
 
-    /// Whether the open device is wrong for a song at `rate` (mode changed, or exclusive at another rate).
-    fn needs_reopen(&self, rate: u32) -> bool {
-        !self
-            .out
-            .as_ref()
-            .is_some_and(|o| {
-                o.exclusive() == self.exclusive && (!self.exclusive || o.rate == self.device_rate(rate))
-            })
+    /// Whether the open device is wrong for a song at `rate` (mode changed, or exclusive at another
+    /// rate). `gapless`: the song follows on from the previous one.
+    fn needs_reopen(&self, rate: u32, gapless: bool) -> bool {
+        if self.plain {
+            return self.out.is_none();
+        }
+        !self.out.as_ref().is_some_and(|o| {
+            // Direct output that fell back to the mixer is tried again when a song starts afresh,
+            // not between songs (that would break gapless playback for nothing).
+            let mode_fits = o.exclusive() == self.exclusive || (gapless && self.exclusive);
+            // Exclusive mode runs the device at each song's rate, and so does Android's mixer (see
+            // `android_direct::open_native`); other mixers resample.
+            let follows = o.exclusive() || cfg!(target_os = "android");
+            let wanted = if self.exclusive { self.device_rate(rate) } else { rate };
+            mode_fits && (!follows || o.rate == wanted)
+        })
     }
 
     /// The rate to open the device at in exclusive mode for a song at `rate`.
@@ -723,10 +795,18 @@ impl Worker {
                 self.exclusive_rate = dsp.exclusive_rate;
                 if mode_changed {
                     self.note = None;
-                    if self.play_index.is_some() || self.exclusive {
-                        // Restarting the song (below) opens the device in the new mode.
-                        self.out = None;
-                    } else {
+                    // Changing the mode tries it again.
+                    self.plain = false;
+                    self.quick_failures = 0;
+                    // Restarting the song (below) opens the device in the new mode.
+                    self.out = None;
+                    // Direct output off: Android gets the USB DAC back now (not a moment later), so
+                    // playing through it finds the DAC rather than the speaker.
+                    #[cfg(target_os = "android")]
+                    if !self.exclusive {
+                        usb_dac::give_back(true);
+                    }
+                    if self.play_index.is_none() && !self.exclusive {
                         self.open_output(None);
                     }
                 }
@@ -918,7 +998,7 @@ impl Worker {
     /// exclusive mode to a song at another sample rate).
     fn open_source(&mut self, index: usize, secs: f64, may_reopen: bool) -> Result<Option<f64>> {
         let mut src = Source::open(&self.queue[index].path)?;
-        if self.needs_reopen(src.rate) {
+        if self.needs_reopen(src.rate, !may_reopen) {
             if !may_reopen {
                 return Ok(None);
             }
@@ -1255,6 +1335,12 @@ impl Worker {
             .as_ref()
             .map(|o| {
                 let remixing = current.is_some_and(|b| b.info.channels != o.channels);
+                #[cfg(target_os = "android")]
+                let device_volume_db = matches!(o.backend, output::Backend::Usb(_))
+                    .then(usb_dac::volume_db)
+                    .flatten();
+                #[cfg(not(target_os = "android"))]
+                let device_volume_db = None;
                 let unaltered = !resampling
                     && !eq_on
                     && tone.is_none()
@@ -1262,7 +1348,8 @@ impl Worker {
                     && !self.crossfeed.enabled()
                     && !remixing
                     && leveling.is_none_or(|g| g == 0.0)
-                    && self.volume >= 1.0;
+                    && self.volume >= 1.0
+                    && device_volume_db.is_none();
                 OutputInfo {
                     device: o.device.clone(),
                     sample_rate: o.rate,
@@ -1279,6 +1366,7 @@ impl Worker {
                     // Shared mode always goes through the Windows mixer.
                     bit_perfect: unaltered && o.exclusive(),
                     bits: o.bits,
+                    device_volume_db,
                     note: self.note.clone(),
                     peak_db: if self.peak > 0.0 {
                         20.0 * self.peak.log10()

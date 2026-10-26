@@ -5,9 +5,13 @@
 //! or scaled. The Kotlin side (`DirectOutput.kt`) picks the DAC's most precise format at the song's
 //! rate and sets it; the stream here then has to play exactly that format (rate, stereo, 16, 24 or
 //! 32-bit). cpal only opens 16-bit and float streams on Android, hence AAudio directly.
+//!
+//! Without bit-perfect (and in shared mode), Cadence still plays at the song's own rate
+//! ([`open_native`]): Android 14+ is asked to run the DAC at that rate, and many phones switch it
+//! anyway (as for FiiO Music), so nothing resamples the music on its way through the mixer.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow};
 use ndk::audio::{
@@ -58,7 +62,11 @@ pub fn open(shared: Arc<Shared>, rate: u32) -> Result<Output> {
     }
     let mixer = Mixer;
     let (bits, device) = answer.split_once(' ').unwrap_or((answer.as_str(), "USB DAC"));
-    let bits: usize = bits.parse().map_err(|_| anyhow!("unexpected answer {answer:?}"))?;
+    let unchanged = bits.starts_with('=');
+    let bits: usize = bits.trim_start_matches('=').parse().map_err(|_| anyhow!("unexpected answer {answer:?}"))?;
+    if !unchanged {
+        settle();
+    }
     // AAudio's format numbers: 1 = 16-bit, 3 = packed 24-bit, 4 = 32-bit (the latter two from
     // Android 12, which ndk's enum doesn't name).
     let format = match bits {
@@ -118,8 +126,78 @@ pub fn open(shared: Arc<Shared>, rate: u32) -> Result<Output> {
     })
 }
 
+/// Set once asking Android for the DAC's rate got the stream cut off: some phones (MediaTek's
+/// "HiFi audio") then rebuild their output every time a stream starts. They switch the DAC to the
+/// music's rate by themselves, so from then on Cadence only plays at the song's rate.
+static DONT_ASK: AtomicBool = AtomicBool::new(false);
+
+/// Keeps a stream through Android's mixer playing; dropping it gives the DAC its usual rate back.
+pub struct NativeStream {
+    _stream: cpal::Stream,
+    /// Whether Android was asked to run the DAC at the stream's rate.
+    asked: bool,
+    // After the stream (fields drop in order).
+    _mixer: Option<Mixer>,
+}
+
+/// `out` was cut off right after it opened. If Android had been asked for the DAC's rate, that's the
+/// likely cause: stop asking (until Cadence restarts).
+pub fn interrupted(out: &Output) {
+    if let Backend::Native(n) = &out.backend
+        && n.asked
+        && !DONT_ASK.swap(true, Ordering::Relaxed)
+    {
+        log::warn!("asking Android for the DAC's rate cut the stream off; not asking any more");
+    }
+}
+
+/// Plays through Android's mixer at `rate`, the song's own. With a USB DAC on Android 14+, Android
+/// is asked to run the DAC at that rate too (see [`DONT_ASK`]).
+pub fn open_native(shared: Arc<Shared>, rate: u32) -> Result<Output> {
+    // "32 FiiO K3": the DAC's mixer now runs at `rate` with that many bits ("=32 FiiO K3": it already
+    // did); "0 FiiO K3": a USB DAC Android wasn't asked about; "": no USB DAC.
+    let method = if DONT_ASK.load(Ordering::Relaxed) { "plainNative" } else { "prepareNative" };
+    let answer = kotlin(method, rate).unwrap_or_else(|e| {
+        log::warn!("couldn't ask Android for {rate} Hz: {e:#}");
+        String::new()
+    });
+    let (bits, dac) = answer.split_once(' ').map_or(("0", None), |(b, name)| (b, Some(name)));
+    let unchanged = bits.starts_with('=');
+    let bits: u32 = bits.trim_start_matches('=').parse().unwrap_or(0);
+    let mixer = (bits > 0).then_some(Mixer);
+    if bits > 0 && !unchanged {
+        settle();
+    }
+    let out = super::output::open_shared_at(shared, rate)?;
+    let Backend::Shared(stream) = out.backend else {
+        unreachable!("open_shared_at opens a shared stream")
+    };
+    match dac {
+        Some(dac) if bits > 0 => log::info!("native rate: {dac} mixer at {rate} Hz, {bits}-bit"),
+        Some(dac) => log::info!("native rate: {dac}, Android not asked for {rate} Hz"),
+        None => {}
+    }
+    Ok(Output {
+        backend: Backend::Native(NativeStream { _stream: stream, asked: mixer.is_some(), _mixer: mixer }),
+        device: dac.map_or(out.device, str::to_string),
+        ..out
+    })
+}
+
+/// Gives Android a moment to switch the DAC to a new mixer setting: a stream opened while it does
+/// lands on the old one and is cut off as soon as the switch happens.
+fn settle() {
+    std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
 /// Calls `DirectOutput.<method>(context, rate)` in the app's Kotlin code.
 fn kotlin(method: &str, rate: u32) -> Result<String> {
+    call("DirectOutput", method, rate as i32)
+}
+
+/// Calls `<class>.<method>(context, arg)`: a static method of the app's Kotlin code
+/// (`com.cadence.player`) that takes the Android context and a number and answers a string.
+pub(super) fn call(class: &str, method: &str, arg: i32) -> Result<String> {
     use jni::objects::{JClass, JObject, JString, JValue};
     let ctx = ndk_context::android_context();
     // SAFETY: the VM and context Tauri registered for this process, valid while the app runs.
@@ -130,7 +208,7 @@ fn kotlin(method: &str, rate: u32) -> Result<String> {
     let result = env.with_local_frame(8, |env| -> jni::errors::Result<String> {
         // FindClass on a thread Rust started only sees Android's own classes: ask the app's loader.
         let loader = env.call_method(&context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?.l()?;
-        let name = env.new_string("com.cadence.player.DirectOutput")?;
+        let name = env.new_string(format!("com.cadence.player.{class}"))?;
         let class: JClass =
             env.call_method(&loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;", &[JValue::Object(&name)])?.l()?.into();
         let answer = env
@@ -138,7 +216,7 @@ fn kotlin(method: &str, rate: u32) -> Result<String> {
                 &class,
                 method,
                 "(Landroid/content/Context;I)Ljava/lang/String;",
-                &[JValue::Object(&context), JValue::Int(rate as i32)],
+                &[JValue::Object(&context), JValue::Int(arg)],
             )?
             .l()?;
         Ok(env.get_string(&JString::from(answer))?.into())

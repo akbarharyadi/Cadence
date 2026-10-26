@@ -68,11 +68,13 @@ keyring = { version = "3", features = ["apple-native"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
-# Direct output on Android: AAudio streams in the USB DAC's own format, set up by the app's Kotlin side.
+# Direct output on Android: AAudio streams in the USB DAC's own format, set up by the app's Kotlin side,
+# and USB exclusive (Cadence's own USB Audio driver, through Linux usbfs).
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 ndk = { version = "0.9", default-features = false, features = ["audio"] }
 ndk-context = "0.1"
+libc = "0.2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

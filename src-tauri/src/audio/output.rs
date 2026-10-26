@@ -241,6 +241,12 @@ pub enum Backend {
     /// Android direct output: bit-perfect to a USB DAC (see `android_direct`).
     #[cfg(target_os = "android")]
     Direct(#[allow(dead_code)] super::android_direct::DirectStream),
+    /// Android shared mode: through Android's mixer at the song's own rate (see `android_direct`).
+    #[cfg(target_os = "android")]
+    Native(#[allow(dead_code)] super::android_direct::NativeStream),
+    /// Android USB exclusive: Cadence's own driver streams to the DAC (see `usb_dac`).
+    #[cfg(target_os = "android")]
+    Usb(#[allow(dead_code)] super::usb_dac::UsbStream),
 }
 
 pub struct Output {
@@ -257,8 +263,10 @@ impl Output {
     pub fn exclusive(&self) -> bool {
         #[cfg(windows)]
         return matches!(self.backend, Backend::Exclusive(_));
-        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         return matches!(self.backend, Backend::Direct(_));
+        #[cfg(target_os = "android")]
+        return matches!(self.backend, Backend::Direct(_) | Backend::Usb(_));
         #[cfg(not(any(windows, target_os = "macos", target_os = "linux", target_os = "android")))]
         false
     }
@@ -314,6 +322,27 @@ pub fn open_shared(shared: Arc<Shared>) -> Result<Output> {
         .ok_or_else(|| anyhow!("no output device"))?;
     let supported = best_config(&device)?;
     log::info!("shared output format: {} at {} Hz", supported.sample_format(), supported.sample_rate());
+    let (stream, prod, rate, channels) = start(&device, supported, shared)?;
+    Ok(Output {
+        backend: Backend::Shared(stream),
+        prod,
+        rate,
+        channels,
+        device: device_name(&device),
+        bits: None,
+    })
+}
+
+/// Android: the default output at exactly `rate`, through Android's mixer, in the most precise format
+/// it takes there. Android runs a USB DAC (or Bluetooth) at the music's rate when it can, so this
+/// avoids resampling that the device's usual 48 kHz would need.
+#[cfg(target_os = "android")]
+pub fn open_shared_at(shared: Arc<Shared>, rate: u32) -> Result<Output> {
+    let device = cpal::default_host()
+        .default_output_device()
+        .ok_or_else(|| anyhow!("no output device"))?;
+    let supported = config_at(&device, rate, 2).ok_or_else(|| anyhow!("Android can't play {rate} Hz"))?;
+    log::info!("shared output format: {} at {rate} Hz", supported.sample_format());
     let (stream, prod, rate, channels) = start(&device, supported, shared)?;
     Ok(Output {
         backend: Backend::Shared(stream),

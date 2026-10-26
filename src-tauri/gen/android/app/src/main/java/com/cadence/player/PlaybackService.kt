@@ -24,6 +24,7 @@ import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import androidx.media.VolumeProviderCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 
 /**
@@ -56,6 +57,17 @@ class PlaybackService : Service() {
     @Volatile var quality = ""
     /** The album's accent colour (#rrggbb), for the widget's progress line. */
     @Volatile var accent = ""
+    private var instance: PlaybackService? = null
+    private var remote = false
+
+    /**
+     * While Cadence plays to a USB DAC itself, Android's volume doesn't reach the DAC: the volume
+     * keys (and Android's volume slider) then move the DAC's volume Cadence applies. Main thread.
+     */
+    fun remoteVolume(on: Boolean) {
+      remote = on
+      instance?.applyVolumeControl()
+    }
 
     /** Outputs that count as "Bluetooth connected" (a car, headphones, a speaker). */
     private val BLUETOOTH_OUTPUTS = setOf(
@@ -93,7 +105,8 @@ class PlaybackService : Service() {
    *  pause, rather than carry on through the phone's speaker. */
   private val noisy = object : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-      if (intent.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && playing) send("pause")
+      // Not when Cadence takes the USB DAC over (Android sees it disappear) or gives it back.
+      if (intent.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && playing && !UsbDac.quiet()) send("pause")
     }
   }
 
@@ -141,6 +154,29 @@ class PlaybackService : Service() {
     wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
       .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Cadence:playback")
       .apply { setReferenceCounted(false) }
+    instance = this
+    applyVolumeControl()
+  }
+
+  private var volumeProvider: VolumeProviderCompat? = null
+
+  private fun applyVolumeControl() {
+    if (!remote) {
+      if (volumeProvider != null) session.setPlaybackToLocal(AudioManager.STREAM_MUSIC)
+      volumeProvider = null
+      return
+    }
+    if (volumeProvider != null) return
+    val provider = object : VolumeProviderCompat(VOLUME_CONTROL_ABSOLUTE, UsbDac.maxLevel, UsbDac.level) {
+      override fun onSetVolumeTo(level: Int) {
+        UsbDac.setLevel(this@PlaybackService, level)
+        currentVolume = UsbDac.level
+      }
+
+      override fun onAdjustVolume(direction: Int) = onSetVolumeTo(currentVolume + direction)
+    }
+    volumeProvider = provider
+    session.setPlaybackToRemote(provider)
   }
 
   private fun send(command: String) {
@@ -232,6 +268,7 @@ class PlaybackService : Service() {
   }
 
   override fun onDestroy() {
+    if (instance === this) instance = null
     runCatching { unregisterReceiver(noisy) }
     getSystemService(AudioManager::class.java).unregisterAudioDeviceCallback(devices)
     ticker.removeCallbacks(tick)
