@@ -9,7 +9,7 @@
   import Licenses from "$lib/components/Licenses.svelte";
   import Segmented from "$lib/components/Segmented.svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { android, app, isInstrumental } from "$lib/store.svelte";
+  import { android, app, isInstrumental, systemMixer } from "$lib/store.svelte";
 
   let version = $state("");
   let showLicenses = $state(false);
@@ -131,7 +131,7 @@
     <div class="title-row">
       <div>
         <h2 class="section-title">Audio output</h2>
-        <p class="desc">Cadence plays through your Windows default device.</p>
+        <p class="desc">Cadence plays through your default output device.</p>
       </div>
       <button class="pill ghost" onclick={() => app.go({ name: "sound" })}><Icon name="eq" size={15} />Sound settings</button>
     </div>
@@ -140,7 +140,9 @@
         <dt>Device</dt>
         <dd>{out.device}</dd>
         <dt>Device format</dt>
-        <dd>{khz(out.sampleRate)}, {out.channels} channels, through the Windows mixer</dd>
+        <dd>
+          {khz(out.sampleRate)}, {out.channels} channels, {out.mode === "exclusive" ? `${out.bits ? `${out.bits}-bit, ` : ""}straight to the device` : `through the ${systemMixer}`}
+        </dd>
         {#if src}
           <dt>Playing</dt>
           <dd>{src.codec} {src.bits ? `${src.bits}-bit/` : ""}{khz(src.sampleRate)}</dd>

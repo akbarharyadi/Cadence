@@ -33,6 +33,15 @@ function savedTheme(): Theme {
 }
 
 /** The Android bridge, on phones (undefined on the desktop). */
+/** What the system's own audio mixer is called here (shared output goes through it). */
+export const systemMixer = (() => {
+  const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  if (ua.includes("Windows")) return "Windows mixer";
+  if (ua.includes("Android")) return "Android mixer";
+  if (ua.includes("Mac OS")) return "macOS mixer";
+  return "system mixer";
+})();
+
 export function android(): AndroidBridge | undefined {
   return typeof window === "undefined" ? undefined : (window as unknown as { CadenceAndroid?: AndroidBridge }).CadenceAndroid;
 }
@@ -634,6 +643,7 @@ export function signalPath(s: Status | null): SignalPath | null {
   if (o.resampling) steps.push(`${khz(src.sampleRate)} → ${khz(o.sampleRate)}`);
   if (s.volume < 1) steps.push(`Volume ${Math.round(Math.sqrt(s.volume) * 100)}%`);
   if (o.bitPerfect) return { tier: "bitperfect", label: "Bit-perfect", steps };
-  if (o.unaltered) return { tier: "lossless", label: "Lossless", steps: ["Unaltered by Cadence", "Windows mixer"] };
-  return { tier: "enhanced", label: "Enhanced", steps: [...steps, ...(o.mode === "shared" ? ["Windows mixer"] : [])] };
+  const mixer = systemMixer[0].toUpperCase() + systemMixer.slice(1);
+  if (o.unaltered) return { tier: "lossless", label: "Lossless", steps: ["Unaltered by Cadence", ...(o.mode === "shared" ? [mixer] : [])] };
+  return { tier: "enhanced", label: "Enhanced", steps: [...steps, ...(o.mode === "shared" ? [mixer] : [])] };
 }

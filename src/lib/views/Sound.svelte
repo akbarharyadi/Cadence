@@ -42,7 +42,7 @@
     { value: "highpass", label: "High cut" },
   ];
 
-  /** Direct output: WASAPI exclusive on Windows, device rate switching on macOS, ALSA hw on Linux (not Android). */
+  /** Direct output: WASAPI exclusive on Windows, device rate switching on macOS, ALSA hw on Linux, bit-perfect USB on Android. */
   const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
   const platform = ua.includes("Windows") ? "windows" : ua.includes("Android") ? "android" : ua.includes("Mac OS") ? "mac" : ua.includes("Linux") ? "linux" : "other";
 
@@ -134,8 +134,8 @@
   <SignalFlow onstage={scrollTo} />
 
   {#if dsp && eq}
-    <!-- Direct output (not on Android) -->
-    {#if platform === "windows" || platform === "mac" || platform === "linux"}
+    <!-- Direct output -->
+    {#if platform !== "other"}
     <section id="sound-output">
       <div class="title-row">
         <div>
@@ -154,6 +154,15 @@
               With Sound Check, the equalizer and crossfeed off and volume at 100%, every sample arrives exactly as it is in the file.
             </p>
             <p class="hint">Other apps keep playing, at the rate of the current song.</p>
+          {:else if platform === "android"}
+            <p class="desc">
+              Send music to a USB DAC at each song’s own sample rate, without Android mixing, resampling or changing its volume (bit-perfect USB, Android 14 and later).
+              With Sound Check, the equalizer and crossfeed off and volume at 100%, every sample arrives exactly as it is in the file.
+            </p>
+            <p class="hint">
+              It needs a USB DAC and a phone that offers bit-perfect USB playback; otherwise Cadence plays through Android’s mixer as usual.
+              While it plays, other sounds may be silenced and the phone’s volume may not change the level: use Cadence’s volume or the DAC’s. Cadence lets go of the DAC 20 seconds after you pause.
+            </p>
           {:else}
             <p class="desc">
               Play straight to your sound card (its ALSA hw device) at each song’s own sample rate, around PulseAudio or PipeWire.

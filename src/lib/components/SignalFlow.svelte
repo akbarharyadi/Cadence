@@ -1,7 +1,7 @@
 <script lang="ts">
   // What happens to the music on its way to the speakers, as a row of stages.
   import { db, khz } from "$lib/api";
-  import { app, signalPath } from "$lib/store.svelte";
+  import { app, signalPath, systemMixer } from "$lib/store.svelte";
   import Icon from "./Icon.svelte";
 
   let { onstage }: { onstage?: (id: string) => void } = $props();
@@ -63,7 +63,7 @@
       {
         id: "output",
         icon: "speaker",
-        name: o.mode === "exclusive" ? `Direct, ${o.bits ?? 24}-bit/${khz(o.sampleRate)}` : "Windows mixer",
+        name: o.mode === "exclusive" ? `Direct, ${o.bits ?? 24}-bit/${khz(o.sampleRate)}` : systemMixer[0].toUpperCase() + systemMixer.slice(1),
         value: o.device.replace(/\s*\(.*\)\s*$/, ""),
         active: true,
         alters: false,

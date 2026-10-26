@@ -238,6 +238,9 @@ pub enum Backend {
     /// macOS / Linux direct output: the device itself runs at the song's rate (see [`open_direct`]).
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     Direct(#[allow(dead_code)] cpal::Stream),
+    /// Android direct output: bit-perfect to a USB DAC (see `android_direct`).
+    #[cfg(target_os = "android")]
+    Direct(#[allow(dead_code)] super::android_direct::DirectStream),
 }
 
 pub struct Output {
@@ -254,9 +257,9 @@ impl Output {
     pub fn exclusive(&self) -> bool {
         #[cfg(windows)]
         return matches!(self.backend, Backend::Exclusive(_));
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
         return matches!(self.backend, Backend::Direct(_));
-        #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(windows, target_os = "macos", target_os = "linux", target_os = "android")))]
         false
     }
 }

@@ -14,6 +14,7 @@ use ringbuf::{HeapProd, HeapRb};
 use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
 use super::output::{Output, Renderer, Shared};
+use super::pcm::{Dither, Format, encode};
 
 /// Keeps the exclusive stream alive; dropping it stops playback and releases the device.
 pub struct ExclusiveStream {
@@ -28,12 +29,6 @@ impl Drop for ExclusiveStream {
             let _ = t.join();
         }
     }
-}
-
-#[derive(Clone, Copy)]
-struct Format {
-    store_bits: usize,
-    valid_bits: usize,
 }
 
 /// Best first: 24 bits in a 32-bit container (what most DACs want), 32-bit, packed 24-bit, 16-bit.
@@ -214,118 +209,4 @@ fn run(
     }
     let _ = client.stop_stream();
     Ok(())
-}
-
-/// Triangular (TPDF) dither, only for 16-bit output.
-#[derive(Default)]
-struct Dither {
-    state: u32,
-}
-
-impl Dither {
-    /// A uniform random number in [0, 1) (xorshift: cheap and good enough for dither noise).
-    fn uniform(&mut self) -> f32 {
-        if self.state == 0 {
-            self.state = 0x9E37_79B9;
-        }
-        self.state ^= self.state << 13;
-        self.state ^= self.state >> 17;
-        self.state ^= self.state << 5;
-        self.state as f32 / u32::MAX as f32
-    }
-
-    /// Triangular noise in (-1, 1) LSB: the difference of two uniform values.
-    fn next(&mut self) -> f32 {
-        self.uniform() - self.uniform()
-    }
-}
-
-/// Converts float samples to the device's little-endian integer format.
-///
-/// Symphonia decodes N-bit audio as `value / 2^(N-1)`, so multiplying back gives the exact original
-/// integers: a 24-bit file at full volume comes out bit-for-bit identical. Dither is added only to
-/// 16-bit output and only when a value isn't already a whole 16-bit number (so 16-bit files stay exact).
-fn encode(input: &[f32], out: &mut [u8], f: Format, dither: &mut Dither) {
-    match (f.store_bits, f.valid_bits) {
-        (32, 24) => {
-            for (s, o) in input.iter().zip(out.chunks_exact_mut(4)) {
-                let v = (*s as f64 * 8_388_608.0)
-                    .round()
-                    .clamp(-8_388_608.0, 8_388_607.0) as i32;
-                o.copy_from_slice(&(v << 8).to_le_bytes());
-            }
-        }
-        (32, _) => {
-            for (s, o) in input.iter().zip(out.chunks_exact_mut(4)) {
-                let v = (*s as f64 * 2_147_483_648.0)
-                    .round()
-                    .clamp(-2_147_483_648.0, 2_147_483_647.0) as i32;
-                o.copy_from_slice(&v.to_le_bytes());
-            }
-        }
-        (24, _) => {
-            for (s, o) in input.iter().zip(out.chunks_exact_mut(3)) {
-                let v = (*s as f64 * 8_388_608.0)
-                    .round()
-                    .clamp(-8_388_608.0, 8_388_607.0) as i32;
-                o.copy_from_slice(&v.to_le_bytes()[..3]);
-            }
-        }
-        _ => {
-            for (s, o) in input.iter().zip(out.chunks_exact_mut(2)) {
-                let x = *s * 32_768.0;
-                let x = if x.fract() != 0.0 {
-                    x + dither.next()
-                } else {
-                    x
-                };
-                let v = x.round().clamp(-32_768.0, 32_767.0) as i16;
-                o.copy_from_slice(&v.to_le_bytes());
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn twenty_four_bit_is_exact() {
-        // Values as Symphonia produces them from 24-bit integers.
-        let ints = [0i32, 1, -1, 8_388_607, -8_388_608, 123_456, -654_321];
-        let floats: Vec<f32> = ints.iter().map(|&i| i as f32 / 8_388_608.0).collect();
-        let mut out = vec![0u8; floats.len() * 4];
-        encode(
-            &floats,
-            &mut out,
-            Format {
-                store_bits: 32,
-                valid_bits: 24,
-            },
-            &mut Dither::default(),
-        );
-        for (i, chunk) in ints.iter().zip(out.chunks_exact(4)) {
-            assert_eq!(i32::from_le_bytes(chunk.try_into().unwrap()) >> 8, *i);
-        }
-    }
-
-    #[test]
-    fn sixteen_bit_source_gets_no_dither() {
-        let ints = [0i16, 1, -1, 32_767, -32_768, 12_345];
-        let floats: Vec<f32> = ints.iter().map(|&i| i as f32 / 32_768.0).collect();
-        let mut out = vec![0u8; floats.len() * 2];
-        encode(
-            &floats,
-            &mut out,
-            Format {
-                store_bits: 16,
-                valid_bits: 16,
-            },
-            &mut Dither::default(),
-        );
-        for (i, chunk) in ints.iter().zip(out.chunks_exact(2)) {
-            assert_eq!(i16::from_le_bytes(chunk.try_into().unwrap()), *i);
-        }
-    }
 }

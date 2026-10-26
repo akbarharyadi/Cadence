@@ -10,6 +10,10 @@ pub mod crossfeed;
 pub mod eq;
 #[cfg(windows)]
 mod exclusive;
+#[cfg(target_os = "android")]
+mod android_direct;
+#[cfg(any(windows, target_os = "android"))]
+mod pcm;
 pub mod loudness;
 mod output;
 mod resample;
@@ -499,7 +503,21 @@ impl Worker {
                     output::open_shared(self.shared.clone())
                 }
             },
-            #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+            #[cfg(target_os = "android")]
+            (true, Some(rate)) => match android_direct::open(self.shared.clone(), self.device_rate(rate)) {
+                Ok(o) => {
+                    self.note = None;
+                    Ok(o)
+                }
+                Err(e) => {
+                    log::warn!("direct output failed: {e:#}");
+                    self.note = Some(format!(
+                        "Direct output isn’t available right now ({e}), so Cadence is playing through Android’s mixer."
+                    ));
+                    output::open_shared(self.shared.clone())
+                }
+            },
+            #[cfg(not(any(windows, target_os = "macos", target_os = "linux", target_os = "android")))]
             (true, Some(_)) => {
                 self.note = Some("Direct output isn’t available here; Cadence is playing through the system mixer.".into());
                 output::open_shared(self.shared.clone())
