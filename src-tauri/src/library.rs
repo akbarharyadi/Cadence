@@ -112,7 +112,8 @@ pub fn is_audio(path: &Path) -> bool {
 fn unreadable(folder: &Path, songs: &[Track]) -> bool {
     let Some(first) = songs.first() else { return false };
     if !folder.exists() {
-        return true;
+        // A song added on its own whose folder is still there was deleted or moved.
+        return !(is_audio(folder) && folder.parent().is_some_and(Path::exists));
     }
     match std::fs::metadata(&first.path) {
         Ok(_) => true,
@@ -675,6 +676,12 @@ mod scan_tests {
         let emptied = root.join("emptied");
         std::fs::create_dir_all(&emptied).unwrap();
         assert!(scan(&[emptied.to_string_lossy().into_owned()], vec![song(&emptied.join("c.flac"))], |_, _| {}).is_empty());
+        // A song added on its own (opened from another app) and then deleted: it goes...
+        let opened = emptied.join("d.flac");
+        assert!(scan(&[opened.to_string_lossy().into_owned()], vec![song(&opened)], |_, _| {}).is_empty());
+        // ...but not when the drive it was on is missing.
+        let away = gone.join("e.flac");
+        assert_eq!(scan(&[away.to_string_lossy().into_owned()], vec![song(&away)], |_, _| {}).len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

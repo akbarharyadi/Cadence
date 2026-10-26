@@ -257,7 +257,9 @@ export const api = {
   addFolders: (paths: string[]) => invoke<string[]>("add_folders", { paths }),
   removeFolder: (path: string) => invoke<string[]>("remove_folder", { path }),
   rescan: () => invoke<void>("rescan"),
-  listDirs: (path: string | null) => invoke<DirEntry[]>("list_dirs", { path }),
+  listDirs: (path: string | null, volumes?: { path: string; name: string }[]) =>
+    invoke<DirEntry[]>("list_dirs", { path, volumes }),
+  openFile: (path: string) => invoke<{ id: string; added: boolean }>("open_file", { path }),
   /** `picked`: the user chose the start song, so it plays even if it's skipped. */
   play: (ids: string[], start = 0, picked = false) => invoke<void>("play_tracks", { ids, start, picked }),
   enqueue: (ids: string[], next: boolean) => invoke<void>("enqueue", { ids, next }),

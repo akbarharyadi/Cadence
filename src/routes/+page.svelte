@@ -108,6 +108,13 @@
       if (c.startsWith("seek:")) app.seek(Number(c.slice(5)));
       else if (c === "play" || c === "pause" || c === "next" || c === "prev") api.player(c);
     };
+    // "Open with Cadence" in a file manager: play the song (also the one Cadence was started with).
+    const openShared = () => {
+      const path = androidBridge()?.takeOpenedFile?.();
+      if (path) app.openFile(path);
+    };
+    (window as unknown as { __cadenceOpen: () => void }).__cadenceOpen = openShared;
+    openShared();
     // On a phone the first scan can run before the user has allowed access to their music; look
     // again when Cadence comes back to the foreground with access newly given, or the library
     // still empty.
@@ -142,6 +149,13 @@
   // The whole app takes its colour from the album that's playing (or open), unless a fixed theme
   // is chosen in Settings.
   $effect(() => app.paintTheme(app.themeAlbum));
+
+  $effect(() => {
+    if (app.opening && app.current?.id === app.opening) {
+      app.opening = null;
+      app.nowPlayingOpen = true;
+    }
+  });
 
   function onKey(e: KeyboardEvent) {
     const target = e.target as HTMLElement;

@@ -59,6 +59,8 @@
     await app.pickFolders();
   }
 
+  const isSong = (path: string) => /\.(flac|alac|wav|aiff?|mp3|m4a|aac|ogg|opus)$/i.test(path);
+
   async function remove(path: string) {
     app.folders = await api.removeFolder(path);
   }
@@ -90,8 +92,9 @@
     <ul class="folders">
       {#each app.folders as f (f)}
         <li>
-          <Icon name="folder" size={18} />
-          <span class="path" title={f}>{f}</span>
+          <!-- A song opened from another app is added on its own. -->
+          <Icon name={isSong(f) ? "song" : "folder"} size={18} />
+          <span class="path" title={f}>{isSong(f) ? f.split(/[\\/]/).pop() : f}</span>
           <button class="icon-btn" aria-label="Remove {f}" title="Remove from Cadence (your files stay where they are)" onclick={() => remove(f)}>
             <Icon name="trash" size={16} />
           </button>

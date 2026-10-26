@@ -1,7 +1,7 @@
 <script lang="ts">
   // Choosing a music folder inside Cadence (phones have no usable system folder picker).
   import { api, type DirEntry } from "$lib/api";
-  import { app } from "$lib/store.svelte";
+  import { android, app } from "$lib/store.svelte";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 
@@ -16,7 +16,9 @@
     loading = true;
     error = "";
     try {
-      dirs = await api.listDirs(p);
+      // Android itself lists the SD cards and USB drives that are plugged in.
+      const volumes = p == null ? JSON.parse(android()?.storageVolumes?.() || "[]") : undefined;
+      dirs = await api.listDirs(p, volumes);
     } catch (e) {
       dirs = [];
       error = String(e);

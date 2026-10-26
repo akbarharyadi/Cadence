@@ -26,6 +26,11 @@ pub fn get_folders(state: AppStateRef) -> Vec<String> {
     state.settings.lock().folders.clone()
 }
 
+/// `child` is a file or folder somewhere inside the folder `parent`.
+fn inside(child: &str, parent: &str) -> bool {
+    child.starts_with(&format!("{parent}\\")) || child.starts_with(&format!("{parent}/"))
+}
+
 /// Adds folders (or the folders of dropped files) to the library and rescans.
 #[tauri::command]
 pub fn add_folders(app: AppHandle, state: AppStateRef, paths: Vec<String>) -> Vec<String> {
@@ -44,10 +49,6 @@ pub fn add_folders(app: AppHandle, state: AppStateRef, paths: Vec<String>) -> Ve
                 path.parent().map(Path::to_path_buf).unwrap_or(path)
             };
             let folder = folder.to_string_lossy().into_owned();
-            let inside = |child: &str, parent: &str| {
-                child.starts_with(&format!("{parent}\\"))
-                    || child.starts_with(&format!("{parent}/"))
-            };
             // Skip folders already covered by a parent folder; replace folders this one covers.
             if !s.folders.iter().any(|f| folder == *f || inside(&folder, f)) {
                 s.folders.retain(|f| !inside(f, &folder));
@@ -59,6 +60,62 @@ pub fn add_folders(app: AppHandle, state: AppStateRef, paths: Vec<String>) -> Ve
     start_scan(app.clone());
     crate::jobs::watch_folders(app);
     state.settings.lock().folders.clone()
+}
+
+/// What opening a song from another app did.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Opened {
+    pub id: String,
+    /// The song wasn't in the library: it was added, on its own.
+    pub added: bool,
+}
+
+/// Plays a song opened from another app ("Open with Cadence" in a file manager). A song outside
+/// the music folders is added to the library on its own (not its whole folder, which may be
+/// Downloads or voice messages), and plays as soon as it has been read.
+#[tauri::command]
+pub fn open_file(app: AppHandle, state: AppStateRef, path: String) -> Result<Opened, String> {
+    let path: PathBuf = Path::new(&path).components().collect();
+    // "/sdcard/..." is "/storage/emulated/0/...", as the library knows it.
+    #[cfg(unix)]
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    if !path.is_file() || !crate::library::is_audio(&path) {
+        return Err(format!("Cadence can't play {}", path.display()));
+    }
+    let key = path.to_string_lossy().into_owned();
+    // Songs are known by their path (see library::read_track).
+    let id = crate::library::short_hash(&key);
+    let mut added = false;
+    if !state.library.lock().by_id.contains_key(&id) {
+        {
+            let mut s = state.settings.lock();
+            if !s.folders.iter().any(|f| *f == key || inside(&key, f)) {
+                s.folders.push(key.clone());
+                added = true;
+            }
+        }
+        if added {
+            state.save_settings();
+            crate::jobs::watch_folders(app.clone());
+        }
+        // Also when it's in a music folder already: a song copied there just now isn't read yet.
+        start_scan(app);
+    }
+    let state = state.inner().clone();
+    let wanted = id.clone();
+    std::thread::spawn(move || {
+        for _ in 0..600 {
+            if state.library.lock().by_id.contains_key(&wanted) {
+                let items = state.queue_items(&[wanted]);
+                state.engine.send(Cmd::Load { items, index: 0 });
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        log::warn!("opened song {wanted} never showed up in the library");
+    });
+    Ok(Opened { id, added })
 }
 
 /// Android updates: downloads the new APK into the app's cache (the app then hands it to Android's
@@ -118,10 +175,18 @@ pub struct DirEntry {
     pub has_folders: bool,
 }
 
+/// An SD card or USB drive, as Android lists it.
+#[derive(serde::Deserialize)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub struct Volume {
+    pub path: String,
+    pub name: String,
+}
+
 /// The subfolders of `path`, or with no path the places to start from: internal storage and any
-/// SD card or USB drive (on Android), or the user's Music folder and drives elsewhere.
+/// SD card or USB drive (on Android, which lists them in `volumes`), or the user's home elsewhere.
 #[tauri::command]
-pub fn list_dirs(path: Option<String>) -> Result<Vec<DirEntry>, String> {
+pub fn list_dirs(path: Option<String>, volumes: Option<Vec<Volume>>) -> Result<Vec<DirEntry>, String> {
     const AUDIO: [&str; 10] = ["flac", "alac", "wav", "aif", "aiff", "mp3", "m4a", "aac", "ogg", "opus"];
     let is_audio = |p: &Path| {
         p.extension()
@@ -148,16 +213,25 @@ pub fn list_dirs(path: Option<String>) -> Result<Vec<DirEntry>, String> {
         #[cfg(target_os = "android")]
         {
             roots.push(entry(PathBuf::from("/storage/emulated/0"), "Phone storage".into()));
-            // SD cards and USB drives show up as /storage/XXXX-XXXX.
+            for v in volumes.unwrap_or_default() {
+                if !roots.iter().any(|r| r.path == v.path) {
+                    roots.push(entry(PathBuf::from(&v.path), v.name));
+                }
+            }
+            // SD cards and USB drives are /storage/XXXX-XXXX, though newer Android versions don't
+            // let apps list /storage (hence the volumes from Android itself).
             if let Ok(rd) = std::fs::read_dir("/storage") {
                 for e in rd.flatten() {
                     let name = e.file_name().to_string_lossy().into_owned();
-                    if name != "emulated" && name != "self" && e.path().is_dir() {
+                    let known = roots.iter().any(|r| Path::new(&r.path) == e.path());
+                    if name != "emulated" && name != "self" && !known && e.path().is_dir() {
                         roots.push(entry(e.path(), format!("SD card ({name})")));
                     }
                 }
             }
         }
+        #[cfg(not(target_os = "android"))]
+        let _ = volumes;
         #[cfg(not(target_os = "android"))]
         if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
             roots.push(entry(PathBuf::from(home), "Home".into()));

@@ -1,6 +1,7 @@
 package com.cadence.player
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -9,14 +10,20 @@ import androidx.core.view.WindowInsetsCompat
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.net.Uri
+import android.provider.MediaStore
+import android.provider.OpenableColumns
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 class MainActivity : TauriActivity() {
   private var webView: WebView? = null
+  /** A song another app asked Cadence to play, until the app takes it (see takeOpenedFile). */
+  @Volatile private var opened: String? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
@@ -65,6 +72,71 @@ class MainActivity : TauriActivity() {
         webView?.evaluateJavascript("window.__cadenceMedia && window.__cadenceMedia(${JSONObject.quote(command)})", null)
       }
     }
+
+    // Opened from a file manager ("Open with Cadence"), but not when Android merely recreates the
+    // app or it's reopened from the recent apps.
+    if (savedInstanceState == null && (intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0) openFrom(intent)
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    openFrom(intent)
+  }
+
+  /** A song shared with Cadence: find the file (off the main thread) and tell the app. */
+  private fun openFrom(intent: Intent?) {
+    if (intent?.action != Intent.ACTION_VIEW) return
+    val uri = intent.data ?: return
+    Thread {
+      val path = runCatching { localPath(uri) }.onFailure { android.util.Log.w("Cadence", "can't open $uri", it) }.getOrNull()
+        ?: return@Thread
+      synchronized(this@MainActivity) { opened = path }
+      // If the app isn't running yet, it takes the song when it starts.
+      runOnUiThread { webView?.evaluateJavascript("window.__cadenceOpen && window.__cadenceOpen()", null) }
+    }.start()
+  }
+
+  /**
+   * The file behind a song another app opened. File managers usually hand over a link of their
+   * own rather than the path; the song is found in Android's media index by its name, and
+   * only songs that aren't in it (an e-mail attachment) are copied into Cadence's own storage.
+   */
+  private fun localPath(uri: Uri): String? {
+    if (uri.scheme == "file") return uri.path
+    val readable = { p: String? -> p?.takeIf { File(it).canRead() } }
+    // Android's media index (and some file managers) give the path itself.
+    runCatching {
+      contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.DATA), null, null, null)?.use { c ->
+        if (c.moveToFirst()) readable(c.getString(0))?.let { return it }
+      }
+    }
+    var name: String? = null
+    var size = -1L
+    contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
+      if (c.moveToFirst()) {
+        name = c.getString(0)
+        if (!c.isNull(1)) size = c.getLong(1)
+      }
+    }
+    val fileName = name ?: uri.lastPathSegment?.substringAfterLast('/') ?: return null
+    // Songs of that name; the file's own size tells same-named ones apart ("01 Intro.flac"), as
+    // the index doesn't always know it yet.
+    val named = mutableListOf<String>()
+    contentResolver.query(
+      MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+      arrayOf(MediaStore.MediaColumns.DATA),
+      "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+      arrayOf(fileName),
+      null,
+    )?.use { c ->
+      while (c.moveToNext()) readable(c.getString(0))?.let { named += it }
+    }
+    val found = if (size > 0) named.firstOrNull { File(it).length() == size } else named.singleOrNull()
+    if (found != null) return found
+    android.util.Log.i("Cadence", "$fileName isn't in the media index; playing a copy")
+    val copy = File(File(filesDir, "Opened").apply { mkdirs() }, fileName.replace('/', '_'))
+    contentResolver.openInputStream(uri)?.use { input -> copy.outputStream().use { input.copyTo(it) } } ?: return null
+    return copy.path
   }
 
   private fun prefs() = getSharedPreferences("cadence", MODE_PRIVATE)
@@ -79,6 +151,24 @@ class MainActivity : TauriActivity() {
 
   /** Called from the app's JavaScript with what's playing. */
   inner class Bridge {
+    /** The song another app asked Cadence to play, once ("" when there's none). */
+    @JavascriptInterface
+    fun takeOpenedFile(): String = synchronized(this@MainActivity) { opened.also { opened = null } } ?: ""
+
+    /** SD cards and USB drives that are plugged in, for the folder browser: [{path, name}]. */
+    @JavascriptInterface
+    fun storageVolumes(): String {
+      val out = JSONArray()
+      val storage = getSystemService(android.os.storage.StorageManager::class.java)
+      for (v in storage.storageVolumes) {
+        val mounted = v.state == android.os.Environment.MEDIA_MOUNTED || v.state == android.os.Environment.MEDIA_MOUNTED_READ_ONLY
+        if (v.isPrimary || !mounted) continue
+        val path = if (Build.VERSION.SDK_INT >= 30) v.directory?.path else v.uuid?.let { "/storage/$it" }
+        if (path != null) out.put(JSONObject().put("path", path).put("name", v.getDescription(this@MainActivity)))
+      }
+      return out.toString()
+    }
+
     /** Whether Cadence may read the music on the phone. */
     @JavascriptInterface
     fun hasMusicPermission(): Boolean =

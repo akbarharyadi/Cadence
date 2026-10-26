@@ -17,6 +17,10 @@ export interface AndroidBridge {
   setPlayOnBluetooth(on: boolean): void;
   /** The colour behind the status and navigation bars (newer app versions). */
   setBackground?(color: string): void;
+  /** SD cards and USB drives: JSON [{path, name}]. */
+  storageVolumes?(): string;
+  /** The song a file manager asked Cadence to play ("" if none), handed over once. */
+  takeOpenedFile?(): string;
 }
 
 /** "album": colours from the song playing; "dark" / "black": the same for every song. */
@@ -93,6 +97,8 @@ class AppState {
   navKind = $state<"forward" | "back" | "tab">("tab");
   history = $state<View[]>([]);
   nowPlayingOpen = $state(false);
+  /** A song opened from another app: Now Playing opens when it starts. */
+  opening = $state<string | null>(null);
   lyricsOpen = $state(false);
   queueOpen = $state(false);
   search = $state("");
@@ -493,6 +499,17 @@ class AppState {
     if (paths.length === 0) return;
     this.folders = await api.addFolders(paths);
     this.showToast("Importing your music…");
+  }
+
+  /** Plays a song opened from another app ("Open with Cadence"). */
+  async openFile(path: string) {
+    try {
+      const { id, added } = await api.openFile(path);
+      this.opening = id;
+      if (added) this.showToast(`Added “${path.split(/[\\/]/).pop()}” to your library`);
+    } catch (e) {
+      this.showToast(String(e));
+    }
   }
 
   /** Asks for music folders and adds them. Android uses Cadence's own folder browser. */
