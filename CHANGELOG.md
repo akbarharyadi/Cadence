@@ -2,6 +2,21 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.19 (2026-10-26)
+
+- **Android, USB exclusive.** With **Direct output** on, Cadence now drives a USB DAC with its own USB Audio driver on
+  phones that don't offer Android's bit-perfect USB (most of them), the way USB Audio Player Pro and HiBy's exclusive
+  mode do. Each song reaches the DAC untouched at its own sample rate, including CD-quality 44.1 kHz songs, which many
+  phones always play at 48 kHz. Android asks once per plug-in whether Cadence may use the DAC. While Cadence drives it,
+  other apps' sound comes from the phone's speaker, the volume keys set the DAC's volume (starting where Android's
+  was), and unplugging the DAC pauses. It works with USB Audio 2.0 DACs (most current ones); older USB Audio 1.0 DACs
+  play through Android as before.
+- **Android, songs at their own rate.** Cadence hands Android each song at its own sample rate instead of converting
+  everything to 48 kHz first, so phones that switch a USB DAC to the music's rate (many do for hi-res) play it without
+  resampling.
+- If the output keeps failing right after it opens, Cadence plays through the system mixer at its usual rate instead of
+  retrying over and over, and says so.
+
 ## 0.2.18 (2026-10-26)
 
 - **Android, Direct output to a USB DAC.** With **Direct output** on (Sound page), Cadence plays bit-perfect to a USB
