@@ -281,21 +281,24 @@ class AppState {
   private posBase = { pos: 0, at: 0, playing: false };
 
   async init() {
-    await listen<Status>("player-status", (e) => this.applyStatus(e.payload));
-    await listen("library-changed", async () => {
-      await this.loadLibrary();
-      this.scan = null;
-    });
-    await listen<{ done: number; total: number }>("library-progress", (e) => (this.scan = e.payload));
-    await listen("history-changed", async () => (this.listening = await api.history()));
-    await listen<{ done: number; total: number }>("analysis-progress", (e) => {
-      this.analysis = e.payload.done >= e.payload.total ? null : e.payload;
-    });
-    await listen<{ done: number; total: number }>("sonic-progress", (e) => {
-      const { done, total } = e.payload;
-      if (done >= total) this.loadSonic();
-      else if (this.sonic) this.sonic = { ...this.sonic, analyzed: this.sonic.total - total + done, running: true };
-    });
+    // All at once: each is a round trip to the app, and one after another they hold up the first screen.
+    await Promise.all([
+      listen<Status>("player-status", (e) => this.applyStatus(e.payload)),
+      listen("library-changed", async () => {
+        await this.loadLibrary();
+        this.scan = null;
+      }),
+      listen<{ done: number; total: number }>("library-progress", (e) => (this.scan = e.payload)),
+      listen("history-changed", async () => (this.listening = await api.history())),
+      listen<{ done: number; total: number }>("analysis-progress", (e) => {
+        this.analysis = e.payload.done >= e.payload.total ? null : e.payload;
+      }),
+      listen<{ done: number; total: number }>("sonic-progress", (e) => {
+        const { done, total } = e.payload;
+        if (done >= total) this.loadSonic();
+        else if (this.sonic) this.sonic = { ...this.sonic, analyzed: this.sonic.total - total + done, running: true };
+      }),
+    ]);
     this.loadSonic();
     api.aiSettings().then((a) => {
       this.ai = a;

@@ -166,6 +166,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let setup_started = std::time::Instant::now();
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(data_dir.join("art"))?;
             #[cfg(target_os = "android")]
@@ -186,9 +187,11 @@ pub fn run() {
                 },
             );
 
+            let read = setup_started.elapsed();
             // Show the cached library immediately; a background rescan picks up changes.
             let mut tracks = cache.tracks;
             let albums = library::build_albums(&mut tracks, &data_dir.join("art"));
+            let built = setup_started.elapsed();
             let mut library = Library::default();
             library.set_tracks(tracks, albums);
             let has_folders = !settings.folders.is_empty();
@@ -236,9 +239,13 @@ pub fn run() {
                 true
             };
             if has_folders {
-                jobs::start_scan(app.handle().clone());
-                jobs::watch_folders(app.handle().clone());
+                // Watching lists the same folders the scan does: once it's done, not alongside.
+                jobs::start_scan_then_watch(app.handle().clone());
             }
+            log::info!(
+                "started in {:?} (saved data read by {read:?}, albums built by {built:?})",
+                setup_started.elapsed()
+            );
             Ok(())
         })
         .on_window_event(|window, event| {

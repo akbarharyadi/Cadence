@@ -2,7 +2,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use notify::RecursiveMode;
@@ -36,6 +36,15 @@ fn retry_later(app: AppHandle) {
 pub struct Progress {
     pub done: usize,
     pub total: usize,
+}
+
+/// Set at startup: the folders start being watched once the first scan is done.
+static WATCH_AFTER_SCAN: AtomicBool = AtomicBool::new(false);
+
+/// Rescans, then watches the folders for changes (at startup).
+pub fn start_scan_then_watch(app: AppHandle) {
+    WATCH_AFTER_SCAN.store(true, Ordering::SeqCst);
+    start_scan(app);
 }
 
 /// Rescans every folder in the background and tells the UI when the library changed.
@@ -81,6 +90,9 @@ pub fn start_scan(app: AppHandle) {
         };
         state.save_library();
         let _ = app.emit("library-changed", ());
+        if WATCH_AFTER_SCAN.swap(false, Ordering::SeqCst) {
+            watch_folders(app.clone());
+        }
         if again {
             start_scan(app);
         } else {
@@ -267,12 +279,30 @@ pub type FolderWatcher = Debouncer<notify::RecommendedWatcher, RecommendedCache>
 /// Watches every music folder; when audio files appear, change or disappear, the library rescans
 /// (only changed files are re-read). Call again whenever the folder list changes.
 pub fn watch_folders(app: AppHandle) {
+    // Watching a folder tree adds a watch for every folder in it, which takes seconds on a phone's
+    // shared storage: done in the background, so startup (and adding a folder) doesn't wait for it.
+    // When calls overlap, the latest one's watcher is kept.
+    static LATEST: AtomicUsize = AtomicUsize::new(0);
+    let generation = LATEST.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let watcher = make_watcher(&app);
+        if LATEST.load(Ordering::SeqCst) == generation {
+            let state = app.state::<Arc<AppState>>();
+            *state.watcher.lock() = watcher;
+            log::info!("watching the music folders (set up in {:?})", started.elapsed());
+        }
+    });
+}
+
+/// A watcher on every music folder (None without folders), rescanning when they change.
+fn make_watcher(app: &AppHandle) -> Option<FolderWatcher> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let folders = state.settings.lock().folders.clone();
     // Drop the old watcher first so removed folders stop being watched.
     *state.watcher.lock() = None;
     if folders.is_empty() {
-        return;
+        return None;
     }
     let handle = app.clone();
     let debouncer = new_debouncer(
@@ -305,8 +335,11 @@ pub fn watch_folders(app: AppHandle) {
                     log::warn!("can't watch {f}: {e}");
                 }
             }
-            *state.watcher.lock() = Some(d);
+            Some(d)
         }
-        Err(e) => log::warn!("folder watching unavailable: {e}"),
+        Err(e) => {
+            log::warn!("folder watching unavailable: {e}");
+            None
+        }
     }
 }

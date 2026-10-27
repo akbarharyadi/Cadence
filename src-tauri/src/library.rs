@@ -127,6 +127,7 @@ pub fn scan(
     previous: Vec<Track>,
     progress: impl Fn(usize, usize) + Sync,
 ) -> Vec<Track> {
+    let started = std::time::Instant::now();
     let mut files: Vec<PathBuf> = Vec::new();
     // Songs of folders that can't be read right now: kept as they were.
     let mut kept: Vec<Track> = Vec::new();
@@ -154,6 +155,8 @@ pub fn scan(
         previous.into_iter().map(|t| (t.path.clone(), t)).collect();
     let total = files.len();
     let done = std::sync::atomic::AtomicUsize::new(0);
+    let walked = started.elapsed();
+    let reread = std::sync::atomic::AtomicUsize::new(0);
 
     let jobs: Vec<(PathBuf, Option<Track>)> = files
         .into_iter()
@@ -182,6 +185,7 @@ pub fn scan(
             match old {
                 Some(t) if t.size == size && t.modified == modified => Some(t),
                 old => {
+                    reread.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let mut t = read_track(&path)?;
                     t.size = size;
                     t.modified = modified;
@@ -191,6 +195,11 @@ pub fn scan(
             }
         })
         .collect();
+    log::info!(
+        "found {total} songs in {walked:?}, checked them in {:?} ({} read again)",
+        started.elapsed() - walked,
+        reread.into_inner()
+    );
     tracks.extend(kept);
     tracks.sort_by(|a, b| {
         (
@@ -355,7 +364,7 @@ pub fn build_albums(tracks: &mut [Track], art_dir: &Path) -> Vec<Album> {
             let (art, art_small) = ensure_art(id, &list, art_dir);
             let (accent, tint) = art_small
                 .as_deref()
-                .and_then(|p| cover_colors(Path::new(p)))
+                .and_then(|p| saved_colors(id, Path::new(p), art_dir))
                 .unzip();
             let max_rate = list.iter().filter_map(|t| t.sample_rate).max();
             let max_bits = list.iter().filter_map(|t| t.bit_depth).max();
@@ -405,6 +414,20 @@ pub fn build_albums(tracks: &mut [Track], art_dir: &Path) -> Vec<Album> {
 /// mid-lightness), made readable on dark backgrounds. A small vivid detail (eyes, a logo) doesn't win
 /// over the colour that fills the cover. Gold-ish hues give way to the runner-up when it's close, so the
 /// accent stays distinct from the gold "Lossless" badge.
+/// An album's cover colours, worked out once and kept next to its artwork (`write_art` drops them):
+/// decoding every cover again would slow every start.
+fn saved_colors(album_id: &str, small: &Path, art_dir: &Path) -> Option<(String, String)> {
+    let saved = art_dir.join(format!("{album_id}.colors"));
+    if let Ok(text) = std::fs::read_to_string(&saved)
+        && let Some((accent, tint)) = text.trim().split_once(' ')
+    {
+        return Some((accent.to_string(), tint.to_string()));
+    }
+    let colors = cover_colors(small)?;
+    let _ = std::fs::write(&saved, format!("{} {}", colors.0, colors.1));
+    Some(colors)
+}
+
 fn cover_colors(path: &Path) -> Option<(String, String)> {
     const BINS: usize = 24;
     let img = image::open(path).ok()?.thumbnail(64, 64).to_rgb8();
@@ -526,10 +549,36 @@ fn ensure_art(
     if large.exists() && small.exists() {
         return (as_str(&large), as_str(&small));
     }
+    // Looking for a cover reads the songs and lists their folder, slow on a phone's shared storage:
+    // an album known to have none isn't searched again until its songs or folder change.
+    let none = art_dir.join(format!("{album_id}.none"));
+    let key = cover_search_key(tracks);
+    if std::fs::read_to_string(&none).is_ok_and(|k| k == key) {
+        return (None, None);
+    }
     let Some(bytes) = embedded_cover(tracks).or_else(|| folder_cover(tracks)) else {
+        let _ = std::fs::write(&none, key);
         return (None, None);
     };
     write_art(album_id, &bytes, art_dir)
+}
+
+/// What a cover search depends on: the album's songs and its folder (where a cover image may be added).
+fn cover_search_key(tracks: &[&Track]) -> String {
+    let mut parts: Vec<String> = tracks
+        .iter()
+        .map(|t| format!("{}|{}|{}|{}", t.path, t.size, t.modified, t.has_embedded_art))
+        .collect();
+    parts.sort();
+    let folder = tracks
+        .first()
+        .and_then(|t| Path::new(&t.path).parent().map(Path::to_path_buf))
+        .and_then(|d| std::fs::metadata(d).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    parts.push(folder.to_string());
+    short_hash(&parts.join("\n"))
 }
 
 /// The album id for an album artist and title (see `album_key` in `read_track`).
@@ -543,6 +592,9 @@ pub fn write_art(album_id: &str, bytes: &[u8], art_dir: &Path) -> (Option<String
     let small = art_dir.join(format!("{album_id}_s.jpg"));
     let as_str = |p: &Path| Some(p.to_string_lossy().into_owned());
     let _ = std::fs::create_dir_all(art_dir);
+    // A new cover: its colours are worked out again, and the album has a cover now.
+    let _ = std::fs::remove_file(art_dir.join(format!("{album_id}.colors")));
+    let _ = std::fs::remove_file(art_dir.join(format!("{album_id}.none")));
     match image::load_from_memory(bytes) {
         Ok(img) => {
             let save = |size: u32, path: &Path| -> bool {
@@ -682,6 +734,31 @@ mod scan_tests {
         // ...but not when the drive it was on is missing.
         let away = gone.join("e.flac");
         assert_eq!(scan(&[away.to_string_lossy().into_owned()], vec![song(&away)], |_, _| {}).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn remembers_covers_found_and_not_found() {
+        let root = std::env::temp_dir().join("cadence-cover-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let (music, art) = (root.join("album"), root.join("art"));
+        std::fs::create_dir_all(&music).unwrap();
+        let mut tracks = vec![Track { album_id: "a1".into(), ..song(&music.join("01.flac")) }];
+        // No cover anywhere: noted, so the next start doesn't search again.
+        assert!(build_albums(&mut tracks, &art)[0].art.is_none());
+        assert!(art.join("a1.none").exists());
+        assert!(build_albums(&mut tracks, &art)[0].art.is_none());
+        // A cover image added to the folder changes it: found, and its colours kept with it.
+        let red = image::RgbImage::from_pixel(8, 8, image::Rgb([200, 30, 40]));
+        red.save(music.join("cover.jpg")).unwrap();
+        let album = build_albums(&mut tracks, &art).remove(0);
+        assert!(album.art.is_some() && album.accent.is_some());
+        assert!(!art.join("a1.none").exists());
+        let saved = std::fs::read_to_string(art.join("a1.colors")).unwrap();
+        assert_eq!(saved, format!("{} {}", album.accent.unwrap(), album.tint.unwrap()));
+        // A new cover (set by hand or fetched) drops the saved colours.
+        write_art("a1", &std::fs::read(music.join("cover.jpg")).unwrap(), &art);
+        assert!(!art.join("a1.colors").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
