@@ -2,6 +2,12 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.21 (2026-10-27)
+
+- **Windows, updates.** Pressing **Restart** to update could stop with "Failed to kill Cadence. Please close it first
+  then try again" when Cadence took a moment to close (for example while it was playing and analysing songs). The
+  installer now waits for Cadence to close before it carries on.
+
 ## 0.2.20 (2026-10-27)
 
 - **Opens much faster, especially on Android.** The home page now shows in well under a second instead of up to 7
