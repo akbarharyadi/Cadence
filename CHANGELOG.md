@@ -2,6 +2,13 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.20 (2026-10-27)
+
+- **Opens much faster, especially on Android.** The home page now shows in well under a second instead of up to 7
+  seconds. Cadence no longer waits while it starts watching your music folders (slow to list on a phone's shared
+  storage), and it remembers each album's cover colours, and which albums have no cover, instead of working them out
+  again on every start. The library scan still runs in the background, and new songs show once it's done.
+
 ## 0.2.19 (2026-10-26)
 
 - **Android, USB exclusive.** With **Direct output** on, Cadence now drives a USB DAC with its own USB Audio driver on
