@@ -199,10 +199,19 @@ impl AppState {
 }
 
 pub fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> T {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let Ok(bytes) = std::fs::read(path) else {
+        return T::default();
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            // Kept aside rather than overwritten by the next save, so nothing is lost for good.
+            let aside = path.with_extension("broken.json");
+            log::error!("can't read {}: {e}; kept as {}", path.display(), aside.display());
+            let _ = std::fs::rename(path, &aside);
+            T::default()
+        }
+    }
 }
 
 /// Writes atomically (temp file + rename) so a crash never leaves a half-written file.
@@ -217,7 +226,23 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) {
 
 #[cfg(test)]
 mod tests {
-    use super::is_instrumental;
+    use super::{is_instrumental, read_json};
+
+    #[test]
+    fn keeps_an_unreadable_file_aside() {
+        let dir = std::env::temp_dir().join(format!("cadence-read-json-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.json");
+        std::fs::write(&path, b"{\"plays\": [nul").unwrap();
+        let read: std::collections::HashMap<String, u32> = read_json(&path);
+        assert!(read.is_empty());
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(dir.join("history.broken.json")).unwrap(), b"{\"plays\": [nul");
+        // A file that isn't there yet is simply empty.
+        let none: Vec<u32> = read_json(&dir.join("missing.json"));
+        assert!(none.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn spots_instrumental_versions() {

@@ -12,6 +12,22 @@
     { label: "Songs", icon: "song", view: { name: "songs" } },
   ];
 
+  // What Cadence is doing in the background, one at a time (they run one after another).
+  const job = $derived(
+    app.scan
+      ? { label: "Importing", ...app.scan, about: "" }
+      : app.analysis
+        ? { label: "Measuring loudness", ...app.analysis, about: "Measured once per song, for Sound Check." }
+        : app.sonic?.running
+          ? {
+              label: "Listening to songs",
+              done: app.sonic.analyzed,
+              total: app.sonic.total,
+              about: "Cadence listens to each song once, in the background, for mixes by sound and Smart EQ.",
+            }
+          : null,
+  );
+
   const isActive = (v: View) =>
     app.view.name === v.name ||
     (v.name === "albums" && app.view.name === "album") ||
@@ -95,11 +111,10 @@
   </nav>
 
   <div class="bottom">
-    {#if app.scan || app.analysis}
-      {@const job = app.scan ?? app.analysis!}
-      <div class="job">
+    {#if job}
+      <div class="job" title={job.about || undefined}>
         <div class="bar"><div style="width: {job.total ? (job.done / job.total) * 100 : 6}%"></div></div>
-        <span>{app.scan ? "Importing" : "Measuring loudness"}{job.total ? ` ${job.done} of ${job.total}` : "…"}</span>
+        <span>{job.label}{job.total ? ` ${job.done} of ${job.total}` : "…"}</span>
       </div>
     {/if}
     <button class="item" class:active={app.view.name === "sound"} onclick={() => app.go({ name: "sound" })}>

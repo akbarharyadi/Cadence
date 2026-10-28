@@ -67,6 +67,7 @@ keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+libc = "0.2"
 
 # Direct output on Android: AAudio streams in the USB DAC's own format, set up by the app's Kotlin side,
 # and USB exclusive (Cadence's own USB Audio driver, through Linux usbfs).

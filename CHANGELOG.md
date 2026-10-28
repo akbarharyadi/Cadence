@@ -2,6 +2,19 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.22 (2026-10-28)
+
+- **Much lighter in the background.** Cadence listened to every song in your library again each time it started
+  (one silent song made its saved results unreadable), using most of the processor, around 1 GB of memory and a lot of
+  disk for several minutes. Results are now kept, and listening to songs and measuring loudness run on at most two
+  low-priority threads that give way to everything else (on Windows 11 they also use the power-saving cores), with
+  little memory. It takes longer the first time, but you won't notice it.
+- **You can see it.** The sidebar shows **Listening to songs** with its progress, as it does for importing and
+  measuring loudness.
+- If one of Cadence's saved files (history, playlists, settings…) can't be read, it's kept as `*.broken.json` instead
+  of being replaced by an empty one.
+- Smart EQ stays flat for songs with no sound in some bands (very low sample rates), instead of going wrong.
+
 ## 0.2.21 (2026-10-27)
 
 - **Windows, updates.** Pressing **Restart** to update could stop with "Failed to kill Cadence. Please close it first

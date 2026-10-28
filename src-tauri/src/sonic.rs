@@ -16,6 +16,10 @@ use crate::library::Track;
 /// bliss analyses mono audio at this rate.
 const RATE: u32 = 22_050;
 
+/// Songs are analysed from their first 10 minutes: bliss holds the whole stretch in memory, and an
+/// hour-long mix would need hundreds of megabytes.
+const LONGEST: usize = RATE as usize * 600;
+
 /// bliss's own weighting of its features (tempo counts less, harmony shares a few dimensions).
 static WEIGHTS: LazyLock<Vec<f32>> =
     LazyLock::new(|| FeaturesVersion::LATEST.feature_weights().diag().to_vec());
@@ -25,10 +29,33 @@ pub struct Entry {
     /// File size and modification time when analysed; a changed file is analysed again.
     pub stamp: String,
     /// The features, or empty if the file couldn't be analysed (not retried until it changes).
+    #[serde(with = "nullable")]
     pub f: Vec<f32>,
-    /// Octave-band levels (dB) for Smart EQ; empty in files from before it existed.
-    #[serde(default)]
+    /// Octave-band levels (dB) for Smart EQ, NaN for a band without a level; empty in files from
+    /// before it existed.
+    #[serde(default, with = "nullable")]
     pub t: Vec<f32>,
+}
+
+/// JSON has no NaN or infinity: they're written as null and read back as NaN. Without this, one
+/// silent song (whose levels are NaN) made the whole file unreadable, and everything was analysed
+/// again on every start.
+mod nullable {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[f32], s: S) -> Result<S::Ok, S::Error> {
+        v.iter()
+            .map(|x| x.is_finite().then_some(*x))
+            .collect::<Vec<_>>()
+            .serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<f32>, D::Error> {
+        Ok(Vec::<Option<f32>>::deserialize(d)?
+            .into_iter()
+            .map(|x| x.unwrap_or(f32::NAN))
+            .collect())
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -38,12 +65,14 @@ pub struct Store {
 }
 
 impl Store {
-    /// Drops everything if it was made by another version of the features.
+    /// Drops everything if it was made by another version of the features, and songs whose
+    /// features aren't all numbers (analysed again).
     pub fn checked(mut self) -> Self {
         if self.version != FeaturesVersion::LATEST as u16 {
             self.tracks.clear();
             self.version = FeaturesVersion::LATEST as u16;
         }
+        self.tracks.retain(|_, e| e.f.iter().all(|x| x.is_finite()));
         self
     }
 
@@ -82,6 +111,9 @@ pub fn analyze(path: &Path) -> Result<(Vec<f32>, Vec<f32>)> {
     let mut mono = Vec::new();
     let mut out = Vec::new();
     while let Some((buf, rate, ch)) = src.next_chunk()? {
+        if out.len() >= LONGEST {
+            break;
+        }
         mono.clear();
         mono.extend(
             buf.chunks_exact(ch)
@@ -105,8 +137,11 @@ pub fn analyze(path: &Path) -> Result<(Vec<f32>, Vec<f32>)> {
     if let Some(r) = resampler.as_mut() {
         r.flush(&mut out)?;
     }
-    let analysis = Song::analyze(&out).map_err(|e| anyhow!("{e}"))?;
-    Ok((analysis.as_vec(), bands.levels()))
+    let f = Song::analyze(&out).map_err(|e| anyhow!("{e}"))?.as_vec();
+    if !f.iter().all(|x| x.is_finite()) {
+        return Err(anyhow!("no usable sound (silent?)"));
+    }
+    Ok((f, bands.levels()))
 }
 
 pub fn distance(a: &[f32], b: &[f32]) -> f32 {
@@ -388,5 +423,22 @@ mod tests {
         b[1] = 0.0;
         b[0] = 1.0; // tempo has weight 0.25
         assert!((distance(&a, &b) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn silent_songs_dont_break_the_file() {
+        let entry = |f: Vec<f32>, t: Vec<f32>| Entry { stamp: "1:2".into(), f, t };
+        let mut store = Store { version: FeaturesVersion::LATEST as u16, tracks: HashMap::new() };
+        let silent_bands = vec![f32::NAN, f32::NEG_INFINITY, -20.0, -20.0, -20.0, -20.0, -20.0, -20.0, -20.0, f32::NAN];
+        store.tracks.insert("blank".into(), entry(vec![0.5; WEIGHTS.len()], silent_bands));
+        store.tracks.insert("odd".into(), entry(vec![f32::NAN; WEIGHTS.len()], Vec::new()));
+
+        let json = serde_json::to_string(&store).unwrap();
+        let back = serde_json::from_str::<Store>(&json).unwrap().checked();
+
+        let t = &back.tracks["blank"].t;
+        assert!(t[0].is_nan() && t[1].is_nan() && t[2] == -20.0 && t[9].is_nan());
+        // Features that aren't numbers are dropped, so the song is analysed again.
+        assert!(!back.tracks.contains_key("odd"));
     }
 }

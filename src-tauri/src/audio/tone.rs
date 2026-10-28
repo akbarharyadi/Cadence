@@ -39,10 +39,13 @@ pub fn smart_correction(levels: &[f32]) -> [f32; 10] {
     if levels.len() != 10 {
         return out;
     }
-    // Compare shapes, not levels: line both up on the 250 Hz – 4 kHz bands.
-    let mids = 3..=7;
-    let m: f32 = mids.clone().map(|i| levels[i]).sum::<f32>() / 5.0;
-    let t: f32 = mids.map(|i| TARGET[i]).sum::<f32>() / 5.0;
+    // Compare shapes, not levels: line both up on the 250 Hz – 4 kHz bands that have a level.
+    let mids: Vec<usize> = (3..=7).filter(|&i| levels[i].is_finite()).collect();
+    if mids.is_empty() {
+        return out;
+    }
+    let m: f32 = mids.iter().map(|&i| levels[i]).sum::<f32>() / mids.len() as f32;
+    let t: f32 = mids.iter().map(|&i| TARGET[i]).sum::<f32>() / mids.len() as f32;
     let raw: Vec<f32> = (0..10)
         .map(|i| {
             if levels[i].is_finite() {
@@ -194,6 +197,16 @@ mod tests {
         let c = smart_correction(&dull);
         assert!(c[9] > 1.5 && c[8] > 1.5, "{c:?}");
         assert!(c[5].abs() < 0.8, "{c:?}");
+    }
+
+    #[test]
+    fn bands_without_a_level_stay_flat() {
+        // A low-rate file (nothing above 4 kHz) and a silent one.
+        let mut low = TARGET;
+        low[7..].fill(f32::NAN);
+        let c = smart_correction(&low);
+        assert!(c.iter().all(|g| g.is_finite() && g.abs() < 1e-3), "{c:?}");
+        assert_eq!(smart_correction(&[f32::NAN; 10]), [0.0; 10]);
     }
 
     #[test]

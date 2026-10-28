@@ -159,8 +159,10 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
-                .level_for("symphonia_core", log::LevelFilter::Warn)
-                .level_for("symphonia_bundle_flac", log::LevelFilter::Warn)
+                // The decoders note every oddity of every file they open (thousands of lines while
+                // songs are analysed), which pushed everything else out of the log.
+                .filter(|m| !m.target().starts_with("symphonia") || m.level() <= log::Level::Error)
+                .max_file_size(1_000_000)
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())

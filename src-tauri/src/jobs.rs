@@ -38,6 +38,62 @@ pub struct Progress {
     pub total: usize,
 }
 
+/// Threads for the long background jobs (loudness and sound analysis): a quarter of the cores, at
+/// most 2, each in background mode. The music, the UI and other apps come first, and memory stays
+/// modest (every song being analysed holds its decoded audio).
+fn background_pool() -> rayon::ThreadPool {
+    let threads = std::thread::available_parallelism()
+        .map(|n| (n.get() / 4).clamp(1, 2))
+        .unwrap_or(1);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|i| format!("cadence-background-{i}"))
+        .start_handler(|_| background_priority())
+        .build()
+        .expect("pool")
+}
+
+/// Lowers the calling thread's CPU, disk and memory priority: Windows' background mode (plus
+/// EcoQoS on Windows 11, which keeps it on efficient cores at low clock speeds), or a nice value
+/// on Linux and Android.
+fn background_priority() {
+    #[cfg(windows)]
+    unsafe {
+        use std::ffi::c_void;
+        #[repr(C)]
+        struct PowerThrottling {
+            version: u32,
+            control_mask: u32,
+            state_mask: u32,
+        }
+        const THREAD_MODE_BACKGROUND_BEGIN: i32 = 0x0001_0000;
+        const THREAD_POWER_THROTTLING: i32 = 3;
+        const EXECUTION_SPEED: u32 = 1;
+        unsafe extern "system" {
+            fn GetCurrentThread() -> *mut c_void;
+            fn SetThreadPriority(thread: *mut c_void, priority: i32) -> i32;
+            fn SetThreadInformation(thread: *mut c_void, class: i32, info: *const c_void, size: u32) -> i32;
+        }
+        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+        let eco = PowerThrottling {
+            version: 1,
+            control_mask: EXECUTION_SPEED,
+            state_mask: EXECUTION_SPEED,
+        };
+        SetThreadInformation(
+            GetCurrentThread(),
+            THREAD_POWER_THROTTLING,
+            &eco as *const PowerThrottling as *const c_void,
+            size_of::<PowerThrottling>() as u32,
+        );
+    }
+    // Linux keeps a nice value per thread; 0 is the calling thread.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+    }
+}
+
 /// Set at startup: the folders start being watched once the first scan is done.
 static WATCH_AFTER_SCAN: AtomicBool = AtomicBool::new(false);
 
@@ -154,45 +210,43 @@ pub fn start_analysis(app: AppHandle) {
     }
     std::thread::spawn(move || {
         let total: usize = todo.iter().map(|(_, t)| t.len()).sum();
-        let done = AtomicUsize::new(0);
         let _ = app.emit("analysis-progress", Progress { done: 0, total });
         let started = std::time::Instant::now();
-        // Leave a core free so playback and the UI stay smooth.
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get().saturating_sub(1).max(1))
-            .unwrap_or(1);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .expect("pool");
-        pool.install(|| {
-            todo.par_iter().for_each(|(_, tracks)| {
+        // The background threads only measure; this thread files the results, so they never hold
+        // a lock the UI or playback is waiting for.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        background_pool().spawn(move || {
+            todo.into_par_iter().for_each_with(tx, |tx, (_, tracks)| {
                 let paths: Vec<&Path> = tracks.iter().map(|(_, p)| Path::new(p.as_str())).collect();
-                let (per_track, album) = measure_album(&paths);
-                let mut updates = Vec::new();
-                {
-                    let mut lib = state.library.lock();
-                    for ((id, _), measured) in tracks.iter().zip(per_track) {
-                        let Some(&i) = lib.by_id.get(id) else {
-                            continue;
-                        };
-                        let t = &mut lib.snapshot.tracks[i];
-                        // Tags from other tools win; Cadence fills in only what's missing.
-                        if t.gain.track.is_none() {
-                            t.gain.track = measured;
-                        }
-                        if t.gain.album.is_none() {
-                            t.gain.album = album;
-                        }
-                        t.gain_measured = true;
-                        updates.push((id.clone(), t.gain));
-                    }
-                }
-                state.engine.send(Cmd::UpdateGains(updates));
-                let n = done.fetch_add(tracks.len(), Ordering::Relaxed) + tracks.len();
-                let _ = app.emit("analysis-progress", Progress { done: n, total });
+                let measured = measure_album(&paths);
+                let _ = tx.send((tracks, measured));
             });
         });
+        let mut done = 0;
+        for (tracks, (per_track, album)) in rx {
+            let mut updates = Vec::new();
+            {
+                let mut lib = state.library.lock();
+                for ((id, _), measured) in tracks.iter().zip(per_track) {
+                    let Some(&i) = lib.by_id.get(id) else {
+                        continue;
+                    };
+                    let t = &mut lib.snapshot.tracks[i];
+                    // Tags from other tools win; Cadence fills in only what's missing.
+                    if t.gain.track.is_none() {
+                        t.gain.track = measured;
+                    }
+                    if t.gain.album.is_none() {
+                        t.gain.album = album;
+                    }
+                    t.gain_measured = true;
+                    updates.push((id.clone(), t.gain));
+                }
+            }
+            state.engine.send(Cmd::UpdateGains(updates));
+            done += tracks.len();
+            let _ = app.emit("analysis-progress", Progress { done, total });
+        }
         log::info!(
             "loudness analysis of {total} songs took {:?}",
             started.elapsed()
@@ -206,7 +260,7 @@ pub fn start_analysis(app: AppHandle) {
 }
 
 /// Runs sound analysis (bliss) on every song that hasn't had it, a few at a time in the background.
-/// Results are saved now and then so a long first run isn't lost if Cadence closes.
+/// Results are saved every half minute so a long first run isn't lost if Cadence closes.
 pub fn start_listening(app: AppHandle) {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let todo: Vec<(String, String, String)> = {
@@ -230,38 +284,28 @@ pub fn start_listening(app: AppHandle) {
     };
     std::thread::spawn(move || {
         let total = todo.len();
-        let done = AtomicUsize::new(0);
         let _ = app.emit("sonic-progress", Progress { done: 0, total });
         let started = std::time::Instant::now();
-        // Half the cores: this is a long, low-priority job and each song needs ~30 MB while it runs.
-        let threads = std::thread::available_parallelism()
-            .map(|n| (n.get() / 2).max(1))
-            .unwrap_or(1);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .expect("pool");
-        pool.install(|| {
-            todo.par_iter().for_each(|(id, path, stamp)| {
-                let (f, t) = crate::sonic::analyze(Path::new(path)).unwrap_or_else(|e| {
+        // As in start_analysis: the background threads analyse, this thread files the results.
+        let (tx, rx) = crossbeam_channel::unbounded();
+        background_pool().spawn(move || {
+            todo.into_par_iter().for_each_with(tx, |tx, (id, path, stamp)| {
+                let (f, t) = crate::sonic::analyze(Path::new(&path)).unwrap_or_else(|e| {
                     log::warn!("sound analysis failed for {path}: {e:#}");
                     (Vec::new(), Vec::new())
                 });
-                state.sonic.lock().tracks.insert(
-                    id.clone(),
-                    crate::sonic::Entry {
-                        stamp: stamp.clone(),
-                        f,
-                        t,
-                    },
-                );
-                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                if n % 25 == 0 {
-                    state.save_sonic();
-                }
-                let _ = app.emit("sonic-progress", Progress { done: n, total });
+                let _ = tx.send((id, crate::sonic::Entry { stamp, f, t }));
             });
         });
+        let mut saved = std::time::Instant::now();
+        for (n, (id, entry)) in rx.into_iter().enumerate() {
+            state.sonic.lock().tracks.insert(id, entry);
+            if saved.elapsed() > Duration::from_secs(30) {
+                state.save_sonic();
+                saved = std::time::Instant::now();
+            }
+            let _ = app.emit("sonic-progress", Progress { done: n + 1, total });
+        }
         log::info!("sound analysis of {total} songs took {:?}", started.elapsed());
         // Forget songs that are no longer in the library.
         {
