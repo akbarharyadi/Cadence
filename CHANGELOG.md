@@ -2,6 +2,14 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.23 (2026-10-31)
+
+- **Much lighter window while playing.** Cadence's window could grow past 1 GB of memory within minutes of playing,
+  and kept part of a processor core busy. The little "playing" bars and the seek line were redrawn on every frame of
+  the screen (up to 160 times a second), and the whole queue was sent to the window four times a second. They now
+  move on the graphics card, the queue is only sent when it changes, and the karaoke sweep updates 30 times a
+  second while the lyrics are open. The window now stays around 100 MB and barely uses the processor.
+
 ## 0.2.22 (2026-10-28)
 
 - **Much lighter in the background.** Cadence listened to every song in your library again each time it started

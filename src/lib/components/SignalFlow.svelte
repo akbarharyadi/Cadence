@@ -187,7 +187,20 @@
     background: linear-gradient(90deg, transparent, var(--accent), transparent);
     background-size: 200% 100%;
   }
+  /* The light travels by transform (no repaint every frame). */
   .playing .wire.lit {
+    position: relative;
+    overflow: hidden;
+    background: none;
+  }
+  .playing .wire.lit::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 200%;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
     animation: flow 1.6s linear infinite;
   }
   /* Narrow windows: stages wrap into a grid instead of squeezing their text. */
@@ -203,10 +216,10 @@
   }
   @keyframes flow {
     from {
-      background-position: 100% 0;
+      transform: translateX(-50%);
     }
     to {
-      background-position: -100% 0;
+      transform: translateX(50%);
     }
   }
   .stage {

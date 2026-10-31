@@ -95,7 +95,8 @@ export interface Artist {
 class AppState {
   tracks = $state<Track[]>([]);
   albums = $state<Album[]>([]);
-  status = $state<Status | null>(null);
+  /** Replaced whole on every update (four times a second while playing), never changed in place. */
+  status = $state.raw<Status | null>(null);
   folders = $state<string[]>([]);
   scan = $state<{ done: number; total: number } | null>(null);
   loaded = $state(false);
@@ -276,14 +277,32 @@ class AppState {
     api.setSkipInstrumentals(on);
   }
 
-  /** Smoothly advancing position between status updates. */
+  /**
+   * Where playback is, as of the player's last update (four times a second while playing). Not
+   * every frame: that made the window redraw up to 160 times a second (about 15% of a core) and
+   * left garbage behind. Seek lines glide between updates with CSS; what has to move smoothly
+   * (the karaoke sweep) uses `livePosition()`.
+   */
   position = $state(0);
   private posBase = { pos: 0, at: 0, playing: false };
+
+  /** The position right now, between the player's updates. */
+  exactPosition(): number {
+    const b = this.posBase;
+    const p = b.playing ? b.pos + (performance.now() - b.at) / 1000 : b.pos;
+    const d = this.status?.duration ?? 0;
+    return d > 0 ? Math.min(p, d) : p;
+  }
 
   async init() {
     // All at once: each is a round trip to the app, and one after another they hold up the first screen.
     await Promise.all([
-      listen<Status>("player-status", (e) => this.applyStatus(e.payload)),
+      // The queue (thousands of ids) only comes when it changed; until this window has one (from
+      // `api.status()` below, or an update that brings it) updates without it are left alone.
+      listen<Omit<Status, "queue"> & { queue?: string[] }>("player-status", (e) => {
+        const queue = e.payload.queue ?? this.status?.queue;
+        if (queue) this.applyStatus({ ...e.payload, queue });
+      }),
       listen("library-changed", async () => {
         await this.loadLibrary();
         this.scan = null;
@@ -326,17 +345,10 @@ class AppState {
     this.listening = history;
     this.setLibrary(lib);
     this.folders = folders;
-    this.applyStatus(status);
+    // An update that came in meanwhile is newer.
+    if (!this.status) this.applyStatus(status);
     this.dsp = dsp;
     this.loaded = true;
-    const tick = () => {
-      const b = this.posBase;
-      this.position = b.playing ? b.pos + (performance.now() - b.at) / 1000 : b.pos;
-      const d = this.status?.duration ?? 0;
-      if (d > 0 && this.position > d) this.position = d;
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
   }
 
   private applyStatus(s: Status) {
@@ -344,6 +356,7 @@ class AppState {
     const albumId = s.index != null ? this.trackById.get(s.queue[s.index])?.albumId : undefined;
     if (albumId && this.sessionAlbums[0] !== albumId) this.sessionAlbums = [albumId, ...this.sessionAlbums.filter((a) => a !== albumId)].slice(0, 20);
     this.posBase = { pos: s.position, at: performance.now(), playing: s.playing };
+    this.position = this.exactPosition();
     if (s.error && s.error !== this.lastError) this.showToast(s.error);
     this.lastError = s.error;
   }
@@ -623,6 +636,31 @@ export function shuffled<T>(list: T[]): T[] {
 }
 
 export const app = new AppState();
+
+/**
+ * The position 30 times a second while playing, for what has to move smoothly and can't glide
+ * with CSS: the karaoke sweep. A timer, not `requestAnimationFrame`: a callback on every frame
+ * (160 a second on some screens) makes the window redraw that often even when nothing changes,
+ * about 15% of a processor core. Runs only while the component that called it (during its setup)
+ * is shown.
+ */
+export function livePosition(): { readonly value: number } {
+  let value = $state(app.position);
+  const playing = $derived(!!app.status?.playing);
+  $effect(() => {
+    if (!playing) {
+      value = app.position;
+      return;
+    }
+    const timer = setInterval(() => (value = app.exactPosition()), 33);
+    return () => clearInterval(timer);
+  });
+  return {
+    get value() {
+      return value;
+    },
+  };
+}
 
 export interface SignalPath {
   /** "bitperfect": untouched to the device; "lossless": untouched by Cadence; "enhanced": Cadence processes it. */

@@ -125,6 +125,7 @@
     <div
       class="seek"
       class:active={dragging}
+      class:glide={s?.playing && !dragging}
       bind:this={seekEl}
       role="slider"
       tabindex="0"
@@ -347,6 +348,12 @@
     will-change: transform;
     background: var(--accent);
     box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 70%, transparent);
+  }
+  /* The position comes four times a second; in between, the line glides (on the GPU, so the page
+     isn't restyled every frame). */
+  .glide .fill,
+  .glide .thumb-track {
+    transition: transform 0.3s linear;
   }
   .seek:hover .rail,
   .seek.active .rail,
@@ -768,7 +775,9 @@
       animation: none;
     }
     .thumb,
-    .rail {
+    .rail,
+    .glide .fill,
+    .glide .thumb-track {
       transition: none;
     }
   }

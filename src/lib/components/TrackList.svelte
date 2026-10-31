@@ -325,10 +325,13 @@
     padding: 12px 11px;
     background: rgba(0, 0, 0, 0.45);
   }
+  /* Scaled, not resized, so the page isn't laid out again on every frame. */
   .eq-anim i {
     width: 3px;
+    align-self: stretch;
     background: var(--accent);
     border-radius: 1px;
+    transform-origin: bottom;
     animation: bounce 0.9s ease-in-out infinite;
   }
   .eq-anim.overlay i {
@@ -343,10 +346,10 @@
   @keyframes bounce {
     0%,
     100% {
-      height: 30%;
+      transform: scaleY(0.3);
     }
     50% {
-      height: 100%;
+      transform: scaleY(1);
     }
   }
   /* Phones: the album column would squeeze the titles; it's still one tap away in the menu. */

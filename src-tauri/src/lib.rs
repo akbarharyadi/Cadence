@@ -63,8 +63,20 @@ fn status_hub(
     let mut shown_track: Option<String> = None;
     let mut shown_playing = false;
     let mut shown_at = std::time::Instant::now();
+    // The windows get the queue (thousands of ids with a big library) only when it changed, not
+    // four times a second; they keep the last one. Each update becomes a script the window runs.
+    let mut sent_queue: Option<Vec<String>> = None;
     for s in rx {
-        let _ = app.emit("player-status", &s);
+        if let Ok(mut update) = serde_json::to_value(&s) {
+            if sent_queue.as_ref() == Some(&s.queue) {
+                if let Some(o) = update.as_object_mut() {
+                    o.remove("queue");
+                }
+            } else {
+                sent_queue = Some(s.queue.clone());
+            }
+            let _ = app.emit("player-status", update);
+        }
 
         had_queue |= !s.queue.is_empty();
         let key = (s.index, s.queue.len(), s.playing);

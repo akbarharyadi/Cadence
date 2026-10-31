@@ -482,10 +482,14 @@
     gap: 2px;
     height: 12px;
   }
+  /* Scaled, not resized: a height animation lays out the page on every frame, and the garbage that
+     leaves (up to 160 times a second) grew the window past a gigabyte. */
   .bars i {
     width: 3px;
+    align-self: stretch;
     background: currentColor;
     border-radius: 1px;
+    transform-origin: bottom;
     animation: bar 0.9s ease-in-out infinite alternate;
   }
   .bars i:nth-child(2) {
@@ -496,10 +500,10 @@
   }
   @keyframes bar {
     from {
-      height: 3px;
+      transform: scaleY(0.25);
     }
     to {
-      height: 12px;
+      transform: scaleY(1);
     }
   }
 

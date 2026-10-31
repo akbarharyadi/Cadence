@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, formatTime, type LyricLine, type Lyrics, type LyricsHit } from "$lib/api";
-  import { app } from "$lib/store.svelte";
+  import { app, livePosition } from "$lib/store.svelte";
   import Icon from "./Icon.svelte";
 
   let { trackId }: { trackId: string } = $props();
@@ -73,8 +73,9 @@
     else delete all[songId];
     localStorage.setItem(OFFSETS, JSON.stringify(all));
   }
-  /** Where the song is, as the lyrics see it. */
-  const pos = $derived(app.position - offset);
+  /** Where the song is, as the lyrics see it (30 times a second, for the sweep). */
+  const live = livePosition();
+  const pos = $derived(live.value - offset);
 
   /** Index of the line being sung (slightly early, so the eye gets there in time). */
   const active = $derived.by(() => {

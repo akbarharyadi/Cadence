@@ -229,11 +229,14 @@
   .eq.on {
     opacity: 0.8;
   }
+  /* Scaled, not resized, so the window isn't laid out again on every frame. */
   .eq i {
     width: 3px;
-    height: 4px;
+    align-self: stretch;
     border-radius: 1px;
     background: var(--accent);
+    transform-origin: bottom;
+    transform: scaleY(0.3);
   }
   .eq.on i {
     animation: eq 0.8s ease-in-out infinite alternate;
@@ -249,10 +252,10 @@
   }
   @keyframes eq {
     from {
-      height: 3px;
+      transform: scaleY(0.2);
     }
     to {
-      height: 14px;
+      transform: scaleY(1);
     }
   }
   .time {
