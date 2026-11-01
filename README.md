@@ -54,6 +54,11 @@
 
 - **Synced lyrics** with a word-by-word karaoke sweep and a **Vocals** slider for singing along. Lyrics come from the
   file, a `.lrc` next to it, LRCLIB, the AI DJ, or you, and are kept once found.
+- **Lyrics follow the singer** (desktop): Cadence listens to a song once, separates the vocals from the music and
+  places every word of the lyrics on the singing, so the karaoke highlight moves with the singer, syllable by
+  syllable. It also corrects lyrics that run early or late. It works for Japanese, Chinese, Korean, English,
+  Indonesian and most other languages, on your computer, in the background. It needs an optional one-time download
+  of about 440 MB. You can do one song from the lyrics view, or every song with lyrics from Settings.
 - **Sounds like**: every song is analysed once, locally ([bliss](https://github.com/Polochon-street/bliss-rs): tempo,
   timbre, loudness, harmony), for sound radio, similar songs and automatic mixes.
 - **AI DJ** (optional, with your own key; Z.ai GLM by default, or any OpenAI-compatible service): requests in your own
@@ -172,6 +177,7 @@ Cadence is a [Tauri 2](https://tauri.app) app: a Rust core with a [Svelte 5](htt
 | Library scan, tags ([lofty](https://github.com/Serial-ATA/lofty-rs)), artwork, folder watching | `src-tauri/src/library.rs`, `jobs.rs` |
 | Sound analysis and mixes ([bliss](https://github.com/Polochon-street/bliss-rs)) | `src-tauri/src/sonic.rs` |
 | Lyrics, AI DJ, catalogue lookups | `src-tauri/src/lyrics.rs`, `ai.rs`, `catalog.rs` |
+| Lyrics that follow the singer: vocal separation, forced alignment ([ONNX Runtime](https://onnxruntime.ai) via [ort](https://ort.pyke.io)) | `src-tauri/src/voice/` |
 | Interface | `src/lib` (components, views, store) |
 | Android: media session, notification, widget | `src-tauri/gen/android/app/src/main/java/com/cadence/player` |
 | Website | `site/` |
@@ -181,11 +187,13 @@ fades and volume, so the interface and the disk never cause dropouts. Settings, 
 live in the app data folder (`%APPDATA%\com.cadence.player` on Windows). API keys are kept in the system credential
 store (Windows Credential Manager, macOS Keychain, Secret Service on Linux; app-private storage on Android).
 
-Design notes and research: [docs/research-features-and-ai.md](docs/research-features-and-ai.md).
+Design notes and research: [docs/research-features-and-ai.md](docs/research-features-and-ai.md) and, for lyrics that
+follow the singer, [docs/research-lyrics-alignment.md](docs/research-lyrics-alignment.md).
 
 ## Privacy
 
-The app has no account, no analytics and no tracking. Sound analysis and lyrics pronunciation run on your device.
+The app has no account, no analytics and no tracking. Sound analysis, lyrics pronunciation and following the singer
+run on your device (no audio ever leaves it).
 It only goes online for these, and sends only what's listed:
 
 | Service | When | What it sends |
@@ -194,6 +202,7 @@ It only goes online for these, and sends only what's listed:
 | iTunes Search (Apple) | Fill in missing song info (can be turned off), Fix Song Info, Change Cover | The file name, or the words you search for |
 | [Deezer](https://developers.deezer.com/api) | Change Cover, artist pictures, checking AI music suggestions | Artist and album or song names |
 | GitHub | Checking for updates | Nothing beyond the request itself |
+| PyPI or GitHub, Hugging Face | Only when you download the voice models for following the singer | Nothing beyond the requests themselves |
 | Your AI service (Z.ai GLM or another) | Only if you add your own key | What Settings shows before you turn it on |
 | [ListenBrainz](https://listenbrainz.org) | Only if you connect it | The songs you listen to |
 
@@ -218,6 +227,9 @@ Cadence stands on the work of many open-source projects. The main ones:
 | [bliss](https://github.com/Polochon-street/bliss-rs) | Sound analysis behind mixes and sound radio | GPL-3.0 |
 | [kakasi](https://github.com/Theta-Dev/kakasi) and [pinyin](https://github.com/mozillazg/rust-pinyin) | Lyrics pronunciation | GPL-3.0 / MIT |
 | [LRCLIB](https://lrclib.net) | Synced lyrics | Free service |
+| [ONNX Runtime](https://onnxruntime.ai) (downloaded on request) and [ort](https://github.com/pykeio/ort) | Running the voice models | MIT / MIT or Apache-2.0 |
+| [MMS forced aligner](https://huggingface.co/MahmoudAshraf/mms-300m-1130-forced-aligner) by Meta (downloaded on request) | Placing lyrics on the singing | CC BY-NC 4.0 |
+| MDX-Net "Voc_FT" vocal model from [Ultimate Vocal Remover](https://github.com/Anjok07/ultimatevocalremovergui), as packaged by [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (downloaded on request) | Separating the vocals | No license stated |
 
 Every library's license and notice is in [`static/third-party-notices.txt`](static/third-party-notices.txt), which
 also ships inside the app (Settings → About → Open-source licenses). It's regenerated for each release by
