@@ -13,8 +13,39 @@
   ];
 
   // What Cadence is doing in the background, one at a time (they run one after another).
-  const job = $derived(
-    app.scan
+  // `unit` "%" shows a share instead of "x of y"; "MB" shows megabytes.
+  // `share` (0–1) fills the bar when it should move more finely than `done` (a song at a time).
+  const job = $derived<{ label: string; done: number; total: number; about: string; unit?: string; share?: number } | null>(
+    app.voice?.installing
+      ? {
+          label: "Downloading voice models",
+          done: Math.round(app.voice.installing[0] / 1e6),
+          total: Math.round(app.voice.installing[1] / 1e6),
+          unit: "MB",
+          about: "Needed once, so lyrics can follow the singer. Everything runs on this computer.",
+        }
+      : app.voice?.batch?.running
+        ? {
+            label: app.voice.batch.preparing ? "Finding songs with lyrics" : "Following the singer",
+            done: app.voice.batch.done,
+            total: app.voice.batch.total,
+            share: app.voice.batch.total
+              ? (app.voice.batch.done + (app.voice.job ? app.voice.job.done / Math.max(app.voice.job.total, 1) : 0)) / app.voice.batch.total
+              : 0,
+            unit: "songs",
+            about: app.voice.job
+              ? `Listening to “${app.voice.job.title}” (${Math.round((app.voice.job.done / Math.max(app.voice.job.total, 1)) * 100)}%). Each song is listened to once.`
+              : "Each song is listened to once, in the background.",
+          }
+        : app.voice?.job
+        ? {
+            label: "Following the singer",
+            done: app.voice.job.done,
+            total: app.voice.job.total,
+            unit: "%",
+            about: `Listening to “${app.voice.job.title}” once, to place its lyrics on the singing.`,
+          }
+        : app.scan
       ? { label: "Importing", ...app.scan, about: "" }
       : app.analysis
         ? { label: "Measuring loudness", ...app.analysis, about: "Measured once per song, for Sound Check." }
@@ -113,8 +144,14 @@
   <div class="bottom">
     {#if job}
       <div class="job" title={job.about || undefined}>
-        <div class="bar"><div style="width: {job.total ? (job.done / job.total) * 100 : 6}%"></div></div>
-        <span>{job.label}{job.total ? ` ${job.done} of ${job.total}` : "…"}</span>
+        <div class="bar"><div style="width: {job.share != null ? job.share * 100 : job.total ? (job.done / job.total) * 100 : 6}%"></div></div>
+        <span>
+          {job.label}{!job.total
+            ? "…"
+            : job.unit === "%"
+              ? ` ${Math.round((job.done / job.total) * 100)}%`
+              : ` ${job.done} of ${job.total}${job.unit ? ` ${job.unit}` : ""}`}
+        </span>
       </div>
     {/if}
     <button class="item" class:active={app.view.name === "sound"} onclick={() => app.go({ name: "sound" })}>

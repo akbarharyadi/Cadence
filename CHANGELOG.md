@@ -2,6 +2,24 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.25 (2026-11-02)
+
+- **Lyrics follow the singer.** Press **Follow singer** under the lyrics. Cadence listens to the song once,
+  separates the singing from the music, and places every word of the lyrics on the singing. The karaoke highlight
+  then moves with the singer, syllable by syllable for Japanese, Chinese and Korean and word by word for other
+  languages, instead of being spread evenly over the line. It also notices when a song's lyrics run early or late
+  (made for another version) and sets that right. It works for Japanese, Chinese, Korean, English, Indonesian and
+  most other languages. Everything runs on your computer, in the background, at low priority. The first time, it
+  needs a one-time download of about 440 MB (ONNX Runtime, a vocal separator and Meta's MMS aligner). Each song is
+  listened to only once: the result is kept, and corrected lyrics are placed again in under a second. Click
+  **Follow singer** again to see the lyrics' own timing. Desktop only (Windows, Linux, and Macs with Apple silicon).
+- **For your whole library.** Settings → **Lyrics follow the singer** → **Follow the singer in all songs with
+  lyrics** does every song that has lyrics, most-played first. The sidebar and Settings show how far it has got and
+  roughly how long is left. You can stop it any time, and if you close Cadence it carries on the next time it starts.
+  With **Follow the singer automatically** on, songs whose lyrics you open (and the next song in the queue) go first.
+- **Tidier lyrics toolbar.** Everything under the lyrics sits on one row again. **Search for other lyrics**,
+  **Paste lyrics** and **Hide these lyrics** are in the **⋯** menu.
+
 ## 0.2.24 (2026-11-01)
 
 - **Edit the info of the song that's playing.** **Edit Info…** used to refuse the playing song ("This song is

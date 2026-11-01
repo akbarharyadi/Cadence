@@ -800,61 +800,112 @@ pub fn set_fix_tags_online(state: AppStateRef, enabled: bool) {
     state.save_settings();
 }
 
-/// Lyrics for a song: from the file or a .lrc next to it, else LRCLIB (if allowed).
+/// Lyrics for a song: from the file or a .lrc next to it, else LRCLIB (if allowed). Placed on the
+/// singing when Cadence has listened to the song (see `voice`).
 #[tauri::command]
 pub async fn get_lyrics(
     state: State<'_, Arc<AppState>>,
+    voice: State<'_, Arc<crate::voice::Voice>>,
     track_id: String,
 ) -> Result<crate::lyrics::Lyrics, String> {
-    let (track, online) = {
-        let lib = state.library.lock();
-        let t = lib
-            .by_id
-            .get(&track_id)
-            .map(|&i| lib.snapshot.tracks[i].clone())
-            .ok_or("Unknown song")?;
-        (t, state.settings.lock().lyrics_online)
-    };
+    let track = track_of(&state, &track_id)?;
+    let (state, voice) = (state.inner().clone(), voice.inner().clone());
+    tauri::async_runtime::spawn_blocking(move || voice.apply(&track, resolve_lyrics(&state, &track)))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The lyrics the lyrics view shows for a song (before placing them on the singing). Blocking:
+/// may ask LRCLIB.
+pub(crate) fn resolve_lyrics(state: &AppState, track: &crate::library::Track) -> crate::lyrics::Lyrics {
+    let online = state.settings.lock().lyrics_online;
     let cache = state.data_dir.join("lyrics");
+    if crate::lyrics::is_hidden(&cache, &track.id) {
+        return crate::lyrics::Lyrics {
+            lookup: "hidden".into(),
+            ..Default::default()
+        };
+    }
+    if let Some(l) = crate::lyrics::picked(&cache, &track.id) {
+        return l;
+    }
+    // Lyrics in the file win when they're timed. Untimed ones (common in tags) can't follow
+    // the song, so timed lyrics from the saved store or LRCLIB are preferred when there are any.
+    let local = crate::lyrics::local(Path::new(&track.path));
+    if let Some(l) = local.as_ref().filter(|l| !l.synced.is_empty()) {
+        return l.clone();
+    }
+    let found = crate::lyrics::saved(&cache, &track.id, &track.title).map(Ok).unwrap_or_else(|| {
+        if online {
+            crate::lyrics::online(&cache, &track.id, &track.artist, &track.title, &track.album, track.duration)
+        } else {
+            Err("off")
+        }
+    });
+    match (found, local) {
+        (Ok(l), _) if !l.synced.is_empty() => l,
+        (_, Some(l)) => l,
+        (Ok(l), None) => l,
+        (Err(why), None) => crate::lyrics::Lyrics {
+            lookup: why.into(),
+            ..Default::default()
+        },
+    }
+}
+
+/// Whether Cadence can follow the singer here, the download, and what it's listening to.
+#[tauri::command]
+pub fn voice_status(state: AppStateRef, voice: State<'_, Arc<crate::voice::Voice>>) -> crate::voice::Status {
+    voice.status(state.settings.lock().voice_auto)
+}
+
+/// Downloads the voice models (progress as "voice-install" events).
+#[tauri::command]
+pub fn voice_install(app: AppHandle) {
+    crate::voice::install(&app);
+}
+
+#[tauri::command]
+pub fn voice_remove(voice: State<'_, Arc<crate::voice::Voice>>) {
+    crate::voice::remove(&voice);
+}
+
+#[tauri::command]
+pub fn voice_set_auto(state: AppStateRef, enabled: bool) {
+    state.settings.lock().voice_auto = enabled;
+    state.save_settings();
+}
+
+/// Listens to a song so its lyrics follow the singer ("voice-progress", then "voice-done").
+#[tauri::command]
+pub fn voice_follow(app: AppHandle, track_id: String) {
+    crate::voice::request(&app, track_id, resolve_lyrics);
+}
+
+/// Follows the singer in every song with lyrics ("voice-batch" events tell how it goes).
+#[tauri::command]
+pub fn voice_batch(app: AppHandle) {
+    crate::voice::start_batch(&app, resolve_lyrics);
+}
+
+#[tauri::command]
+pub fn voice_batch_stop(app: AppHandle) {
+    crate::voice::stop_batch(&app);
+}
+
+/// Turns following the singer on or off for one song; returns its lyrics as now shown.
+#[tauri::command]
+pub async fn voice_use(
+    state: State<'_, Arc<AppState>>,
+    voice: State<'_, Arc<crate::voice::Voice>>,
+    track_id: String,
+    on: bool,
+) -> Result<crate::lyrics::Lyrics, String> {
+    let track = track_of(&state, &track_id)?;
+    let (state, voice) = (state.inner().clone(), voice.inner().clone());
     tauri::async_runtime::spawn_blocking(move || {
-        if crate::lyrics::is_hidden(&cache, &track.id) {
-            return crate::lyrics::Lyrics {
-                lookup: "hidden".into(),
-                ..Default::default()
-            };
-        }
-        if let Some(l) = crate::lyrics::picked(&cache, &track.id) {
-            return l;
-        }
-        // Lyrics in the file win when they're timed. Untimed ones (common in tags) can't follow
-        // the song, so timed lyrics from the saved store or LRCLIB are preferred when there are any.
-        let local = crate::lyrics::local(Path::new(&track.path));
-        if let Some(l) = local.as_ref().filter(|l| !l.synced.is_empty()) {
-            return l.clone();
-        }
-        let found = crate::lyrics::saved(&cache, &track.id, &track.title).map(Ok).unwrap_or_else(|| {
-            if online {
-                crate::lyrics::online(
-                    &cache,
-                    &track.id,
-                    &track.artist,
-                    &track.title,
-                    &track.album,
-                    track.duration,
-                )
-            } else {
-                Err("off")
-            }
-        });
-        match (found, local) {
-            (Ok(l), _) if !l.synced.is_empty() => l,
-            (_, Some(l)) => l,
-            (Ok(l), None) => l,
-            (Err(why), None) => crate::lyrics::Lyrics {
-                lookup: why.into(),
-                ..Default::default()
-            },
-        }
+        voice.set_on(&track.id, on);
+        voice.apply(&track, resolve_lyrics(&state, &track))
     })
     .await
     .map_err(|e| e.to_string())
@@ -1175,14 +1226,17 @@ pub async fn search_lyrics(query: String) -> Result<Vec<crate::lyrics::Hit>, Str
 #[tauri::command]
 pub async fn use_lyrics(
     state: State<'_, Arc<AppState>>,
+    voice: State<'_, Arc<crate::voice::Voice>>,
     track_id: String,
     hit_id: u64,
 ) -> Result<crate::lyrics::Lyrics, String> {
     let cache = state.data_dir.join("lyrics");
+    let track = track_of(&state, &track_id)?;
+    let voice = voice.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let l = crate::lyrics::fetch(hit_id)?;
         crate::lyrics::pick(&cache, &track_id, &l);
-        Ok(l)
+        Ok(voice.apply(&track, l))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1196,10 +1250,16 @@ pub fn hide_lyrics(state: AppStateRef, track_id: String) {
 
 /// Uses pasted text (LRC or plain) as this song's lyrics.
 #[tauri::command]
-pub fn paste_lyrics(state: AppStateRef, track_id: String, text: String) -> Result<crate::lyrics::Lyrics, String> {
+pub fn paste_lyrics(
+    state: AppStateRef,
+    voice: State<'_, Arc<crate::voice::Voice>>,
+    track_id: String,
+    text: String,
+) -> Result<crate::lyrics::Lyrics, String> {
     let l = crate::lyrics::from_pasted(&text).ok_or("There’s no text to use.")?;
     crate::lyrics::pick(&state.data_dir.join("lyrics"), &track_id, &l);
-    Ok(l)
+    let track = track_of(&state, &track_id)?;
+    Ok(voice.apply(&track, l))
 }
 
 /// Lets the AI find lyrics: it suggests better searches for LRCLIB (for time-synced lyrics) and
@@ -1207,11 +1267,13 @@ pub fn paste_lyrics(state: AppStateRef, track_id: String, text: String) -> Resul
 #[tauri::command]
 pub async fn ai_find_lyrics(
     state: State<'_, Arc<AppState>>,
+    voice: State<'_, Arc<crate::voice::Voice>>,
     track_id: String,
 ) -> Result<crate::lyrics::Lyrics, String> {
     let track = track_of(&state, &track_id)?;
     let settings = state.settings.lock().ai.clone();
     let cache = state.data_dir.join("lyrics");
+    let voice = voice.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let found = crate::ai::find_lyrics(&settings, &track)?;
         // Synced lyrics from LRCLIB beat anything else, so try the AI's searches there first.
@@ -1226,7 +1288,7 @@ pub async fn ai_find_lyrics(
                 if let Some(hit) = crate::lyrics::best_hit(&hits, &wanted) {
                     if let Ok(l) = crate::lyrics::fetch(hit.id) {
                         crate::lyrics::pick(&cache, &track.id, &l);
-                        return Ok(l);
+                        return Ok(voice.apply(&track, l));
                     }
                 }
             }
@@ -1244,7 +1306,7 @@ pub async fn ai_find_lyrics(
                 .ok_or("The AI couldn’t find lyrics for this song.")?
         };
         crate::lyrics::pick(&cache, &track.id, &l);
-        Ok(l)
+        Ok(voice.apply(&track, l))
     })
     .await
     .map_err(|e| e.to_string())?

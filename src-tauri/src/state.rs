@@ -31,6 +31,11 @@ pub struct Settings {
     pub skipped: BTreeSet<String>,
     /// Also skip instrumental, karaoke and off-vocal versions.
     pub skip_instrumentals: bool,
+    /// Once the voice models are downloaded: lyrics follow the singer for every song whose
+    /// lyrics are opened (and the song after it in the queue).
+    pub voice_auto: bool,
+    /// Following the singer in all songs with lyrics was running when Cadence closed: carry on.
+    pub voice_batch: bool,
 }
 
 impl Default for Settings {
@@ -47,6 +52,8 @@ impl Default for Settings {
             fix_tags_online: true,
             skipped: BTreeSet::new(),
             skip_instrumentals: false,
+            voice_auto: true,
+            voice_batch: false,
         }
     }
 }

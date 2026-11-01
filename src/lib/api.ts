@@ -157,8 +157,8 @@ export interface HistoryStats {
 export interface LyricLine {
   time: number;
   text: string;
-  /** Word timings ("enhanced" LRC), when the lyrics have them. */
-  words?: { time: number; text: string }[];
+  /** Word timings ("enhanced" LRC, or placed on the singing), when the lyrics have them. */
+  words?: { time: number; text: string; end?: number }[];
 }
 
 export interface Lyrics {
@@ -168,6 +168,43 @@ export interface Lyrics {
   instrumental: boolean;
   /** Why nothing was found online: "off", "missing", "unavailable", or "" when found. */
   lookup: "off" | "missing" | "unavailable" | "hidden" | "";
+  /** Placed on the singing: "on" (these lines), "off" (turned off for this song), absent if not yet. */
+  voice?: "on" | "off";
+}
+
+/** Following the singer: Cadence listens to a song once and places every word on the singing. */
+export interface VoiceJob {
+  trackId: string;
+  title: string;
+  done: number;
+  total: number;
+}
+
+export interface VoiceStatus {
+  /** The models can run on this system. */
+  supported: boolean;
+  installed: boolean;
+  /** Bytes downloaded and in all, while downloading. */
+  installing: [number, number] | null;
+  downloadSize: number;
+  /** Why the last download failed, or "". */
+  error: string;
+  /** Follow the singer for every song whose lyrics are opened. */
+  auto: boolean;
+  job: VoiceJob | null;
+  /** Following the singer in every song with lyrics (or how the last such run ended). */
+  batch: VoiceBatch | null;
+}
+
+export interface VoiceBatch {
+  running: boolean;
+  /** Still finding the songs with lyrics. */
+  preparing: boolean;
+  done: number;
+  total: number;
+  /** Songs whose lyrics couldn't be found in the singing. */
+  failed: number;
+  secondsLeft: number | null;
 }
 
 export interface Playlist {
@@ -298,6 +335,14 @@ export const api = {
   setSkipInstrumentals: (enabled: boolean) => invoke<void>("set_skip_instrumentals", { enabled }),
   setFixTagsOnline: (enabled: boolean) => invoke<void>("set_fix_tags_online", { enabled }),
   lyrics: (trackId: string) => invoke<Lyrics>("get_lyrics", { trackId }),
+  voiceStatus: () => invoke<VoiceStatus>("voice_status"),
+  voiceInstall: () => invoke<void>("voice_install"),
+  voiceRemove: () => invoke<void>("voice_remove"),
+  voiceSetAuto: (enabled: boolean) => invoke<void>("voice_set_auto", { enabled }),
+  voiceFollow: (trackId: string) => invoke<void>("voice_follow", { trackId }),
+  voiceUse: (trackId: string, on: boolean) => invoke<Lyrics>("voice_use", { trackId, on }),
+  voiceBatch: () => invoke<void>("voice_batch"),
+  voiceBatchStop: () => invoke<void>("voice_batch_stop"),
   /** Lines in Latin letters (romaji, pinyin, Korean); "" for lines that need none. */
   romanize: (lines: string[]) => invoke<string[]>("romanize_lyrics", { lines }),
   /** `later`: songs playing now, shown changed already; their files are written when they stop. */

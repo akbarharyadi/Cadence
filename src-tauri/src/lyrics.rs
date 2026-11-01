@@ -29,6 +29,10 @@ pub struct Line {
 pub struct Word {
     pub time: f64,
     pub text: String,
+    /// When the word has been sung, if known (words placed on the singing have it); otherwise it
+    /// lasts until the next word.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -43,6 +47,10 @@ pub struct Lyrics {
     /// Why there's nothing: "off" (online lookup disabled), "missing" (LRCLIB doesn't have it),
     /// "unavailable" (couldn't reach LRCLIB, will retry later) or "" when lyrics were found.
     pub lookup: String,
+    /// Timing placed on the singing (see `voice`): "on" when these lines use it, "off" when it
+    /// exists but the listener turned it off for this song, "" when the song hasn't had it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub voice: String,
 }
 
 impl Lyrics {
@@ -67,6 +75,7 @@ impl Lyrics {
             plain,
             instrumental: false,
             lookup: String::new(),
+            voice: String::new(),
         })
     }
 
@@ -129,7 +138,11 @@ fn parse_words(line: &str) -> (String, Vec<Word>) {
             let w: &mut Word = last;
             w.text.push_str(&rest[..start]);
         }
-        words.push(Word { time: t, text: String::new() });
+        words.push(Word {
+            time: t,
+            text: String::new(),
+            end: None,
+        });
         rest = &rest[start + end + 1..];
     }
     if let Some(last) = words.last_mut() {

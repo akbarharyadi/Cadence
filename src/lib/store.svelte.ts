@@ -64,7 +64,7 @@ function animate(kind: "forward" | "back" | "tab", change: () => void) {
     if (run === transitions) delete root.dataset.nav;
   });
 }
-import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type DspSettings, type HistoryStats, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track } from "./api";
+import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type DspSettings, type HistoryStats, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track, type VoiceBatch, type VoiceJob, type VoiceStatus } from "./api";
 
 export type View =
   | { name: "home" }
@@ -117,6 +117,10 @@ class AppState {
   analysis = $state<{ done: number; total: number } | null>(null);
   /** How much of the library has had sound analysis ("sounds like"). */
   sonic = $state<SonicStatus | null>(null);
+  /** Following the singer: the models, and the song being listened to. */
+  voice = $state<VoiceStatus | null>(null);
+  /** The last song finished listening to (lyrics views reload when it's theirs), with any error. */
+  voiceDone = $state<{ trackId: string; error: string; at: number } | null>(null);
   /** AI DJ settings, and whether an API key is saved. */
   ai = $state<{ settings: AiSettings; hasKey: boolean } | null>(null);
   aiReady = $derived(!!this.ai && this.ai.settings.provider === "cloud" && this.ai.hasKey);
@@ -312,6 +316,21 @@ class AppState {
       listen<{ done: number; total: number }>("analysis-progress", (e) => {
         this.analysis = e.payload.done >= e.payload.total ? null : e.payload;
       }),
+      listen<VoiceJob>("voice-progress", (e) => {
+        if (this.voice) this.voice = { ...this.voice, job: e.payload };
+      }),
+      listen<{ trackId: string; error: string }>("voice-done", (e) => {
+        if (this.voice) this.voice = { ...this.voice, job: null };
+        this.voiceDone = { ...e.payload, at: Date.now() };
+      }),
+      listen<VoiceBatch | null>("voice-batch", (e) => {
+        if (this.voice) this.voice = { ...this.voice, batch: e.payload };
+      }),
+      listen<[number, number]>("voice-install", async (e) => {
+        const [done, total] = e.payload;
+        if (total && this.voice) this.voice = { ...this.voice, installing: [done, total] };
+        else this.voice = await api.voiceStatus();
+      }),
       listen<{ done: number; total: number }>("sonic-progress", (e) => {
         const { done, total } = e.payload;
         if (done >= total) this.loadSonic();
@@ -319,6 +338,7 @@ class AppState {
       }),
     ]);
     this.loadSonic();
+    api.voiceStatus().then((v) => (this.voice = v));
     api.aiSettings().then((a) => {
       this.ai = a;
       if (this.aiReady) {

@@ -20,6 +20,7 @@ mod state;
 pub mod tagedit;
 #[cfg(desktop)]
 mod tray;
+mod voice;
 
 use std::sync::Arc;
 
@@ -223,6 +224,9 @@ pub fn run() {
                 watcher: Mutex::new(None),
             });
             app.manage(state.clone());
+            let local_dir = app.path().app_local_data_dir().unwrap_or_else(|_| state.data_dir.clone());
+            app.manage(Arc::new(voice::Voice::new(&state.data_dir, &local_dir)));
+            voice::resume_batch(app.handle(), commands::resolve_lyrics);
             // Carry on where the last session left off (paused).
             state.restore_session();
 
@@ -280,6 +284,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_library,
+            commands::voice_status,
+            commands::voice_install,
+            commands::voice_remove,
+            commands::voice_set_auto,
+            commands::voice_follow,
+            commands::voice_use,
+            commands::voice_batch,
+            commands::voice_batch_stop,
             commands::get_folders,
             commands::open_file,
             commands::add_folders,

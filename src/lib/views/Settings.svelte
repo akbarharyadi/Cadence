@@ -59,6 +59,13 @@
     await app.pickFolders();
   }
 
+  /** "2 h 15 min", "40 min", "under a minute". */
+  function timeLeft(seconds: number) {
+    const m = Math.round(seconds / 60);
+    if (m < 1) return "under a minute";
+    if (m < 60) return `${m} min`;
+    return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
+  }
   const isSong = (path: string) => /\.(flac|alac|wav|aiff?|mp3|m4a|aac|ogg|opus)$/i.test(path);
 
   async function remove(path: string) {
@@ -219,6 +226,71 @@
       <Toggle checked={lyricsOnline} label="Find lyrics online" onchange={(v) => { lyricsOnline = v; api.setLyricsOnline(v); }} />
     </div>
   </section>
+
+  {#if app.voice?.supported}
+    {@const v = app.voice}
+    <section>
+      <div class="title-row">
+        <div>
+          <h2 class="section-title">Lyrics follow the singer</h2>
+          <p class="desc">
+            Cadence listens to a song once, separates the singing from the music, and places every word of the lyrics on the
+            singing, so the karaoke highlight moves with the singer, syllable by syllable. It works for Japanese, Chinese, Korean,
+            English, Indonesian and most other languages and runs on this computer in the background: for songs whose lyrics you
+            open (plus the next one in the queue), or for all your songs with lyrics at once. Each song is listened to once; the
+            result is kept.
+          </p>
+        </div>
+        {#if v.installed}
+          <Toggle checked={v.auto} label="Follow the singer automatically" onchange={(on) => { app.voice = { ...v, auto: on }; api.voiceSetAuto(on); }} />
+        {/if}
+      </div>
+      {#if v.installing}
+        <div class="meter" role="progressbar" aria-valuemin={0} aria-valuemax={v.installing[1]} aria-valuenow={v.installing[0]} aria-label="Downloaded">
+          <span style="width: {v.installing[1] ? (v.installing[0] / v.installing[1]) * 100 : 0}%"></span>
+        </div>
+        <p class="hint">Downloading… {Math.round(v.installing[0] / 1e6)} of {Math.round(v.installing[1] / 1e6)} MB</p>
+      {:else if v.installed}
+        {@const b = v.batch}
+        {#if b?.running}
+          {@const part = v.job ? v.job.done / Math.max(v.job.total, 1) : 0}
+          <div class="meter" role="progressbar" aria-valuemin={0} aria-valuemax={b.total} aria-valuenow={b.done} aria-label="Songs done">
+            <span style="width: {b.total ? ((b.done + part) / b.total) * 100 : 0}%"></span>
+          </div>
+          <div class="row">
+            <p class="hint">
+              {#if b.preparing}Finding your songs with lyrics…{:else}
+                {b.done} of {b.total} songs{v.job ? ` · now “${v.job.title}”, ${Math.round((v.job.done / Math.max(v.job.total, 1)) * 100)}%` : ""}{b.secondsLeft != null ? ` · about ${timeLeft(b.secondsLeft)} left` : ""}
+              {/if}
+            </p>
+            <button class="link small" onclick={() => api.voiceBatchStop()}>Stop</button>
+          </div>
+        {:else}
+          <div class="row">
+            <button class="pill" onclick={() => api.voiceBatch()}><Icon name="lyrics" size={15} />Follow the singer in all songs with lyrics</button>
+            <p class="hint">
+              {#if b && b.total === 0}Every song with lyrics already follows the singer.
+              {:else if b && b.done >= b.total}Done: {b.done - b.failed} songs follow the singer{b.failed ? `; ${b.failed} couldn’t be matched` : ""}.
+              {:else if b}Stopped after {b.done} of {b.total} songs. Start again to carry on.
+              {:else}Most-played first, about 1–2 minutes per song. You can keep listening.{/if}
+            </p>
+          </div>
+        {/if}
+        <div class="row">
+          <p class="hint">{v.auto ? "On for every song whose lyrics you open." : "Off: turn it on per song with “Follow singer” under the lyrics."}</p>
+          <button class="link small" onclick={async () => { await api.voiceRemove(); app.voice = await api.voiceStatus(); }} disabled={!!b?.running}>Remove the voice models</button>
+        </div>
+      {:else}
+        <div class="row">
+          <button class="pill" onclick={async () => { await api.voiceInstall(); app.voice = await api.voiceStatus(); }}>
+            <Icon name="download" size={15} />Download voice models ({Math.round(v.downloadSize / 1e6)} MB)
+          </button>
+          <p class="hint">ONNX Runtime, the HTDemucs vocal separator and Meta’s MMS aligner, needed once.</p>
+        </div>
+        {#if v.error}<p class="error">{v.error}</p>{/if}
+      {/if}
+    </section>
+  {/if}
 
   <section>
     <div class="title-row">

@@ -50,24 +50,34 @@ reqwest = { version = "0.13.5", features = ["json", "blocking"] }
 bliss-audio = { version = "0.13.0", default-features = false, features = ["analysis", "serde"] }
 kakasi = "0.1"
 pinyin = "0.11"
+unicode-normalization = "0.1"
 
 # Desktop only: one running window at a time (phones manage that themselves).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-process = "2.4.0"
 tauri-plugin-single-instance = "2.5.4"
 tauri-plugin-updater = "2.14.0"
+# Lyrics that follow the singer: ONNX Runtime is loaded from a download (not linked in), so it
+# costs nothing until the listener turns the feature on.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std"] }
+realfft = "3.5"
 
 # Secrets go to each system's own store; Direct output (WASAPI exclusive) is Windows-only.
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
 wasapi = "0.26.0"
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+flate2 = "1"
+tar = "0.4"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 libc = "0.2"
+flate2 = "1"
+tar = "0.4"
 
 # Direct output on Android: AAudio streams in the USB DAC's own format, set up by the app's Kotlin side,
 # and USB exclusive (Cadence's own USB Audio driver, through Linux usbfs).

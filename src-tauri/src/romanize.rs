@@ -5,25 +5,25 @@
 use pinyin::ToPinyin;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Script {
+pub(crate) enum Script {
     Japanese,
     Chinese,
     Korean,
 }
 
-fn is_kana(c: char) -> bool {
+pub(crate) fn is_kana(c: char) -> bool {
     matches!(c, '\u{3040}'..='\u{30ff}' | '\u{31f0}'..='\u{31ff}' | '\u{ff66}'..='\u{ff9f}')
 }
-fn is_han(c: char) -> bool {
+pub(crate) fn is_han(c: char) -> bool {
     matches!(c, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}')
 }
-fn is_hangul(c: char) -> bool {
+pub(crate) fn is_hangul(c: char) -> bool {
     matches!(c, '\u{ac00}'..='\u{d7a3}')
 }
 
 /// Which script the song is in. Kanji and hanzi look alike, so any kana in the song means
 /// Japanese; Han characters without kana mean Chinese.
-fn script(lines: &[String]) -> Option<Script> {
+pub(crate) fn script(lines: &[String]) -> Option<Script> {
     let all = || lines.iter().flat_map(|l| l.chars());
     if all().any(is_kana) {
         Some(Script::Japanese)
@@ -93,6 +93,18 @@ fn chinese(line: &str) -> String {
 /// Hangul syllables to Revised Romanization (letter by letter, without the sound changes
 /// between syllables).
 fn korean(line: &str) -> String {
+    let mut out = String::new();
+    for c in line.chars() {
+        match hangul_syllable(c) {
+            Some(s) => out.push_str(&s),
+            None => out.push(c),
+        }
+    }
+    out
+}
+
+/// One Hangul syllable in Revised Romanization (letter by letter); None for other characters.
+pub(crate) fn hangul_syllable(c: char) -> Option<String> {
     const INITIAL: [&str; 19] = ["g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "", "j", "jj", "ch", "k", "t", "p", "h"];
     const MEDIAL: [&str; 21] = [
         "a", "ae", "ya", "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae", "oe", "yo", "u", "wo", "we", "wi", "yu", "eu", "ui", "i",
@@ -100,18 +112,16 @@ fn korean(line: &str) -> String {
     const FINAL: [&str; 28] = [
         "", "k", "k", "k", "n", "n", "n", "t", "l", "k", "m", "l", "l", "l", "p", "l", "m", "p", "p", "t", "t", "ng", "t", "t", "k", "t", "p", "t",
     ];
-    let mut out = String::new();
-    for c in line.chars() {
-        if is_hangul(c) {
-            let code = c as u32 - 0xac00;
-            out.push_str(INITIAL[(code / 588) as usize]);
-            out.push_str(MEDIAL[((code % 588) / 28) as usize]);
-            out.push_str(FINAL[(code % 28) as usize]);
-        } else {
-            out.push(c);
-        }
+    if !is_hangul(c) {
+        return None;
     }
-    out
+    let code = c as u32 - 0xac00;
+    Some(format!(
+        "{}{}{}",
+        INITIAL[(code / 588) as usize],
+        MEDIAL[((code % 588) / 28) as usize],
+        FINAL[(code % 28) as usize]
+    ))
 }
 
 /// Single spaces, full-width punctuation as ASCII, no space before punctuation.

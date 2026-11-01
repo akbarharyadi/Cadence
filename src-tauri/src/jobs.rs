@@ -56,7 +56,7 @@ fn background_pool() -> rayon::ThreadPool {
 /// Lowers the calling thread's CPU, disk and memory priority: Windows' background mode (plus
 /// EcoQoS on Windows 11, which keeps it on efficient cores at low clock speeds), or a nice value
 /// on Linux and Android.
-fn background_priority() {
+pub(crate) fn background_priority() {
     #[cfg(windows)]
     unsafe {
         use std::ffi::c_void;
