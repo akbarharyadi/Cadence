@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { FIELDS, OPS, QUALITIES, SORTS, evaluate, kindOf, type Field, type Rule } from "$lib/smart";
-  import { app } from "$lib/store.svelte";
+  import { FIELDS, OPS, QUALITIES, SORTS, evaluate, kindOf, type Field, type Rule } from "#lib/smart.js";
+  import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
   import Segmented from "./Segmented.svelte";

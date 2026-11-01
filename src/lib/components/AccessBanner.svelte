@@ -3,7 +3,7 @@
   // The library stays as it was; this asks for access again.
   import { fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
-  import { app, android } from "$lib/store.svelte";
+  import { app, android } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
 </script>
 

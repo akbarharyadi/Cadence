@@ -1,6 +1,6 @@
 <script lang="ts">
   // Phone navigation: the sidebar's main places as a tab bar at the bottom of the screen.
-  import { app, type View } from "$lib/store.svelte";
+  import { app, type View } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
 
   const tabs: { label: string; icon: string; view: View; match: string[] }[] = [

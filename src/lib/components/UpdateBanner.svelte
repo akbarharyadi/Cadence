@@ -2,7 +2,7 @@
   // "A new version is ready" card, above the player.
   import { fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
-  import { updates } from "$lib/updates.svelte";
+  import { updates } from "#lib/updates.svelte.js";
   import Icon from "./Icon.svelte";
 
   const isAndroid = navigator.userAgent.includes("Android");

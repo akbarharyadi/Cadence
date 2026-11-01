@@ -2,15 +2,15 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { api, db, EQ_BANDS, type Filter, type FilterKind, type LevelingMode, type Preset } from "$lib/api";
-  import { autoHeadroom, formatHz } from "$lib/dsp";
-  import { app } from "$lib/store.svelte";
-  import EqGraph from "$lib/components/EqGraph.svelte";
-  import Icon from "$lib/components/Icon.svelte";
-  import Segmented from "$lib/components/Segmented.svelte";
-  import Select from "$lib/components/Select.svelte";
-  import SignalFlow from "$lib/components/SignalFlow.svelte";
-  import Toggle from "$lib/components/Toggle.svelte";
+  import { api, db, EQ_BANDS, type Filter, type FilterKind, type LevelingMode, type Preset } from "#lib/api.js";
+  import { autoHeadroom, formatHz } from "#lib/dsp.js";
+  import { app } from "#lib/store.svelte.js";
+  import EqGraph from "#lib/components/EqGraph.svelte";
+  import Icon from "#lib/components/Icon.svelte";
+  import Segmented from "#lib/components/Segmented.svelte";
+  import Select from "#lib/components/Select.svelte";
+  import SignalFlow from "#lib/components/SignalFlow.svelte";
+  import Toggle from "#lib/components/Toggle.svelte";
 
   let presets = $state<Preset[]>([]);
   let levelingOptions = $state(false);

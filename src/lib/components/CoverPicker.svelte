@@ -2,8 +2,8 @@
   // Change Cover: covers from iTunes and Deezer for the album (searchable), or an image file.
   // The new cover shows at once and is written into the album's songs.
   import { open } from "@tauri-apps/plugin-dialog";
-  import { api, artUrl, type CoverResult } from "$lib/api";
-  import { app } from "$lib/store.svelte";
+  import { api, artUrl, type CoverResult } from "#lib/api.js";
+  import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 

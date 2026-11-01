@@ -1,8 +1,8 @@
 <script lang="ts">
   // Every skipped song in one place: the ones you chose (with "Stop skipping") and, when that
   // switch is on, the instrumental versions. Searchable, so it stays usable with hundreds.
-  import { artUrl, type Track } from "$lib/api";
-  import { app, isInstrumental } from "$lib/store.svelte";
+  import { artUrl, type Track } from "#lib/api.js";
+  import { app, isInstrumental } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
   import Segmented from "./Segmented.svelte";

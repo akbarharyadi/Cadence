@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { artUrl, type Album } from "$lib/api";
-  import { app } from "$lib/store.svelte";
+  import { artUrl, type Album } from "#lib/api.js";
+  import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
 
   let { album, size = 0 }: { album: Album; size?: number } = $props();

@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { artUrl, formatDuration, type Track } from "$lib/api";
-  import Icon from "$lib/components/Icon.svelte";
-  import Modal from "$lib/components/Modal.svelte";
-  import TrackList from "$lib/components/TrackList.svelte";
-  import { describe, evaluate } from "$lib/smart";
-  import { app, shuffled } from "$lib/store.svelte";
+  import { artUrl, formatDuration, type Track } from "#lib/api.js";
+  import Icon from "#lib/components/Icon.svelte";
+  import Modal from "#lib/components/Modal.svelte";
+  import TrackList from "#lib/components/TrackList.svelte";
+  import { describe, evaluate } from "#lib/smart.js";
+  import { app, shuffled } from "#lib/store.svelte.js";
 
   let { id }: { id: string } = $props();
   const p = $derived(app.playlists.find((x) => x.id === id));

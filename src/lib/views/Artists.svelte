@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { artUrl } from "$lib/api";
-  import Icon from "$lib/components/Icon.svelte";
-  import { app } from "$lib/store.svelte";
+  import { artUrl } from "#lib/api.js";
+  import Icon from "#lib/components/Icon.svelte";
+  import { app } from "#lib/store.svelte.js";
 </script>
 
 <div class="page">

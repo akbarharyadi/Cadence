@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { api, artUrl, formatTime, khz, qualityOf, type Lyrics } from "$lib/api";
-  import Icon from "$lib/components/Icon.svelte";
-  import { app } from "$lib/store.svelte";
+  import { api, artUrl, formatTime, khz, qualityOf, type Lyrics } from "#lib/api.js";
+  import Icon from "#lib/components/Icon.svelte";
+  import { app } from "#lib/store.svelte.js";
 
   onMount(() => {
     // The mini window is transparent so its rounded corners show.

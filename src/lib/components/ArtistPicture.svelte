@@ -2,8 +2,8 @@
   // Choosing an artist's picture: a photo from the online catalogue, one of their album covers,
   // or an image file. Picking one saves it straight away.
   import { open } from "@tauri-apps/plugin-dialog";
-  import { api, artUrl, type ArtistPhoto } from "$lib/api";
-  import { app } from "$lib/store.svelte";
+  import { api, artUrl, type ArtistPhoto } from "#lib/api.js";
+  import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 

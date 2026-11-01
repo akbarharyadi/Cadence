@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { api, formatTime, type LyricLine, type Lyrics, type LyricsHit } from "$lib/api";
-  import { app, livePosition } from "$lib/store.svelte";
+  import { api, formatTime, type LyricLine, type Lyrics, type LyricsHit } from "#lib/api.js";
+  import { app, livePosition } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
 
   let { trackId }: { trackId: string } = $props();

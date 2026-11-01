@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { artUrl, formatDuration } from "$lib/api";
-  import AlbumCard from "$lib/components/AlbumCard.svelte";
-  import Icon from "$lib/components/Icon.svelte";
-  import TrackList from "$lib/components/TrackList.svelte";
-  import { app, shuffled } from "$lib/store.svelte";
+  import { artUrl, formatDuration } from "#lib/api.js";
+  import AlbumCard from "#lib/components/AlbumCard.svelte";
+  import Icon from "#lib/components/Icon.svelte";
+  import TrackList from "#lib/components/TrackList.svelte";
+  import { app, shuffled } from "#lib/store.svelte.js";
 
   let { name }: { name: string } = $props();
   const artist = $derived(app.artists.find((a) => a.name.toLowerCase() === name.toLowerCase()));

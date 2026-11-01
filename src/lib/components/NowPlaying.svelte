@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { api, artUrl, formatTime, khz, qualityOf } from "$lib/api";
-  import { app, signalPath } from "$lib/store.svelte";
+  import { api, artUrl, formatTime, khz, qualityOf } from "#lib/api.js";
+  import { app, signalPath } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import LyricsView from "./LyricsView.svelte";
   import QualityBadge from "./QualityBadge.svelte";

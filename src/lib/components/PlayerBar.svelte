@@ -1,8 +1,8 @@
 <script lang="ts">
   import { fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
-  import { api, artUrl, formatTime, khz, qualityOf, type Album, type Track } from "$lib/api";
-  import { app, signalPath } from "$lib/store.svelte";
+  import { api, artUrl, formatTime, khz, qualityOf, type Album, type Track } from "#lib/api.js";
+  import { app, signalPath } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import QualityBadge from "./QualityBadge.svelte";
 

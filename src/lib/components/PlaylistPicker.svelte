@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { app } from "$lib/store.svelte";
+  import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 

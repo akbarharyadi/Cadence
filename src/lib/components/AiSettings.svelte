@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { api, type AiSettings } from "$lib/api";
-  import { app } from "$lib/store.svelte";
+  import { api, type AiSettings } from "#lib/api.js";
+  import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import Toggle from "./Toggle.svelte";
 

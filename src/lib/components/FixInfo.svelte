@@ -1,8 +1,8 @@
 <script lang="ts">
   // Fix Song Info: find the song in the iTunes catalogue and pick the right match; its title,
   // artist, album, year and cover are written into the file.
-  import { api, formatTime, type SongInfo } from "$lib/api";
-  import { app } from "$lib/store.svelte";
+  import { api, formatTime, type SongInfo } from "#lib/api.js";
+  import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 

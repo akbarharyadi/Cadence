@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { api } from "$lib/api";
-  import Icon from "$lib/components/Icon.svelte";
-  import { android, app } from "$lib/store.svelte";
+  import { api } from "#lib/api.js";
+  import Icon from "#lib/components/Icon.svelte";
+  import { android, app } from "#lib/store.svelte.js";
 
   /** Folders were added but no music was found in them. */
   const nothingFound = $derived(app.folders.length > 0 && !app.scan);

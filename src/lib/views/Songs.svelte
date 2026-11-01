@@ -1,7 +1,7 @@
 <script lang="ts">
-  import Icon from "$lib/components/Icon.svelte";
-  import TrackList from "$lib/components/TrackList.svelte";
-  import { app, shuffled } from "$lib/store.svelte";
+  import Icon from "#lib/components/Icon.svelte";
+  import TrackList from "#lib/components/TrackList.svelte";
+  import { app, shuffled } from "#lib/store.svelte.js";
 
   const songs = $derived([...app.tracks].sort((a, b) => a.title.localeCompare(b.title)));
   const skipped = $derived(songs.filter((t) => app.isSkipped(t)).length);

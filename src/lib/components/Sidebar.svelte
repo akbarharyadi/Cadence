@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { newSmart } from "$lib/smart";
-  import { app, type View } from "$lib/store.svelte";
+  import { newSmart } from "#lib/smart.js";
+  import { app, type View } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
 
   let searchInput: HTMLInputElement;

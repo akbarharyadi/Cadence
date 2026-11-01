@@ -1,9 +1,9 @@
 <script lang="ts">
-  import { artUrl, formatDuration } from "$lib/api";
-  import Icon from "$lib/components/Icon.svelte";
-  import QualityBadge from "$lib/components/QualityBadge.svelte";
-  import TrackList from "$lib/components/TrackList.svelte";
-  import { app } from "$lib/store.svelte";
+  import { artUrl, formatDuration } from "#lib/api.js";
+  import Icon from "#lib/components/Icon.svelte";
+  import QualityBadge from "#lib/components/QualityBadge.svelte";
+  import TrackList from "#lib/components/TrackList.svelte";
+  import { app } from "#lib/store.svelte.js";
 
   let { id }: { id: string } = $props();
   const album = $derived(app.albumById.get(id));

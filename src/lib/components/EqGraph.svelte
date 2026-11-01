@@ -1,7 +1,7 @@
 <script lang="ts">
   // The equalizer as one picture you play with: drag the points on the curve.
-  import { EQ_BANDS, db, type EqSettings, type Filter } from "$lib/api";
-  import { formatFreq, formatHz, response } from "$lib/dsp";
+  import { EQ_BANDS, db, type EqSettings, type Filter } from "#lib/api.js";
+  import { formatFreq, formatHz, response } from "#lib/dsp.js";
 
   let {
     eq,

@@ -1,7 +1,7 @@
 <script lang="ts">
   // What happens to the music on its way to the speakers, as a row of stages.
-  import { db, khz } from "$lib/api";
-  import { app, signalPath, systemMixer } from "$lib/store.svelte";
+  import { db, khz } from "#lib/api.js";
+  import { app, signalPath, systemMixer } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
 
   let { onstage }: { onstage?: (id: string) => void } = $props();

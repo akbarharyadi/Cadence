@@ -1,15 +1,15 @@
 <script lang="ts">
-  import { api, khz } from "$lib/api";
+  import { api, khz } from "#lib/api.js";
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
-  import { updates } from "$lib/updates.svelte";
-  import AiSettings from "$lib/components/AiSettings.svelte";
-  import Icon from "$lib/components/Icon.svelte";
-  import Toggle from "$lib/components/Toggle.svelte";
-  import Licenses from "$lib/components/Licenses.svelte";
-  import Segmented from "$lib/components/Segmented.svelte";
+  import { updates } from "#lib/updates.svelte.js";
+  import AiSettings from "#lib/components/AiSettings.svelte";
+  import Icon from "#lib/components/Icon.svelte";
+  import Toggle from "#lib/components/Toggle.svelte";
+  import Licenses from "#lib/components/Licenses.svelte";
+  import Segmented from "#lib/components/Segmented.svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { android, app, isInstrumental, systemMixer } from "$lib/store.svelte";
+  import { android, app, isInstrumental, systemMixer } from "#lib/store.svelte.js";
 
   let version = $state("");
   let showLicenses = $state(false);

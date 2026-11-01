@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { artUrl, formatTime, type Track } from "$lib/api";
-  import { app, type MenuItem } from "$lib/store.svelte";
+  import { artUrl, formatTime, type Track } from "#lib/api.js";
+  import { app, type MenuItem } from "#lib/store.svelte.js";
   import { untrack } from "svelte";
   import Icon from "./Icon.svelte";
 

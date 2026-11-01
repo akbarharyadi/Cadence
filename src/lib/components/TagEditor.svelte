@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { api, type Track } from "$lib/api";
-  import { app } from "$lib/store.svelte";
+  import { api, type Track } from "#lib/api.js";
+  import { app } from "#lib/store.svelte.js";
   import Modal from "./Modal.svelte";
 
   const tracks = $derived(app.tagEditing ?? []);

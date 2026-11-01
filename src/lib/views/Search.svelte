@@ -1,7 +1,7 @@
 <script lang="ts">
-  import AlbumCard from "$lib/components/AlbumCard.svelte";
-  import TrackList from "$lib/components/TrackList.svelte";
-  import { app } from "$lib/store.svelte";
+  import AlbumCard from "#lib/components/AlbumCard.svelte";
+  import TrackList from "#lib/components/TrackList.svelte";
+  import { app } from "#lib/store.svelte.js";
 
   let { query }: { query: string } = $props();
 

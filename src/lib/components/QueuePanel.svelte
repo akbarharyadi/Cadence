@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { api, artUrl, formatTime } from "$lib/api";
-  import { app } from "$lib/store.svelte";
+  import { api, artUrl, formatTime } from "#lib/api.js";
+  import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
 
   const s = $derived(app.status);

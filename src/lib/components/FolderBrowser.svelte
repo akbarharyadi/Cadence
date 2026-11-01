@@ -1,7 +1,7 @@
 <script lang="ts">
   // Choosing a music folder inside Cadence (phones have no usable system folder picker).
-  import { api, type DirEntry } from "$lib/api";
-  import { android, app } from "$lib/store.svelte";
+  import { api, type DirEntry } from "#lib/api.js";
+  import { android, app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 

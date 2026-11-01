@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { api, artUrl, formatDuration, STORES, type AiMix, type Album, type NewSong, type Track } from "$lib/api";
-  import AlbumCard from "$lib/components/AlbumCard.svelte";
-  import Carousel from "$lib/components/Carousel.svelte";
-  import Icon from "$lib/components/Icon.svelte";
-  import QualityBadge from "$lib/components/QualityBadge.svelte";
-  import { app, shuffled } from "$lib/store.svelte";
+  import { api, artUrl, formatDuration, STORES, type AiMix, type Album, type NewSong, type Track } from "#lib/api.js";
+  import AlbumCard from "#lib/components/AlbumCard.svelte";
+  import Carousel from "#lib/components/Carousel.svelte";
+  import Icon from "#lib/components/Icon.svelte";
+  import QualityBadge from "#lib/components/QualityBadge.svelte";
+  import { app, shuffled } from "#lib/store.svelte.js";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
   const newest = $derived([...app.albums].sort((a, b) => b.added - a.added));

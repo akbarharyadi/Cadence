@@ -1,8 +1,8 @@
 <script lang="ts">
-  import AlbumCard from "$lib/components/AlbumCard.svelte";
-  import Select from "$lib/components/Select.svelte";
-  import { app } from "$lib/store.svelte";
-  import type { Album } from "$lib/api";
+  import AlbumCard from "#lib/components/AlbumCard.svelte";
+  import Select from "#lib/components/Select.svelte";
+  import { app } from "#lib/store.svelte.js";
+  import type { Album } from "#lib/api.js";
 
   let { recent = false }: { recent?: boolean } = $props();
 

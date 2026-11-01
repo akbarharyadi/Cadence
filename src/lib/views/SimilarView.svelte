@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { api, artUrl, type Track } from "$lib/api";
-  import Icon from "$lib/components/Icon.svelte";
-  import TrackList from "$lib/components/TrackList.svelte";
-  import { app } from "$lib/store.svelte";
+  import { api, artUrl, type Track } from "#lib/api.js";
+  import Icon from "#lib/components/Icon.svelte";
+  import TrackList from "#lib/components/TrackList.svelte";
+  import { app } from "#lib/store.svelte.js";
 
   let { id }: { id: string } = $props();
   const seed = $derived(app.trackById.get(id));
