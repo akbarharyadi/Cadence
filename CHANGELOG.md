@@ -2,6 +2,15 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.24 (2026-11-01)
+
+- **Edit the info of the song that's playing.** **Edit Info…** used to refuse the playing song ("This song is
+  playing. Play something else…"). Now **Save** works: the new title, artist, album and so on show at once in your
+  library and the player, and Cadence writes them into the file when the song finishes (a file can't be rewritten
+  while it's being played). If you close Cadence before the song ends, they're written the next time it starts.
+- **Up to date and patched.** Everything Cadence is built from was updated, including fixes for known security issues
+  in two parts used for downloading and installing updates.
+
 ## 0.2.23 (2026-10-31)
 
 - **Much lighter window while playing.** Cadence's window could grow past 1 GB of memory within minutes of playing,

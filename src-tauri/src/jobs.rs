@@ -122,6 +122,7 @@ pub fn start_scan(app: AppHandle) {
         let mut tracks = library::scan(&folders, previous, |done, total| {
             let _ = app.emit("library-progress", Progress { done, total });
         });
+        crate::tagedit::show_held(&state.data_dir, &mut tracks);
         let albums = library::build_albums(&mut tracks, &state.art_dir());
         log::info!(
             "scanned {} tracks, {} albums in {:?}",

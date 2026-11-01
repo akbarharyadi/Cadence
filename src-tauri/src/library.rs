@@ -320,7 +320,7 @@ fn codec_name(ext: &str, file_type: lofty::file::FileType) -> String {
 }
 
 /// "01. A Small Miracle 小小奇迹" → "A Small Miracle 小小奇迹".
-fn title_from_file(path: &Path) -> String {
+pub fn title_from_file(path: &Path) -> String {
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())

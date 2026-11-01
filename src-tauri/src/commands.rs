@@ -944,6 +944,13 @@ pub fn disconnect_listenbrainz(state: AppStateRef) -> Result<(), String> {
 
 // ---------- tag editing ----------
 
+#[derive(Serialize)]
+pub struct TagsSaved {
+    saved: usize,
+    /// Songs playing now: shown changed already, their files are written when they stop.
+    later: usize,
+}
+
 /// Writes the changed fields into each song's file, then rescans so the library shows them.
 #[tauri::command]
 pub async fn write_tags(
@@ -951,27 +958,55 @@ pub async fn write_tags(
     state: State<'_, Arc<AppState>>,
     ids: Vec<String>,
     changes: crate::tagedit::TagChanges,
-) -> Result<usize, String> {
+) -> Result<TagsSaved, String> {
+    crate::tagedit::check(&changes)?;
     let playing = {
         let s = state.engine.status();
         s.index.and_then(|i| s.queue.get(i).cloned())
     };
-    if ids.iter().any(|id| Some(id) == playing.as_ref()) {
-        return Err(
-            "This song is playing. Play something else (or pause and skip ahead), then edit it."
-                .into(),
-        );
-    }
-    let paths: Vec<String> = {
+    let songs: Vec<(String, String)> = {
         let lib = state.library.lock();
         ids.iter()
             .filter_map(|id| {
                 lib.by_id
                     .get(id)
-                    .map(|&i| lib.snapshot.tracks[i].path.clone())
+                    .map(|&i| (id.clone(), lib.snapshot.tracks[i].path.clone()))
             })
             .collect()
     };
+    let (later, now): (Vec<_>, Vec<_>) = songs
+        .into_iter()
+        .partition(|(id, _)| Some(id) == playing.as_ref());
+
+    // The playing song's file can't be rewritten under the decoder: show the changes now and
+    // write them when the song stops (held on disk, in case Cadence closes first).
+    for (id, path) in &later {
+        crate::tagedit::hold(&state.data_dir, path, &changes);
+        {
+            let mut lib = state.library.lock();
+            if let Some(&i) = lib.by_id.get(id) {
+                crate::tagedit::show(&mut lib.snapshot.tracks[i], &changes);
+                let mut tracks = lib.snapshot.tracks.clone();
+                let albums = crate::library::build_albums(&mut tracks, &state.art_dir());
+                lib.set_tracks(tracks, albums);
+            }
+        }
+        let (app, dir, path) = (app.clone(), state.data_dir.clone(), path.clone());
+        crate::autotag::after_song(
+            id,
+            Box::new(move || match crate::tagedit::write_held(&dir, &path) {
+                Ok(true) => start_scan(app),
+                Ok(false) => {}
+                Err(e) => log::warn!("{e}"),
+            }),
+        );
+    }
+    if !later.is_empty() {
+        state.save_library();
+        let _ = app.emit("library-changed", ());
+    }
+
+    let paths: Vec<String> = now.into_iter().map(|(_, p)| p).collect();
     let written = tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
         for p in &paths {
             crate::tagedit::write(Path::new(p), &changes)?;
@@ -980,8 +1015,13 @@ pub async fn write_tags(
     })
     .await
     .map_err(|e| e.to_string())??;
-    start_scan(app);
-    Ok(written)
+    if written > 0 {
+        start_scan(app);
+    }
+    Ok(TagsSaved {
+        saved: written + later.len(),
+        later: later.len(),
+    })
 }
 
 #[derive(Serialize)]

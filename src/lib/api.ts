@@ -300,7 +300,9 @@ export const api = {
   lyrics: (trackId: string) => invoke<Lyrics>("get_lyrics", { trackId }),
   /** Lines in Latin letters (romaji, pinyin, Korean); "" for lines that need none. */
   romanize: (lines: string[]) => invoke<string[]>("romanize_lyrics", { lines }),
-  writeTags: (ids: string[], changes: Record<string, string>) => invoke<number>("write_tags", { ids, changes }),
+  /** `later`: songs playing now, shown changed already; their files are written when they stop. */
+  writeTags: (ids: string[], changes: Record<string, string>) =>
+    invoke<{ saved: number; later: number }>("write_tags", { ids, changes }),
   playlists: () => invoke<Playlist[]>("get_playlists"),
   savePlaylist: (playlist: Playlist) => invoke<Playlist>("save_playlist", { playlist }),
   deletePlaylist: (id: string) => invoke<void>("delete_playlist", { id }),

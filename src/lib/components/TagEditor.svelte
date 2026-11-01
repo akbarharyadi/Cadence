@@ -44,8 +44,9 @@
     saving = true;
     error = "";
     try {
-      const n = await api.writeTags(tracks.map((t) => t.id), changes);
-      app.showToast(n === 1 ? "Saved song info" : `Saved info for ${n} songs`);
+      const { saved, later } = await api.writeTags(tracks.map((t) => t.id), changes);
+      const what = saved === 1 ? "Saved song info" : `Saved info for ${saved} songs`;
+      app.showToast(later ? `${what}. The playing song’s file is updated when it finishes.` : what);
       close();
     } catch (e) {
       error = String(e);

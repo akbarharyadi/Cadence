@@ -190,6 +190,9 @@ pub fn run() {
             let history: History = read_json(&data_dir.join("history.json"));
             let playlists: playlists::Playlists = read_json(&data_dir.join("playlists.json"));
             let sonic = read_json::<sonic::Store>(&data_dir.join("sonic.json")).checked();
+            // Song info edited while its song played, if Cadence closed before it ended
+            // (written now, before the last session's song is opened again).
+            tagedit::write_leftovers(&data_dir);
 
             let (status_tx, status_rx) = crossbeam_channel::unbounded::<Status>();
             let engine = Engine::start(
