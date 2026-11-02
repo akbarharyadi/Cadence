@@ -228,6 +228,7 @@ Cadence stands on the work of many open-source projects. The main ones:
 | [kakasi](https://github.com/Theta-Dev/kakasi) and [pinyin](https://github.com/mozillazg/rust-pinyin) | Lyrics pronunciation | GPL-3.0 / MIT |
 | [LRCLIB](https://lrclib.net) | Synced lyrics | Free service |
 | [ONNX Runtime](https://onnxruntime.ai) (downloaded on request) and [ort](https://github.com/pykeio/ort) | Running the voice models | MIT / MIT or Apache-2.0 |
+| [DirectML](https://github.com/microsoft/DirectML) by Microsoft (Windows; downloaded on request with ONNX Runtime) | Running the voice models on the graphics card | Microsoft's DirectML license, redistributable ([package](https://www.nuget.org/packages/Microsoft.AI.DirectML)) |
 | [MMS forced aligner](https://huggingface.co/MahmoudAshraf/mms-300m-1130-forced-aligner) by Meta (downloaded on request) | Placing lyrics on the singing | CC BY-NC 4.0 |
 | MDX-Net "Voc_FT" vocal model from [Ultimate Vocal Remover](https://github.com/Anjok07/ultimatevocalremovergui), as packaged by [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (downloaded on request) | Separating the vocals | No license stated |
 

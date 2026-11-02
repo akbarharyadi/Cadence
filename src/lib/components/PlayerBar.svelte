@@ -16,6 +16,12 @@
   const shownPos = $derived(dragging ? dragValue : app.position);
   const duration = $derived(s?.duration ?? 0);
   const pct = $derived(duration ? Math.min(100, (shownPos / duration) * 100) : 0);
+  // The line glides between the player's four updates a second only when an update moves it at
+  // least two screen pixels (short songs, wide windows). Moving less, it already looks continuous,
+  // and gliding would redraw the page on every frame: on a phone, 47 frames a second and most of
+  // the app's processor time, just for this line.
+  let seekWidth = $state(0);
+  const glide = $derived(!!s?.playing && !dragging && duration > 0 && (seekWidth * devicePixelRatio) / 4 / duration >= 2);
 
   // Where the pointer is over the seek line, to show the time it would jump to.
   let hoverX = $state<number | null>(null);
@@ -125,8 +131,9 @@
     <div
       class="seek"
       class:active={dragging}
-      class:glide={s?.playing && !dragging}
+      class:glide
       bind:this={seekEl}
+      bind:clientWidth={seekWidth}
       role="slider"
       tabindex="0"
       aria-label="Seek"
@@ -349,8 +356,8 @@
     background: var(--accent);
     box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 70%, transparent);
   }
-  /* The position comes four times a second; in between, the line glides (on the GPU, so the page
-     isn't restyled every frame). */
+  /* The position comes four times a second; in between, the line glides when it would visibly
+     jump (see `glide`), on the GPU, so the page isn't restyled every frame. */
   .glide .fill,
   .glide .thumb-track {
     transition: transform 0.3s linear;

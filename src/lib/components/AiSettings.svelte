@@ -2,6 +2,7 @@
   import { api, type AiSettings } from "#lib/api.js";
   import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
+  import Segmented from "./Segmented.svelte";
   import Toggle from "./Toggle.svelte";
 
   const s = $derived(app.ai?.settings);
@@ -10,6 +11,16 @@
   let test = $state<{ busy: boolean; ok?: boolean; text: string }>({ busy: false, text: "" });
   let preview = $state("");
   let editKey = $state(false);
+  const claude = $derived(s?.service === "claude");
+  const model = $derived(claude ? s?.claudeModel || "claude-opus-5-5" : s?.cloudModel);
+  const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  const keyStore = ua.includes("Windows")
+    ? "Saved in Windows Credential Manager"
+    : ua.includes("Android")
+      ? "Saved on this device"
+      : ua.includes("Mac")
+        ? "Saved in your Keychain"
+        : "Saved in your keyring";
 
   function change(patch: Partial<AiSettings>) {
     if (!s) return;
@@ -37,7 +48,7 @@
     test = { busy: true, text: "" };
     try {
       await api.aiTest();
-      test = { busy: false, ok: true, text: `Connected to ${s?.cloudModel}. Ask the DJ on Listen Now.` };
+      test = { busy: false, ok: true, text: `Connected to ${model}. Ask the DJ on Listen Now, or find new music in Discover.` };
       app.loadAiMixes(false);
       app.loadAiNew(false);
     } catch (e) {
@@ -55,8 +66,8 @@
     <div>
       <h2 class="section-title">AI DJ</h2>
       <p class="desc">
-        Ask for music in your own words, get daily mixes and new-music ideas, and find lyrics. Uses Z.ai GLM (or any OpenAI-compatible
-        service) with your own API key.
+        Ask for music in your own words, get daily mixes and new-music ideas, discover new songs, and find lyrics. Uses Claude by
+        Anthropic (or any OpenAI-compatible service) with your own API key, and can search the web.
       </p>
     </div>
     <Toggle checked={s.provider === "cloud"} label="AI DJ" onchange={(v) => change({ provider: v ? "cloud" : "off" })} />
@@ -64,16 +75,41 @@
 
   {#if s.provider === "cloud"}
     <div class="grid">
+      <span class="label">Service</span>
+      <div class="line">
+        <Segmented
+          label="AI service"
+          options={[
+            { value: "claude", label: "Claude" },
+            { value: "openai", label: "Other service" },
+          ]}
+          value={s.service}
+          onchange={async (v) => {
+            editKey = false;
+            await app.saveAiSettings({ ...s, service: v });
+            app.ai = await api.aiSettings();
+          }}
+        />
+      </div>
       <span class="label">API key</span>
       {#if app.ai?.hasKey && !editKey}
         <div class="line">
-          <span class="saved"><Icon name="lossless" size={14} />Saved in Windows Credential Manager</span>
+          <span class="saved"><Icon name="lossless" size={14} />{keyStore}</span>
           <button class="link small" onclick={() => (editKey = true)}>Change</button>
           <button class="link small" onclick={removeKey}>Remove</button>
         </div>
       {:else}
         <form class="key" onsubmit={(e) => { e.preventDefault(); saveKey(); }}>
-          <textarea class="field" rows="4" bind:value={keyText} placeholder={"Paste your API key, or your whole .env file:\nZAI_API_KEY=…\nAI_MODEL=glm-5.3-flash\nAI_BASE_URL=https://api.z.ai/api/coding/paas/v4"} aria-label="API key or .env" spellcheck="false"></textarea>
+          <textarea
+            class="field"
+            rows={claude ? 3 : 5}
+            bind:value={keyText}
+            placeholder={claude
+              ? "Paste your Anthropic API key (sk-ant-…). Get one at console.anthropic.com."
+              : "Paste your API key, or your whole .env file:\nZAI_API_KEY=…\nAI_MODEL=glm-5.3-flash\nAI_BASE_URL=https://api.z.ai/api/coding/paas/v4"}
+            aria-label="API key or .env"
+            spellcheck="false"
+          ></textarea>
           <div class="line">
             <button class="pill" type="submit" disabled={!keyText.trim()}>Save key</button>
             {#if editKey}<button class="pill ghost" type="button" onclick={() => { editKey = false; keyText = ""; }}>Cancel</button>{/if}
@@ -81,13 +117,17 @@
         </form>
       {/if}
       <label class="label" for="ai-model">Model</label>
-      <input id="ai-model" class="field short" value={s.cloudModel} onchange={(e) => change({ cloudModel: e.currentTarget.value.trim() })} spellcheck="false" />
-      <label class="label" for="ai-url">Server</label>
-      <input id="ai-url" class="field" value={s.cloudUrl} onchange={(e) => change({ cloudUrl: e.currentTarget.value.trim() })} spellcheck="false" />
+      {#if claude}
+        <input id="ai-model" class="field short" value={s.claudeModel} placeholder="claude-opus-5-5" onchange={(e) => change({ claudeModel: e.currentTarget.value.trim() })} spellcheck="false" />
+      {:else}
+        <input id="ai-model" class="field short" value={s.cloudModel} onchange={(e) => change({ cloudModel: e.currentTarget.value.trim() })} spellcheck="false" />
+        <label class="label" for="ai-url">Server</label>
+        <input id="ai-url" class="field" value={s.cloudUrl} onchange={(e) => change({ cloudUrl: e.currentTarget.value.trim() })} spellcheck="false" />
+      {/if}
       <span class="label">Web search</span>
       <div class="line">
         <Toggle checked={s.webSearch} label="Web search" onchange={(v) => change({ webSearch: v })} />
-        <span class="hint inline">Lets GLM look up new releases and lyrics.</span>
+        <span class="hint inline">{claude ? "Lets Claude search the web for new releases and lyrics." : "Lets the model look up new releases and lyrics."}</span>
       </div>
     </div>
     {#if keyError}<p class="error">{keyError}</p>{/if}

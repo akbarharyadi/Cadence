@@ -232,10 +232,15 @@ export interface SonicStatus {
 
 export type AiProvider = "off" | "cloud";
 
+/** Claude (Anthropic) or any OpenAI-compatible service (Z.ai GLM by default). */
+export type AiService = "claude" | "openai";
+
 export interface AiSettings {
   provider: AiProvider;
+  service: AiService;
   cloudUrl: string;
   cloudModel: string;
+  claudeModel: string;
   /** Let the model search the web (new music, lyrics). */
   webSearch: boolean;
 }
@@ -270,6 +275,67 @@ export interface NewSong {
   /** Album cover, or the artist's picture when `imageIsArtist`; empty if unknown. */
   image?: string;
   imageIsArtist?: boolean;
+  /** Discover: how close it is to what was asked for, 0–100. */
+  similarity?: number;
+  /** Discover: how well listeners and critics rate it, 0–100. */
+  rating?: number;
+  /** Discover: the song ("Artist - Title") or artist in the library it's most like. */
+  like?: string;
+}
+
+/** How often an artist, genre or song was played. */
+export interface PlayCount {
+  name: string;
+  plays: number;
+}
+
+/** What the listener plays: the last 30 days ("this month") and all time. */
+export interface ListeningProfile {
+  monthArtists: PlayCount[];
+  monthGenres: PlayCount[];
+  monthSongs: PlayCount[];
+  artists: PlayCount[];
+  genres: PlayCount[];
+}
+
+export type DiscoverBasis = "month" | "artist" | "genre" | "search";
+
+/** A song, artist or album in the listening stats. */
+export interface StatItem {
+  /** Track or album id; the name for an artist. */
+  id: string;
+  name: string;
+  sub: string;
+  /** Plays heard to the end. */
+  finished: number;
+  plays: number;
+  minutes: number;
+}
+
+export type StatsRange = "week" | "month" | "year" | "all";
+
+export interface ListeningStats {
+  range: StatsRange;
+  plays: number;
+  finished: number;
+  skipped: number;
+  minutes: number;
+  songs: number;
+  artists: number;
+  albums: number;
+  topSongs: StatItem[];
+  topArtists: StatItem[];
+  topAlbums: StatItem[];
+  /** Minutes per day (week, month) or per 30 days (year), oldest first. */
+  timeline: number[];
+}
+
+/** A Discover search and what it found. */
+export interface Recommendations {
+  basis: DiscoverBasis | "";
+  value: string;
+  at: number;
+  picks: NewSong[];
 }
 
 /** Stores that sell downloads (lossless where they can), searched for a song. */
@@ -277,6 +343,9 @@ export const STORES: { name: string; url: (q: string) => string }[] = [
   { name: "Qobuz", url: (q) => `https://www.qobuz.com/us-en/search?q=${q}` },
   { name: "Bandcamp", url: (q) => `https://bandcamp.com/search?q=${q}&item_type=t` },
   { name: "OTOTOY", url: (q) => `https://ototoy.jp/find/?q=${q}` },
+  { name: "mora", url: (q) => `https://mora.jp/search/top?keyWord=${q}` },
+  { name: "iTunes", url: (q) => `https://music.apple.com/search?term=${q}` },
+  { name: "Amazon", url: (q) => `https://www.amazon.com/s?k=${q}&i=digital-music` },
 ];
 
 /** Songs the AI DJ picked. */
@@ -296,6 +365,8 @@ export const api = {
   addFolders: (paths: string[]) => invoke<string[]>("add_folders", { paths }),
   removeFolder: (path: string) => invoke<string[]>("remove_folder", { path }),
   rescan: () => invoke<void>("rescan"),
+  /** The page is changing: background listening gives way for a moment. */
+  uiBusy: () => invoke<void>("ui_busy"),
   listDirs: (path: string | null, volumes?: { path: string; name: string }[]) =>
     invoke<DirEntry[]>("list_dirs", { path, volumes }),
   openFile: (path: string) => invoke<{ id: string; added: boolean }>("open_file", { path }),
@@ -364,6 +435,12 @@ export const api = {
   pasteLyrics: (trackId: string, text: string) => invoke<Lyrics>("paste_lyrics", { trackId, text }),
   hideLyrics: (trackId: string) => invoke<void>("hide_lyrics", { trackId }),
   aiDiscover: (refresh: boolean) => invoke<NewSong[]>("ai_discover", { refresh }),
+  listeningProfile: () => invoke<ListeningProfile>("listening_profile"),
+  listeningStats: (range: StatsRange) => invoke<ListeningStats>("listening_stats", { range }),
+  aiRecommended: () => invoke<Recommendations>("ai_recommended"),
+  aiRecommend: (basis: DiscoverBasis, value: string) => invoke<Recommendations>("ai_recommend", { basis, value }),
+  /** Today's picks for this month's listening: made once a day and kept. */
+  aiDailyPicks: (refresh: boolean) => invoke<Recommendations>("ai_daily_picks", { refresh }),
   aiFindLyrics: (trackId: string) => invoke<Lyrics>("ai_find_lyrics", { trackId }),
   aiTest: () => invoke<string>("ai_test"),
   aiPreview: (request: string) => invoke<string>("ai_preview", { request }),

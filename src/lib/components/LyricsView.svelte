@@ -56,6 +56,11 @@
 
   // Timing nudge for this song (lyrics made for another version can run early or late), kept
   // per song on this device. Positive: the lyrics come later.
+  /** Following the singer runs on the graphics card on Windows (DirectML), on the processor elsewhere. */
+  const voiceSpeed =
+    typeof navigator !== "undefined" && navigator.userAgent.includes("Windows")
+      ? "well under a minute per song with a graphics card, 2–3 minutes without"
+      : "about 2–3 minutes per song";
   const OFFSETS = "cadence-lyric-offsets";
   const readOffsets = (): Record<string, number> => {
     try {
@@ -397,10 +402,10 @@
       </div>
       <p class="hint">
         Cadence can listen to a song, separate the singing from the music, and place every word of the lyrics on the singing,
-        so the highlight moves with the singer, syllable by syllable. It runs on this computer, about a minute per song, and
-        each song is listened to only once.
+        so the highlight moves with the singer, syllable by syllable. It runs on this computer ({voiceSpeed}), and each song
+        is listened to only once.
       </p>
-      <p class="hint">It needs a one-time download of {Math.round(v.downloadSize / 1e6)} MB: ONNX Runtime, the HTDemucs vocal separator and Meta’s MMS aligner.</p>
+      <p class="hint">It needs a one-time download of {Math.round(v.downloadSize / 1e6)} MB: ONNX Runtime, the MDX-Net vocal separator and Meta’s MMS aligner.</p>
       {#if v.installing}
         <p class="hint">Downloading… {Math.round(v.installing[0] / 1e6)} of {Math.round(v.installing[1] / 1e6)} MB</p>
       {:else}

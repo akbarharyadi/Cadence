@@ -1,11 +1,19 @@
 mod ai;
+mod api;
 mod artists;
 mod autotag;
 mod catalog;
 mod covers;
+mod ctx;
+/// C ABI for the native Windows front end; see `ffi.rs`.
+#[cfg(feature = "ffi")]
+pub mod ffi;
+#[cfg(feature = "ffi")]
+mod update;
 pub mod audio;
 mod commands;
 pub mod history;
+mod hub;
 mod jobs;
 pub mod library;
 pub mod lyrics;
@@ -22,136 +30,23 @@ pub mod tagedit;
 mod tray;
 mod voice;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use crossbeam_channel::Receiver;
-use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 
-use audio::{Engine, Status};
-use history::{History, Tracker};
-use library::LibraryCache;
-use state::{AppState, Library, Settings, read_json};
+use ctx::{Ctx, Host};
 
-/// Every engine status update passes through here: to the UI, into the listening history,
-/// and to the Windows media overlay and tray.
-fn status_hub(
-    app: AppHandle,
-    state: Arc<AppState>,
-    rx: Receiver<Status>,
-    media: crossbeam_channel::Sender<media::Update>,
-    scrobbler: crossbeam_channel::Sender<scrobble::Job>,
-) {
-    let listen_for = |id: &str, at: u64| {
-        let lib = state.library.lock();
-        let t = &lib.snapshot.tracks[*lib.by_id.get(id)?];
-        Some(scrobble::Listen {
-            artist: t.artist.clone(),
-            title: t.title.clone(),
-            album: t.album.clone(),
-            duration: t.duration,
-            at,
-        })
-    };
-    let mut tracker = Tracker::default();
-    // The session is saved when the song, the queue or play/pause changes, and every 10 s while
-    // playing. Nothing is saved until there has been a queue, so the empty player of a fresh
-    // start never overwrites the session it's about to restore.
-    let mut had_queue = false;
-    let mut saved: (Option<usize>, usize, bool) = (None, 0, false);
-    let mut saved_at = std::time::Instant::now();
-    let mut saved_pos = 0.0f64;
-    let mut shown_track: Option<String> = None;
-    let mut shown_playing = false;
-    let mut shown_at = std::time::Instant::now();
-    // The windows get the queue (thousands of ids with a big library) only when it changed, not
-    // four times a second; they keep the last one. Each update becomes a script the window runs.
-    let mut sent_queue: Option<Vec<String>> = None;
-    for s in rx {
-        if let Ok(mut update) = serde_json::to_value(&s) {
-            if sent_queue.as_ref() == Some(&s.queue) {
-                if let Some(o) = update.as_object_mut() {
-                    o.remove("queue");
-                }
-            } else {
-                sent_queue = Some(s.queue.clone());
-            }
-            let _ = app.emit("player-status", update);
-        }
+/// The web UI: events go to its windows.
+struct TauriHost(AppHandle);
 
-        had_queue |= !s.queue.is_empty();
-        let key = (s.index, s.queue.len(), s.playing);
-        let moved = (s.position - saved_pos).abs() > 1.0; // e.g. a seek while paused
-        if had_queue && (key != saved || (moved && (!s.playing || saved_at.elapsed() > std::time::Duration::from_secs(10)))) {
-            state.save_session(&s);
-            saved = key;
-            saved_at = std::time::Instant::now();
-            saved_pos = s.position;
-        }
+impl Host for TauriHost {
+    fn emit(&self, event: &str, payload: serde_json::Value) {
+        let _ = self.0.emit(event, payload);
+    }
 
-        let album_of = |id: &str| {
-            let lib = state.library.lock();
-            lib.by_id
-                .get(id)
-                .map(|&i| lib.snapshot.tracks[i].album_id.clone())
-                .unwrap_or_default()
-        };
-        if let Some(event) = tracker.observe(&s, album_of) {
-            if scrobble::counts(event.listened, event.duration) {
-                if let Some(l) = listen_for(&event.track_id, event.at) {
-                    let _ = scrobbler.send(scrobble::Job::Listened(l));
-                }
-            }
-            history::push(&mut state.history.lock(), event);
-            state.save_history();
-            let _ = app.emit("history-changed", ());
-        }
-
-        let current = s.index.and_then(|i| s.queue.get(i)).cloned();
-        if current != shown_track {
-            let now_playing = current.as_ref().and_then(|id| {
-                let lib = state.library.lock();
-                let t = &lib.snapshot.tracks[*lib.by_id.get(id)?];
-                let art = lib
-                    .snapshot
-                    .albums
-                    .iter()
-                    .find(|a| a.id == t.album_id)
-                    .and_then(|a| a.art.clone());
-                Some(media::NowPlaying {
-                    title: t.title.clone(),
-                    artist: t.artist.clone(),
-                    album: t.album.clone(),
-                    cover: art.map(|p| format!("file://{p}")),
-                    duration: t.duration,
-                })
-            });
-            #[cfg(desktop)]
-            tray::set_tooltip(
-                &app,
-                now_playing
-                    .as_ref()
-                    .map(|n| format!("{} — {}", n.title, n.artist)),
-            );
-            let _ = media.send(media::Update::Track(now_playing));
-            if let Some(l) = current.as_deref().and_then(|id| listen_for(id, 0)) {
-                if s.playing {
-                    let _ = scrobbler.send(scrobble::Job::NowPlaying(l));
-                }
-            }
-            autotag::on_track_change(&app, shown_track.as_deref(), current.as_deref());
-            shown_track = current;
-            shown_at = std::time::Instant::now() - std::time::Duration::from_secs(60);
-        }
-        // Windows advances the overlay's timeline itself; refresh on play/pause and every few seconds.
-        if s.playing != shown_playing || shown_at.elapsed() > std::time::Duration::from_secs(5) {
-            let _ = media.send(media::Update::Playback {
-                playing: s.playing,
-                position: s.position,
-            });
-            shown_playing = s.playing;
-            shown_at = std::time::Instant::now();
-        }
+    fn cache_dir(&self) -> PathBuf {
+        self.0.path().app_cache_dir().unwrap_or_else(|_| std::env::temp_dir())
     }
 }
 
@@ -181,54 +76,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let setup_started = std::time::Instant::now();
             let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(data_dir.join("art"))?;
             #[cfg(target_os = "android")]
             secrets::init(&data_dir);
-            let settings: Settings = read_json(&data_dir.join("settings.json"));
-            let cache: LibraryCache = read_json(&data_dir.join("library.json"));
-            let history: History = read_json(&data_dir.join("history.json"));
-            let playlists: playlists::Playlists = read_json(&data_dir.join("playlists.json"));
-            let sonic = read_json::<sonic::Store>(&data_dir.join("sonic.json")).checked();
-            // Song info edited while its song played, if Cadence closed before it ended
-            // (written now, before the last session's song is opened again).
-            tagedit::write_leftovers(&data_dir);
-
-            let (status_tx, status_rx) = crossbeam_channel::unbounded::<Status>();
-            let engine = Engine::start(
-                settings.volume,
-                settings.dsp.clone(),
-                settings.repeat,
-                move |s| {
-                    let _ = status_tx.send(s.clone());
-                },
-            );
-
-            let read = setup_started.elapsed();
-            // Show the cached library immediately; a background rescan picks up changes.
-            let mut tracks = cache.tracks;
-            let albums = library::build_albums(&mut tracks, &data_dir.join("art"));
-            let built = setup_started.elapsed();
-            let mut library = Library::default();
-            library.set_tracks(tracks, albums);
-            let has_folders = !settings.folders.is_empty();
-            let state = Arc::new(AppState {
-                engine,
-                history: Mutex::new(history),
-                playlists: Mutex::new(playlists),
-                library: Mutex::new(library),
-                sonic: Mutex::new(sonic),
-                settings: Mutex::new(settings),
-                data_dir,
-                watcher: Mutex::new(None),
-            });
-            app.manage(state.clone());
-            let local_dir = app.path().app_local_data_dir().unwrap_or_else(|_| state.data_dir.clone());
-            app.manage(Arc::new(voice::Voice::new(&state.data_dir, &local_dir)));
-            voice::resume_batch(app.handle(), commands::resolve_lyrics);
-            // Carry on where the last session left off (paused).
-            state.restore_session();
+            let local_dir = app.path().app_local_data_dir().unwrap_or_else(|_| data_dir.clone());
+            let (ctx, status) = hub::open(data_dir, &local_dir, Arc::new(TauriHost(app.handle().clone())));
+            app.manage(ctx.clone());
 
             let main = app.get_webview_window("main").expect("main window");
             // Windows' media overlay is tied to the window; macOS and Linux don't need it.
@@ -239,34 +92,23 @@ pub fn run() {
                 let _ = &main;
                 0isize
             };
-            let media_state = state.clone();
-            let media = media::start(hwnd, move |cmd| media_state.engine.send(cmd));
-            let scrobbler = scrobble::start(state.data_dir.join("scrobble-queue.json"));
-            let _ = scrobbler.send(scrobble::Job::Flush);
             let handle = app.handle().clone();
-            std::thread::Builder::new()
-                .name("cadence-status".into())
-                .spawn(move || status_hub(handle, state, status_rx, media, scrobbler))?;
+            hub::start_status_hub(ctx.clone(), status, hwnd, move |song| {
+                #[cfg(desktop)]
+                tray::set_tooltip(&handle, song);
+                #[cfg(mobile)]
+                let _ = (&handle, song);
+            });
 
             #[cfg(desktop)]
             tray::create(app.handle())?;
             // On a phone the music lives in the shared Music folder; start with it.
             #[cfg(target_os = "android")]
-            let has_folders = has_folders || {
-                let music = "/storage/emulated/0/Music".to_string();
-                let st = app.state::<Arc<AppState>>();
-                st.settings.lock().folders.push(music);
-                st.save_settings();
-                true
-            };
-            if has_folders {
-                // Watching lists the same folders the scan does: once it's done, not alongside.
-                jobs::start_scan_then_watch(app.handle().clone());
+            if ctx.state.settings.lock().folders.is_empty() {
+                ctx.state.settings.lock().folders.push("/storage/emulated/0/Music".to_string());
+                ctx.state.save_settings();
             }
-            log::info!(
-                "started in {:?} (saved data read by {read:?}, albums built by {built:?})",
-                setup_started.elapsed()
-            );
+            hub::start_background(&ctx);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -274,8 +116,8 @@ pub fn run() {
             #[cfg(desktop)]
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    let state = window.app_handle().state::<Arc<AppState>>();
-                    if state.settings.lock().close_to_tray {
+                    let ctx = window.app_handle().state::<Ctx>();
+                    if ctx.state.settings.lock().close_to_tray {
                         api.prevent_close();
                         let _ = window.hide();
                     }
@@ -347,6 +189,12 @@ pub fn run() {
             commands::paste_lyrics,
             commands::hide_lyrics,
             commands::ai_discover,
+            commands::listening_profile,
+            commands::ui_busy,
+            commands::listening_stats,
+            commands::ai_recommended,
+            commands::ai_daily_picks,
+            commands::ai_recommend,
             commands::ai_find_lyrics,
             commands::ai_test,
             commands::ai_preview,
@@ -364,7 +212,7 @@ pub fn run() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
                 // Make sure the listening history is on disk.
-                app.state::<Arc<AppState>>().save_history();
+                app.state::<Ctx>().state.save_history();
             }
         });
 }

@@ -4,6 +4,7 @@
   import Carousel from "#lib/components/Carousel.svelte";
   import Icon from "#lib/components/Icon.svelte";
   import QualityBadge from "#lib/components/QualityBadge.svelte";
+  import { eqBars } from "#lib/eq.js";
   import { app, shuffled } from "#lib/store.svelte.js";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -184,6 +185,12 @@
     </div>
   </header>
 
+  <!-- Phones have no sidebar: Discover and Your Stats from here. -->
+  <nav class="shortcuts" aria-label="More">
+    <button class="shortcut" onclick={() => app.go({ name: "discover" })}><Icon name="sparkle" size={14} />Discover</button>
+    <button class="shortcut" onclick={() => app.go({ name: "stats" })}><Icon name="gauge" size={14} />Your Stats</button>
+  </nav>
+
   {#if app.aiReady && (djOpen || asking || answer || askError)}
     <section class="dj">
       <form class="ask" onsubmit={(e) => { e.preventDefault(); ask(); }}>
@@ -250,7 +257,7 @@
             <span class="q-title">{a.title}</span>
           </button>
           <button class="q-play" onclick={() => (playing ? app.togglePlay() : app.playAlbum(a))} aria-label="{playing && app.status?.playing ? 'Pause' : 'Play'} {a.title}">
-            {#if playing && app.status?.playing}<span class="bars" aria-hidden="true"><i></i><i></i><i></i></span>{:else}<Icon name="play" size={14} />{/if}
+            {#if playing && app.status?.playing}<span class="bars" aria-hidden="true" use:eqBars><i></i><i></i><i></i></span>{:else}<Icon name="play" size={14} />{/if}
           </button>
         </div>
       {/each}
@@ -311,6 +318,7 @@
     <Carousel title="New music for you">
       {#snippet actions()}
         <button class="link" onclick={() => app.loadAiNew(true)} disabled={app.aiNewState === "loading"}>{app.aiNewState === "loading" ? "Searching…" : "Find more"}</button>
+        <button class="link" onclick={() => app.go({ name: "discover" })}>Discover</button>
       {/snippet}
       {#each app.aiNew as d (d.artist + d.title)}
         {@render newCard(d)}
@@ -362,7 +370,7 @@
   {/if}
 
   <p class="stats">
-    {app.tracks.length} songs, {app.albums.length} albums, {formatDuration(totalTime)} of music.
+    {app.tracks.length} {app.tracks.length === 1 ? "song" : "songs"}, {app.albums.length} {app.albums.length === 1 ? "album" : "albums"}, {formatDuration(totalTime)} of music.
     {#if losslessShare === 1}All of it lossless.{:else if losslessShare > 0}{Math.round(losslessShare * 100)}% lossless.{/if}
   </p>
 </div>
@@ -405,7 +413,8 @@
   /* Quick picks: two or three columns of compact tiles. */
   .quick {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    /* Three across on a usual window; more on a wide screen rather than three stretched ones. */
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: 8px;
     margin-bottom: 36px;
   }
@@ -483,28 +492,14 @@
     height: 12px;
   }
   /* Scaled, not resized: a height animation lays out the page on every frame, and the garbage that
-     leaves (up to 160 times a second) grew the window past a gigabyte. */
+     leaves (up to 160 times a second) grew the window past a gigabyte. They bounce by eqBars. */
   .bars i {
     width: 3px;
     align-self: stretch;
     background: currentColor;
     border-radius: 1px;
     transform-origin: bottom;
-    animation: bar 0.9s ease-in-out infinite alternate;
-  }
-  .bars i:nth-child(2) {
-    animation-delay: -0.3s;
-  }
-  .bars i:nth-child(3) {
-    animation-delay: -0.6s;
-  }
-  @keyframes bar {
-    from {
-      transform: scaleY(0.25);
-    }
-    to {
-      transform: scaleY(1);
-    }
+    transform: scaleY(0.6);
   }
 
   /* Top picks: big cards, the panel below the cover takes the album's colour. */
@@ -899,6 +894,33 @@
     line-clamp: 2;
     -webkit-box-orient: vertical;
     overflow: hidden;
+  }
+  .shortcuts {
+    display: none;
+    gap: 8px;
+    margin: -8px 0 22px;
+  }
+  @media (max-width: 720px) {
+    .shortcuts {
+      display: flex;
+    }
+  }
+  :global(html.phone) .shortcuts {
+    display: flex;
+  }
+  .shortcut {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: 999px;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--hover);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .shortcut :global(svg) {
+    color: var(--accent);
   }
   .stores {
     display: flex;

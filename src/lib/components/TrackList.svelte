@@ -3,6 +3,7 @@
   import { app, type MenuItem } from "#lib/store.svelte.js";
   import { untrack } from "svelte";
   import Icon from "./Icon.svelte";
+  import { eqBars } from "#lib/eq.js";
 
   let {
     tracks,
@@ -107,10 +108,10 @@
             {#if app.albumById.get(t.albumId)?.artSmall}
               <img src={artUrl(app.albumById.get(t.albumId)?.artSmall)} alt="" loading="lazy" />
             {/if}
-            {#if isCurrent(t) && app.status?.playing}<div class="eq-anim overlay"><i></i><i></i><i></i></div>{/if}
+            {#if isCurrent(t) && app.status?.playing}<div class="eq-anim overlay" use:eqBars><i></i><i></i><i></i></div>{/if}
           </div>
         {:else if isCurrent(t) && app.status?.playing}
-          <div class="eq-anim"><i></i><i></i><i></i></div>
+          <div class="eq-anim" use:eqBars><i></i><i></i><i></i></div>
         {:else}
           <span class="num">{numbered ? (t.trackNo ?? i + 1) : i + 1}</span>
         {/if}
@@ -325,32 +326,17 @@
     padding: 12px 11px;
     background: rgba(0, 0, 0, 0.45);
   }
-  /* Scaled, not resized, so the page isn't laid out again on every frame. */
+  /* Scaled, not resized, so the page isn't laid out again; they bounce by eqBars. */
   .eq-anim i {
     width: 3px;
     align-self: stretch;
     background: var(--accent);
     border-radius: 1px;
     transform-origin: bottom;
-    animation: bounce 0.9s ease-in-out infinite;
+    transform: scaleY(0.6);
   }
   .eq-anim.overlay i {
     background: white;
-  }
-  .eq-anim i:nth-child(2) {
-    animation-delay: -0.3s;
-  }
-  .eq-anim i:nth-child(3) {
-    animation-delay: -0.6s;
-  }
-  @keyframes bounce {
-    0%,
-    100% {
-      transform: scaleY(0.3);
-    }
-    50% {
-      transform: scaleY(1);
-    }
   }
   /* Phones: the album column would squeeze the titles; it's still one tap away in the menu. */
   @media (max-width: 720px) {

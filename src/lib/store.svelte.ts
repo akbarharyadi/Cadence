@@ -1,9 +1,10 @@
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { flushSync } from "svelte";
+import { eqSync } from "./eq";
 
 /** Top-level places (tabs and sidebar): switching between them crossfades instead of sliding. */
-const TOP_LEVEL = new Set(["home", "albums", "artists", "songs", "recent", "search", "sound", "settings"]);
+const TOP_LEVEL = new Set(["home", "discover", "stats", "albums", "artists", "songs", "recent", "search", "sound", "settings"]);
 
 let transitions = 0;
 
@@ -78,6 +79,8 @@ export type View =
   | { name: "sound" }
   | { name: "playlist"; id: string }
   | { name: "similar"; id: string }
+  | { name: "discover" }
+  | { name: "stats" }
   | { name: "settings" };
 
 export interface MenuItem {
@@ -129,6 +132,15 @@ class AppState {
   aiMixesState = $state<"idle" | "loading" | "error">("idle");
   /** Today's new-music picks (songs not in the library). */
   aiNew = $state<import("./api").NewSong[]>([]);
+  /** Discover: the last search and what it found, and what the listener plays (for its choices). */
+  discover = $state<import("./api").Recommendations | null>(null);
+  /** Today's picks (This month), made once a day. */
+  daily = $state<import("./api").Recommendations | null>(null);
+  dailyState = $state<"idle" | "loading" | "error">("idle");
+  dailyError = $state("");
+  discoverState = $state<"idle" | "loading" | "error">("idle");
+  discoverError = $state("");
+  profile = $state<import("./api").ListeningProfile | null>(null);
   aiNewState = $state<"idle" | "loading" | "error">("idle");
   aiNewError = $state("");
   aiMixesError = $state("");
@@ -377,6 +389,7 @@ class AppState {
     if (albumId && this.sessionAlbums[0] !== albumId) this.sessionAlbums = [albumId, ...this.sessionAlbums.filter((a) => a !== albumId)].slice(0, 20);
     this.posBase = { pos: s.position, at: performance.now(), playing: s.playing };
     this.position = this.exactPosition();
+    eqSync();
     if (s.error && s.error !== this.lastError) this.showToast(s.error);
     this.lastError = s.error;
   }
@@ -401,6 +414,44 @@ class AppState {
     } catch (e) {
       this.aiMixesError = String(e);
       this.aiMixesState = "error";
+    }
+  }
+
+  /** Discover's page opened: the listener's top artists and genres, and the last search. */
+  async loadDiscover() {
+    this.profile = await api.listeningProfile();
+    if (!this.discover) {
+      const last = await api.aiRecommended();
+      if (last.picks.length) this.discover = last;
+    }
+  }
+
+  /** Today's picks: from the day's cache, or found now (once a day; `refresh` for new ones). */
+  async loadDaily(refresh: boolean) {
+    if (!this.aiReady || this.dailyState === "loading") return;
+    this.dailyState = "loading";
+    this.dailyError = "";
+    try {
+      this.daily = await api.aiDailyPicks(refresh);
+      this.aiNew = this.daily.picks;
+      this.dailyState = "idle";
+    } catch (e) {
+      this.dailyError = String(e);
+      this.dailyState = "error";
+    }
+  }
+
+  /** Discover: new songs for this month's listening, an artist, a genre or a request in words. */
+  async recommend(basis: import("./api").DiscoverBasis, value: string) {
+    if (!this.aiReady || this.discoverState === "loading") return;
+    this.discoverState = "loading";
+    this.discoverError = "";
+    try {
+      this.discover = await api.aiRecommend(basis, value);
+      this.discoverState = "idle";
+    } catch (e) {
+      this.discoverError = String(e);
+      this.discoverState = "error";
     }
   }
 
@@ -442,6 +493,8 @@ class AppState {
   }
 
   go(view: View) {
+    // Background listening (lyrics follow the singer) gives way while the page changes.
+    api.uiBusy().catch(() => {});
     // Typing in the search box updates the same page: no animation for that.
     if (view.name === "search" && this.view.name === "search") {
       this.view = view;

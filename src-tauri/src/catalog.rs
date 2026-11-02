@@ -9,12 +9,13 @@ use serde_json::Value;
 use crate::ai::Discovery;
 use crate::library::Track;
 
-fn client() -> reqwest::blocking::Client {
+fn client() -> Option<reqwest::blocking::Client> {
     crate::net::builder()
         .timeout(Duration::from_secs(10))
         .user_agent(concat!("Cadence/", env!("CARGO_PKG_VERSION")))
         .build()
-        .expect("http client")
+        .inspect_err(|e| log::warn!("no HTTP client for the catalogue: {e}"))
+        .ok()
 }
 
 /// Lower-case letters and digits only, so "Centuries!" and "centuries" compare equal.
@@ -57,6 +58,16 @@ pub fn owned(d: &Discovery, library: &[Track]) -> bool {
         })
 }
 
+/// The library has the album this suggestion is on (same album title, a shared artist): the
+/// listener has it, or has that release, so it isn't new to them.
+pub fn album_owned(d: &Discovery, library: &[Track]) -> bool {
+    let album = core_title(&d.album);
+    album.len() >= 2
+        && library.iter().any(|t| {
+            core_title(&t.album) == album && (same_artist(&t.album_artist, &d.artist) || same_artist(&t.artist, &d.artist))
+        })
+}
+
 /// A song with this title is in the library, but by another artist. The AI sometimes credits a
 /// song to the wrong artist ("Anytime Anywhere" by Aimer instead of milet); such a suggestion is
 /// only kept if the catalogue confirms that artist really has a song of that name.
@@ -83,7 +94,7 @@ fn enrich(http: &reqwest::blocking::Client, d: &mut Discovery) -> bool {
         });
         if let Some(h) = hit {
             d.image = h["album"]["cover_medium"].as_str().unwrap_or("").to_string();
-            d.album = h["album"]["title"].as_str().unwrap_or("").to_string();
+            d.album = album_name(h["album"]["title"].as_str());
             if d.image.is_empty() {
                 d.image = h["artist"]["picture_medium"].as_str().unwrap_or("").to_string();
                 d.image_is_artist = true;
@@ -104,22 +115,38 @@ fn enrich(http: &reqwest::blocking::Client, d: &mut Discovery) -> bool {
         });
         if let Some(h) = hit {
             d.image = h["artworkUrl100"].as_str().unwrap_or("").replace("100x100bb", "300x300bb");
-            d.album = h["collectionName"].as_str().unwrap_or("").to_string();
+            d.album = album_name(h["collectionName"].as_str());
             return true;
         }
     }
     false
 }
 
+/// The catalogue's album name, or nothing for its placeholders (Deezer lists some songs on "unknown").
+fn album_name(name: Option<&str>) -> String {
+    let name = name.unwrap_or("").trim();
+    match name.to_lowercase().as_str() {
+        "unknown" | "unknown album" | "n/a" | "-" => String::new(),
+        _ => name.to_string(),
+    }
+}
+
 /// Drops suggestions the listener already owns and ones the catalogue can't find; adds pictures.
 /// Without internet (no answers at all) the suggestions are kept as they are.
 pub fn check(picks: Vec<Discovery>, library: &[Track]) -> Vec<Discovery> {
-    let http = client();
+    let Some(http) = client() else {
+        return picks.into_iter().filter(|d| !owned(d, library)).collect();
+    };
     let mut out = Vec::new();
     for mut d in picks.into_iter().filter(|d| !owned(d, library)) {
         // Checked before, unless it's a title the listener owns by another artist (see title_clash).
         if (d.checked && !title_clash(&d, library)) || enrich(&http, &mut d) {
             d.checked = true;
+            // Known now (from the catalogue): on an album the listener already has.
+            if album_owned(&d, library) {
+                log::info!("dropping suggestion from an album in the library: {} - {} ({})", d.artist, d.title, d.album);
+                continue;
+            }
             out.push(d);
         } else {
             log::info!("dropping suggestion not found in the catalogue: {} - {}", d.artist, d.title);
@@ -156,6 +183,26 @@ mod tests {
         assert!(owned(&pick("Aimer", "Brave Shine"), &lib));
         assert!(!owned(&pick("Fall Out Boy", "Immortals"), &lib));
         assert!(!owned(&pick("Someone Else", "Centuries"), &lib));
+    }
+
+    #[test]
+    fn skips_songs_from_albums_in_the_library() {
+        let mut t = track("Something Else", "Aimer");
+        t.album = "Walpurgis".into();
+        t.album_artist = "Aimer".into();
+        let lib = vec![t];
+        let mut d = pick("Aimer", "Brave Shine");
+        d.album = "Walpurgis (Deluxe Edition)".into();
+        assert!(album_owned(&d, &lib));
+        d.album = "Sun Dance".into();
+        assert!(!album_owned(&d, &lib));
+    }
+
+    #[test]
+    fn placeholder_album_names_are_dropped() {
+        assert_eq!(album_name(Some(" Unknown ")), "");
+        assert_eq!(album_name(None), "");
+        assert_eq!(album_name(Some("From Zero")), "From Zero");
     }
 
     #[test]

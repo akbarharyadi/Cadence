@@ -3,7 +3,8 @@
 //! The result is saved per song, so a song is only ever listened to once.
 //!
 //! The models run one after the other and are let go right after, so memory goes back to normal
-//! when listening is done (the separator needs about 1.1 GB while it works on a piece).
+//! when listening is done (the separator needs about 1.1 GB while it works on a piece, on the
+//! processor; on the graphics card about 2 GB of its memory and 0.6 GB here).
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -38,6 +39,15 @@ const CONTEXT: usize = 2 * ASR_RATE as usize;
 
 /// Songs longer than this aren't listened to (a whole decoded song is held in memory).
 pub const LONGEST_SECS: f64 = 15.0 * 60.0;
+
+/// On the graphics card, each piece is followed by a rest as long as the card worked on it, so it
+/// stays about half free for the screen, videos and games while a song (or all of them) is
+/// listened to. The processor already works at background priority with 1–2 threads.
+fn rest_after(gpu: bool, worked: std::time::Duration) {
+    if gpu {
+        std::thread::sleep(worked);
+    }
+}
 
 /// How many steps listening to a song of this length takes (for progress).
 pub fn steps(seconds: f64) -> usize {
@@ -190,7 +200,7 @@ impl Stft {
 }
 
 /// The vocals of a whole song (interleaved stereo at 44.1 kHz in), as mono at 44.1 kHz.
-fn separate(model: &mut Session, mix: &[f32], mut step: impl FnMut() -> bool) -> Result<Vec<f32>> {
+fn separate(model: &mut Session, gpu: bool, mix: &[f32], mut step: impl FnMut() -> bool) -> Result<Vec<f32>> {
     let n = mix.len() / 2;
     let mut vocals = vec![0f32; n];
     let mut stft = Stft::new();
@@ -210,9 +220,11 @@ fn separate(model: &mut Session, mix: &[f32], mut step: impl FnMut() -> bool) ->
             let (re, rest) = spec[2 * c * plane..].split_at_mut(plane);
             stft.forward(&piece[c], re, &mut rest[..plane])?;
         }
+        let started = std::time::Instant::now();
         let outputs = model.run(ort::inputs![
             "input" => TensorRef::from_array_view(([1usize, 4, BINS, FRAMES], &spec[..]))?,
         ])?;
+        let worked = started.elapsed();
         let (_, out) = outputs["output"].try_extract_tensor::<f32>()?;
         if out.len() < 4 * plane {
             bail!("unexpected separation output");
@@ -227,6 +239,7 @@ fn separate(model: &mut Session, mix: &[f32], mut step: impl FnMut() -> bool) ->
         }
         vocals[start..start + len].copy_from_slice(&mono[..len]);
         drop(outputs);
+        rest_after(gpu, worked);
         if !step() {
             bail!("stopped");
         }
@@ -236,10 +249,14 @@ fn separate(model: &mut Session, mix: &[f32], mut step: impl FnMut() -> bool) ->
 }
 
 /// Letter log-probabilities for the vocals (mono 44.1 kHz).
-fn hear(model: &mut Session, vocals: &[f32], mut step: impl FnMut() -> bool) -> Result<Emissions> {
+fn hear(model: &mut Session, gpu: bool, vocals: &[f32], mut step: impl FnMut() -> bool) -> Result<Emissions> {
     let mut audio = Vec::with_capacity(vocals.len() * 4 / 11 + 1024);
     let mut r = Resampler::new(SEP_RATE, ASR_RATE, 1)?;
-    r.push(vocals, &mut audio)?;
+    // A piece at a time: the resampler moves what's left of its input after every 1024 samples,
+    // so the whole song at once took 7–12 s.
+    for piece in vocals.chunks(1 << 16) {
+        r.push(piece, &mut audio)?;
+    }
     r.flush(&mut audio)?;
     let v = VOCAB.len();
     let mut logp = Vec::with_capacity(audio.len() / ASR_HOP * v);
@@ -248,9 +265,11 @@ fn hear(model: &mut Session, vocals: &[f32], mut step: impl FnMut() -> bool) -> 
     while start < audio.len() {
         let a = start.saturating_sub(CONTEXT);
         let b = (start + WINDOW + CONTEXT).min(audio.len());
+        let started = std::time::Instant::now();
         let outputs = model.run(ort::inputs![
             "audio" => TensorRef::from_array_view(([1usize, b - a], &audio[a..b]))?,
         ])?;
+        let worked = started.elapsed();
         let (shape, out) = outputs["logprobs"].try_extract_tensor::<f32>()?;
         if shape.len() != 3 || shape[2] as usize != v {
             bail!("unexpected letter model output {shape:?}");
@@ -263,6 +282,7 @@ fn hear(model: &mut Session, vocals: &[f32], mut step: impl FnMut() -> bool) -> 
             frames += 1;
         }
         drop(outputs);
+        rest_after(gpu, worked);
         if !step() {
             bail!("stopped");
         }
@@ -272,17 +292,21 @@ fn hear(model: &mut Session, vocals: &[f32], mut step: impl FnMut() -> bool) -> 
 }
 
 /// Listens to a whole song: `open(true)` gives the separator, `open(false)` the letter model,
-/// each loaded only while it's needed. `step` is called after each piece of work; returning false
-/// stops.
-pub fn listen(path: &Path, mut open: impl FnMut(bool) -> Result<Session>, mut step: impl FnMut() -> bool) -> Result<Emissions> {
+/// each loaded only while it's needed, and whether it's on the graphics card. `step` is called
+/// after each piece of work; returning false stops.
+pub fn listen(
+    path: &Path,
+    mut open: impl FnMut(bool) -> Result<(Session, bool)>,
+    mut step: impl FnMut() -> bool,
+) -> Result<Emissions> {
     let mix = decode(path).context("couldn't read the song")?;
     let vocals = {
-        let mut separator = open(true)?;
-        separate(&mut separator, &mix, &mut step)?
+        let (mut separator, gpu) = open(true)?;
+        separate(&mut separator, gpu, &mix, &mut step)?
     };
     drop(mix);
-    let mut letters = open(false)?;
-    hear(&mut letters, &vocals, &mut step)
+    let (mut letters, gpu) = open(false)?;
+    hear(&mut letters, gpu, &vocals, &mut step)
 }
 
 // ---------- saved listening ----------

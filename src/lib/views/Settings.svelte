@@ -66,6 +66,11 @@
     if (m < 60) return `${m} min`;
     return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
   }
+  /** Following the singer runs on the graphics card on Windows (DirectML), on the processor elsewhere. */
+  const voiceSpeed =
+    typeof navigator !== "undefined" && navigator.userAgent.includes("Windows")
+      ? "well under a minute per song with a graphics card (2–3 minutes without)"
+      : "about 2–3 minutes per song";
   const isSong = (path: string) => /\.(flac|alac|wav|aiff?|mp3|m4a|aac|ogg|opus)$/i.test(path);
 
   async function remove(path: string) {
@@ -92,7 +97,7 @@
     <div class="title-row">
       <div>
         <h2 class="section-title">Music folders</h2>
-        <p class="desc">Cadence finds FLAC, ALAC, WAV, AIFF, MP3, AAC and Ogg files in these folders. You can also drop folders onto the window.</p>
+        <p class="desc">Cadence finds FLAC, ALAC, WAV, AIFF, MP3, AAC and Ogg files in these folders.{droid ? "" : " You can also drop folders onto the window."}</p>
       </div>
       <button class="pill" onclick={addFolder}><Icon name="plus" size={15} />Add folder</button>
     </div>
@@ -118,7 +123,7 @@
 
   <section>
     <h2 class="section-title">Sound analysis</h2>
-    <p class="desc">Cadence listens to each song once (tempo, timbre, loudness and harmony) to make mixes by sound, sound radio and “sounds like” lists. It all happens on this computer.</p>
+    <p class="desc">Cadence listens to each song once (tempo, timbre, loudness and harmony) to make mixes by sound, sound radio and “sounds like” lists. It all happens on this {droid ? "phone" : "computer"}.</p>
     {#if app.sonic}
       {@const s = app.sonic}
       <div class="meter" role="progressbar" aria-valuemin={0} aria-valuemax={s.total} aria-valuenow={s.analyzed} aria-label="Songs analysed">
@@ -207,6 +212,7 @@
     </section>
   {/if}
 
+  {#if !droid}
   <section>
     <div class="title-row">
       <div>
@@ -216,6 +222,7 @@
       <Toggle checked={closeToTray} label="Keep playing in the tray" onchange={(v) => { closeToTray = v; api.setCloseToTray(v); }} />
     </div>
   </section>
+  {/if}
 
   <section>
     <div class="title-row">
@@ -272,7 +279,7 @@
               {#if b && b.total === 0}Every song with lyrics already follows the singer.
               {:else if b && b.done >= b.total}Done: {b.done - b.failed} songs follow the singer{b.failed ? `; ${b.failed} couldn’t be matched` : ""}.
               {:else if b}Stopped after {b.done} of {b.total} songs. Start again to carry on.
-              {:else}Most-played first, about 1–2 minutes per song. You can keep listening.{/if}
+              {:else}Most-played first, {voiceSpeed}. You can keep listening.{/if}
             </p>
           </div>
         {/if}
@@ -285,7 +292,7 @@
           <button class="pill" onclick={async () => { await api.voiceInstall(); app.voice = await api.voiceStatus(); }}>
             <Icon name="download" size={15} />Download voice models ({Math.round(v.downloadSize / 1e6)} MB)
           </button>
-          <p class="hint">ONNX Runtime, the HTDemucs vocal separator and Meta’s MMS aligner, needed once.</p>
+          <p class="hint">ONNX Runtime, the MDX-Net vocal separator and Meta’s MMS aligner, needed once.</p>
         </div>
         {#if v.error}<p class="error">{v.error}</p>{/if}
       {/if}

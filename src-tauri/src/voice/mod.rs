@@ -22,11 +22,11 @@ mod models;
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use crate::ctx::Ctx;
 
 use crate::library::Track;
 use crate::lyrics::{Line, Lyrics};
@@ -112,6 +112,9 @@ pub struct Voice {
     batch_ids: Mutex<HashSet<String>>,
     /// Stop the song being listened to (the batch was stopped).
     stop: AtomicBool,
+    /// The app is being used (a page opening): listening waits until then (ms since the epoch),
+    /// so the graphics card and processor are the app's while it changes pages.
+    busy_until: AtomicU64,
 }
 
 fn text_of(l: &Lyrics) -> Vec<String> {
@@ -126,7 +129,25 @@ fn text_hash(texts: &[String]) -> String {
     blake3::hash(texts.join("\n").as_bytes()).to_hex()[..16].to_string()
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
 impl Voice {
+    /// The app is being used: hold off for a moment (see `busy_until`).
+    pub fn ui_busy(&self, ms: u64) {
+        self.busy_until.fetch_max(now_ms() + ms, Ordering::Relaxed);
+    }
+
+    /// Between two steps of listening: wait while the app is busy (at most a few seconds at a
+    /// time, and not when stopping).
+    fn wait_while_busy(&self) {
+        let start = now_ms();
+        while now_ms() < self.busy_until.load(Ordering::Relaxed) && !self.stop.load(Ordering::Relaxed) && now_ms() - start < 5_000 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
     pub fn new(data_dir: &Path, local_dir: &Path) -> Self {
         let models_dir = local_dir.join("models");
         #[cfg(desktop)]
@@ -144,6 +165,7 @@ impl Voice {
             batch: Mutex::new(None),
             batch_ids: Mutex::new(HashSet::new()),
             stop: AtomicBool::new(false),
+            busy_until: AtomicU64::new(0),
         }
     }
 
@@ -175,7 +197,7 @@ impl Voice {
 
     pub fn status(&self, auto: bool) -> Status {
         #[cfg(desktop)]
-        let (supported, download_size) = (models::RUNTIME.is_some(), models::download_size());
+        let (supported, download_size) = (models::RUNTIME.is_some(), models::download_size(&self.models_dir));
         #[cfg(not(desktop))]
         let (supported, download_size) = (false, 0);
         Status {
@@ -279,8 +301,8 @@ impl Voice {
 pub type Resolve = fn(&AppState, &Track) -> Lyrics;
 
 /// Asks for a song to be listened to (first in line). Does nothing if it's already been.
-pub fn request(app: &AppHandle, track_id: String, resolve: Resolve) {
-    let voice = app.state::<Arc<Voice>>().inner().clone();
+pub fn request(ctx: &Ctx, track_id: String, resolve: Resolve) {
+    let voice = ctx.voice.clone();
     {
         let mut q = voice.queue.lock();
         q.retain(|id| *id != track_id);
@@ -291,18 +313,18 @@ pub fn request(app: &AppHandle, track_id: String, resolve: Resolve) {
     }
     voice.wake.notify_one();
     #[cfg(desktop)]
-    start_worker(app, voice, resolve);
+    start_worker(ctx, voice, resolve);
     #[cfg(not(desktop))]
     let _ = resolve;
 }
 
-fn emit_batch(app: &AppHandle, voice: &Voice) {
-    let _ = app.emit("voice-batch", voice.batch.lock().clone());
+fn emit_batch(ctx: &Ctx, voice: &Voice) {
+    ctx.emit("voice-batch", voice.batch.lock().clone());
 }
 
 /// Remembers whether a batch is running, so it carries on after Cadence restarts.
-fn remember_batch(app: &AppHandle, running: bool) {
-    let state = app.state::<Arc<AppState>>();
+fn remember_batch(ctx: &Ctx, running: bool) {
+    let state = &ctx.state;
     let changed = {
         let mut s = state.settings.lock();
         std::mem::replace(&mut s.voice_batch, running) != running
@@ -314,23 +336,23 @@ fn remember_batch(app: &AppHandle, running: bool) {
 
 /// Carries on with a batch that was running when Cadence last closed (a minute after start, so
 /// opening Cadence and its library scan come first).
-pub fn resume_batch(app: &AppHandle, resolve: Resolve) {
-    if !app.state::<Arc<AppState>>().settings.lock().voice_batch {
+pub fn resume_batch(ctx: &Ctx, resolve: Resolve) {
+    if !ctx.state.settings.lock().voice_batch {
         return;
     }
-    let app = app.clone();
+    let ctx = ctx.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(60));
         log::info!("carrying on following the singer in all songs");
-        start_batch(&app, resolve);
+        start_batch(&ctx, resolve);
     });
 }
 
 /// Follows the singer in every song with lyrics that hasn't had it: most-played first, after
 /// anything asked for already. Finding the songs reads their tags, so it runs in the background
 /// too ("voice-batch" events tell how it goes).
-pub fn start_batch(app: &AppHandle, resolve: Resolve) {
-    let voice = app.state::<Arc<Voice>>().inner().clone();
+pub fn start_batch(ctx: &Ctx, resolve: Resolve) {
+    let voice = ctx.voice.clone();
     {
         let mut batch = voice.batch.lock();
         if batch.as_ref().is_some_and(|b| b.running) || !voice.installed() {
@@ -342,14 +364,14 @@ pub fn start_batch(app: &AppHandle, resolve: Resolve) {
             ..Default::default()
         });
     }
-    remember_batch(app, true);
-    emit_batch(app, &voice);
+    remember_batch(ctx, true);
+    emit_batch(ctx, &voice);
     #[cfg(desktop)]
     {
-        let app = app.clone();
+        let ctx = ctx.clone();
         let spawned = std::thread::Builder::new().name("cadence-voice-batch".into()).spawn(move || {
             crate::jobs::background_priority();
-            let state = app.state::<Arc<AppState>>().inner().clone();
+            let state = ctx.state.clone();
             let started = std::time::Instant::now();
             let ids = batch_songs(&state, &voice);
             log::info!("following the singer in {} songs (found in {:?})", ids.len(), started.elapsed());
@@ -370,12 +392,12 @@ pub fn start_batch(app: &AppHandle, resolve: Resolve) {
                 started: Some(std::time::Instant::now()),
                 ..Default::default()
             });
-            emit_batch(&app, &voice);
+            emit_batch(&ctx, &voice);
             if total > 0 {
                 voice.wake.notify_one();
-                start_worker(&app, voice, resolve);
+                start_worker(&ctx, voice, resolve);
             } else {
-                remember_batch(&app, false);
+                remember_batch(&ctx, false);
             }
         });
         if let Err(e) = spawned {
@@ -387,8 +409,8 @@ pub fn start_batch(app: &AppHandle, resolve: Resolve) {
 }
 
 /// Stops following the singer in all songs (the songs done so far stay done).
-pub fn stop_batch(app: &AppHandle) {
-    let voice = app.state::<Arc<Voice>>().inner().clone();
+pub fn stop_batch(ctx: &Ctx) {
+    let voice = ctx.voice.clone();
     let ids = std::mem::take(&mut *voice.batch_ids.lock());
     voice.queue.lock().retain(|id| !ids.contains(id));
     if voice.job.lock().as_ref().is_some_and(|j| ids.contains(&j.track_id)) {
@@ -399,8 +421,8 @@ pub fn stop_batch(app: &AppHandle) {
         b.preparing = false;
         b.seconds_left = None;
     }
-    remember_batch(app, false);
-    emit_batch(app, &voice);
+    remember_batch(ctx, false);
+    emit_batch(ctx, &voice);
 }
 
 /// Whether a song has lyrics without asking LRCLIB: chosen or saved ones, or in the file.
@@ -438,19 +460,19 @@ fn batch_songs(state: &AppState, voice: &Voice) -> Vec<String> {
 }
 
 #[cfg(desktop)]
-fn start_worker(app: &AppHandle, voice: Arc<Voice>, resolve: Resolve) {
+fn start_worker(ctx: &Ctx, voice: Arc<Voice>, resolve: Resolve) {
     let mut running = voice.worker.lock();
     if *running {
         return;
     }
     *running = true;
     drop(running);
-    let app = app.clone();
+    let ctx = ctx.clone();
     let spawned = std::thread::Builder::new()
         .name("cadence-voice".into())
         .spawn(move || {
             crate::jobs::background_priority();
-            worker(app, voice, resolve)
+            worker(ctx, voice, resolve)
         });
     if let Err(e) = spawned {
         log::warn!("couldn't start the voice worker: {e}");
@@ -487,6 +509,11 @@ mod runtime {
 
     static ENV: OnceLock<Result<Environment, String>> = OnceLock::new();
 
+    /// ONNX Runtime has been loaded (its library can't be replaced until Cadence restarts).
+    pub fn loaded() -> bool {
+        ENV.get().is_some()
+    }
+
     /// ONNX Runtime, loaded once from the downloaded library.
     pub fn environment(dylib: &std::path::Path) -> Result<&'static Environment, String> {
         ENV.get_or_init(|| {
@@ -510,28 +537,85 @@ mod runtime {
     }
 }
 
-/// Opens one of the models (the separator, or the letter model). Memory is handed back to the
-/// system after every run (no arena), so it doesn't stay at its peak.
+/// Where the models run: on the graphics card when ONNX Runtime can use one here (Windows: any
+/// DirectX 12 GPU, through DirectML), else on the processor as before.
 #[cfg(desktop)]
-fn open_model(voice: &Voice, separator: bool) -> anyhow::Result<ort::session::Session> {
+mod device {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Per model (separator, letters): the graphics card couldn't run it, or there's none that
+    /// can. The processor until Cadence restarts.
+    static FAILED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
+
+    pub fn failed(separator: bool) {
+        FAILED[separator as usize].store(true, Ordering::Relaxed);
+    }
+
+    /// The graphics card to try for this model, if any. `CADENCE_VOICE_DEVICE=cpu` keeps
+    /// everything on the processor.
+    pub fn gpu(separator: bool) -> Option<ort::ep::ExecutionProviderDispatch> {
+        if FAILED[separator as usize].load(Ordering::Relaxed)
+            || std::env::var("CADENCE_VOICE_DEVICE").is_ok_and(|v| v.eq_ignore_ascii_case("cpu"))
+        {
+            return None;
+        }
+        // Only real graphics cards (DXCore hardware adapters, never the WARP software one); the
+        // fastest first, as on a laptop with two. DirectML.dll loads from next to onnxruntime.dll.
+        #[cfg(windows)]
+        return Some(
+            ort::ep::DirectML::default()
+                .with_device_filter(ort::ep::directml::DeviceFilter::Gpu)
+                .with_performance_preference(ort::ep::directml::PerformancePreference::HighPerformance)
+                .build()
+                .error_on_failure(),
+        );
+        // macOS: Microsoft's build has CoreML, untried so far. Linux: CUDA needs a 200+ MB
+        // runtime plus CUDA and cuDNN installed, so it stays on the processor.
+        #[cfg(not(windows))]
+        None
+    }
+}
+
+/// Opens one of the models (the separator, or the letter model), on the graphics card if it can
+/// run there (true), else on the processor. Memory is handed back to the system after every run
+/// (no arena, no memory pattern; DirectML needs the latter off and runs nodes one at a time), so
+/// it doesn't stay at its peak.
+#[cfg(desktop)]
+fn open_model(voice: &Voice, separator: bool) -> anyhow::Result<(ort::session::Session, bool)> {
     use ort::session::{Session, builder::GraphOptimizationLevel};
     let runtime = models::RUNTIME.as_ref().ok_or_else(|| anyhow::anyhow!("not available on this system"))?;
     let env = runtime::environment(&models::path(&voice.models_dir, runtime)).map_err(|e| anyhow::anyhow!("ONNX Runtime: {e}"))?;
     let part = if separator { &models::SEPARATOR } else { &models::LETTERS };
-    let fail = |e: ort::Error<_>| anyhow::anyhow!("{e}");
-    Ok(Session::builder(env)?
-        .with_execution_providers([ort::ep::CPU::default().with_arena_allocator(false).build()])
-        .map_err(fail)?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(fail)?
-        .with_memory_pattern(false)
-        .map_err(fail)?
-        .commit_from_file(models::path(&voice.models_dir, part))?)
+    let file = models::path(&voice.models_dir, part);
+    let open = |gpu: Option<ort::ep::ExecutionProviderDispatch>| -> anyhow::Result<Session> {
+        let fail = |e: ort::Error<_>| anyhow::anyhow!("{e}");
+        let cpu = ort::ep::CPU::default().with_arena_allocator(false).build();
+        Ok(Session::builder(env)?
+            .with_execution_providers(gpu.into_iter().chain([cpu]).collect::<Vec<_>>())
+            .map_err(fail)?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(fail)?
+            .with_memory_pattern(false)
+            .map_err(fail)?
+            .with_parallel_execution(false)
+            .map_err(fail)?
+            .commit_from_file(&file)?)
+    };
+    if let Some(gpu) = device::gpu(separator) {
+        match open(Some(gpu)) {
+            Ok(session) => return Ok((session, true)),
+            Err(e) => {
+                log::info!("{} runs on the processor: the graphics card can't ({e:#})", part.file);
+                device::failed(separator);
+            }
+        }
+    }
+    Ok((open(None)?, false))
 }
 
 #[cfg(desktop)]
-fn worker(app: AppHandle, voice: Arc<Voice>, resolve: Resolve) {
-    let state = app.state::<Arc<AppState>>().inner().clone();
+fn worker(ctx: Ctx, voice: Arc<Voice>, resolve: Resolve) {
+    let state = ctx.state.clone();
     loop {
         let next = {
             let mut q = voice.queue.lock();
@@ -546,7 +630,7 @@ fn worker(app: AppHandle, voice: Arc<Voice>, resolve: Resolve) {
             lib.by_id.get(&id).map(|&i| lib.snapshot.tracks[i].clone())
         };
         let Some(track) = track else { continue };
-        let error = match run(&app, &state, &voice, &track, resolve) {
+        let error = match run(&ctx, &state, &voice, &track, resolve) {
             Ok(()) => String::new(),
             Err(e) if voice.stop.load(Ordering::Relaxed) => {
                 log::info!("stopped listening to {}", track.title);
@@ -568,30 +652,30 @@ fn worker(app: AppHandle, voice: Arc<Voice>, resolve: Resolve) {
                 if finished {
                     b.running = false;
                     b.seconds_left = None;
-                    remember_batch(&app, false);
+                    remember_batch(&ctx, false);
                     log::info!("followed the singer in {} songs ({} couldn't be)", b.done - b.failed, b.failed);
                 } else if let Some(started) = b.started {
                     let per_song = started.elapsed().as_secs_f64() / b.done as f64;
                     b.seconds_left = Some((per_song * (b.total - b.done) as f64) as u64);
                 }
             }
-            emit_batch(&app, &voice);
+            emit_batch(&ctx, &voice);
         }
-        let _ = app.emit(
+        ctx.emit(
             "voice-done",
             Done {
                 track_id: id.clone(),
                 error,
             },
         );
-        look_ahead(&app, &state, &voice, &id);
+        look_ahead(&ctx, &state, &voice, &id);
     }
 }
 
 /// After the song that's playing: listens to the song after it in the queue next (ahead of a
 /// batch), if it has lyrics already.
 #[cfg(desktop)]
-fn look_ahead(app: &AppHandle, state: &AppState, voice: &Voice, just_done: &str) {
+fn look_ahead(ctx: &Ctx, state: &AppState, voice: &Voice, just_done: &str) {
     if !state.settings.lock().voice_auto {
         return;
     }
@@ -613,12 +697,12 @@ fn look_ahead(app: &AppHandle, state: &AppState, voice: &Voice, just_done: &str)
         let mut q = voice.queue.lock();
         q.retain(|id| *id != next);
         q.push_front(next);
-        let _ = app;
+        let _ = ctx;
     }
 }
 
 #[cfg(desktop)]
-fn run(app: &AppHandle, state: &AppState, voice: &Voice, track: &Track, resolve: Resolve) -> anyhow::Result<()> {
+fn run(ctx: &Ctx, state: &AppState, voice: &Voice, track: &Track, resolve: Resolve) -> anyhow::Result<()> {
     use anyhow::bail;
     let lyrics = resolve(state, track);
     let texts = text_of(&lyrics);
@@ -634,6 +718,7 @@ fn run(app: &AppHandle, state: &AppState, voice: &Voice, track: &Track, resolve:
         if !voice.installed() {
             bail!("The voice models aren’t downloaded.");
         }
+        update_runtime(ctx, voice);
         let total = listen::steps(track.duration) + 1;
         let mut job = Job {
             track_id: track.id.clone(),
@@ -643,19 +728,43 @@ fn run(app: &AppHandle, state: &AppState, voice: &Voice, track: &Track, resolve:
         };
         voice.stop.store(false, Ordering::Relaxed);
         *voice.job.lock() = Some(job.clone());
-        let _ = app.emit("voice-progress", job.clone());
+        ctx.emit("voice-progress", job.clone());
         let started = std::time::Instant::now();
-        let em = listen::listen(Path::new(&track.path), |separator| open_model(voice, separator), || {
-            job.done = (job.done + 1).min(total - 1);
-            *voice.job.lock() = Some(job.clone());
-            let _ = app.emit("voice-progress", job.clone());
-            !voice.stop.load(Ordering::Relaxed)
-        })?;
+        let (em, gpu) = loop {
+            let mut gpu = false;
+            let result = listen::listen(
+                Path::new(&track.path),
+                |separator| {
+                    let opened = open_model(voice, separator)?;
+                    gpu |= opened.1;
+                    Ok(opened)
+                },
+                || {
+                    job.done = (job.done + 1).min(total - 1);
+                    *voice.job.lock() = Some(job.clone());
+                    ctx.emit("voice-progress", job.clone());
+                    voice.wait_while_busy();
+                    !voice.stop.load(Ordering::Relaxed)
+                },
+            );
+            match result {
+                // The graphics card failed while working (its driver restarted, out of memory…):
+                // the song again, on the processor.
+                Err(e) if gpu && !voice.stop.load(Ordering::Relaxed) => {
+                    log::warn!("the graphics card failed while listening to {} ({e:#}); listening on the processor", track.title);
+                    device::failed(true);
+                    device::failed(false);
+                    job.done = 0;
+                }
+                result => break (result?, gpu),
+            }
+        };
         log::info!(
-            "listened to {} ({:.0} s) in {:?}",
+            "listened to {} ({:.0} s) in {:?}, on the {}",
             track.title,
             track.duration,
-            started.elapsed()
+            started.elapsed(),
+            if gpu { "graphics card" } else { "processor" }
         );
         listen::save(&listened, &stamp, &em)?;
     }
@@ -668,39 +777,72 @@ fn run(app: &AppHandle, state: &AppState, voice: &Voice, track: &Track, resolve:
 }
 
 /// Downloads the models in the background (progress as "voice-install" events).
-pub fn install(app: &AppHandle) {
+pub fn install(ctx: &Ctx) {
     #[cfg(desktop)]
     {
-        let voice = app.state::<Arc<Voice>>().inner().clone();
-        {
-            let mut installing = voice.installing.lock();
-            if installing.is_some() {
-                return;
-            }
-            *installing = Some((0, models::download_size()));
+        let voice = ctx.voice.clone();
+        if !start_download(&voice) {
+            return;
         }
         voice.error.lock().clear();
-        let app = app.clone();
+        let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let mut last = std::time::Instant::now();
-            let result = models::install(&voice.models_dir, |done, total| {
-                *voice.installing.lock() = Some((done, total));
-                if last.elapsed().as_millis() > 250 || done == total {
-                    last = std::time::Instant::now();
-                    let _ = app.emit("voice-install", (done, total));
-                }
-                true
-            });
-            *voice.installing.lock() = None;
+            let result = download(&ctx, &voice);
             if let Err(e) = result {
                 log::warn!("voice models download failed: {e:#}");
                 *voice.error.lock() = format!("{e:#}");
             }
-            let _ = app.emit("voice-install", (0u64, 0u64));
+            ctx.emit("voice-install", (0u64, 0u64));
         });
     }
     #[cfg(not(desktop))]
-    let _ = app;
+    let _ = ctx;
+}
+
+/// Marks a download as started; false if one is already going.
+#[cfg(desktop)]
+fn start_download(voice: &Voice) -> bool {
+    let mut installing = voice.installing.lock();
+    if installing.is_some() {
+        return false;
+    }
+    *installing = Some((0, models::download_size(&voice.models_dir)));
+    true
+}
+
+/// Downloads what's missing (after `start_download`), with progress as "voice-install" events.
+#[cfg(desktop)]
+fn download(ctx: &Ctx, voice: &Voice) -> anyhow::Result<()> {
+    let mut last = std::time::Instant::now();
+    let result = models::install(&voice.models_dir, |done, total| {
+        *voice.installing.lock() = Some((done, total));
+        if last.elapsed().as_millis() > 250 || done == total {
+            last = std::time::Instant::now();
+            ctx.emit("voice-install", (done, total));
+        }
+        true
+    });
+    *voice.installing.lock() = None;
+    result
+}
+
+/// Replaces the ONNX Runtime an earlier Cadence downloaded (Windows: without DirectML) with this
+/// one, before it's loaded: once per run of Cadence, when a song is first listened to (25 MB,
+/// shown like the first download). If that fails, the old one still listens, on the processor.
+#[cfg(desktop)]
+fn update_runtime(ctx: &Ctx, voice: &Voice) {
+    static TRIED: AtomicBool = AtomicBool::new(false);
+    if runtime::loaded() || !models::outdated_runtime(&voice.models_dir) || TRIED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    if !start_download(voice) {
+        return;
+    }
+    log::info!("updating ONNX Runtime, so the voice models can run on the graphics card");
+    if let Err(e) = download(ctx, voice) {
+        log::warn!("couldn't update ONNX Runtime ({e:#}); listening on the processor");
+    }
+    ctx.emit("voice-install", (0u64, 0u64));
 }
 
 pub fn remove(voice: &Voice) {
@@ -729,12 +871,35 @@ mod tests {
         assert!(voice.installed(), "models missing in {}", voice.models_dir.display());
         let started = std::time::Instant::now();
         let mut steps = 0;
-        let em = listen::listen(&song, |separator| open_model(&voice, separator), || {
-            steps += 1;
-            true
-        })
+        let mut opened = Vec::new();
+        let em = listen::listen(
+            &song,
+            |separator| {
+                let at = started.elapsed();
+                let model = open_model(&voice, separator)?;
+                opened.push((separator, model.1, at, started.elapsed()));
+                Ok(model)
+            },
+            || {
+                steps += 1;
+                true
+            },
+        )
         .unwrap();
-        println!("listened in {:?} ({steps} steps, {} frames)", started.elapsed(), em.frames);
+        let end = started.elapsed();
+        println!("listened in {end:?} ({steps} steps, {} frames)", em.frames);
+        // (separator, on the GPU, asked at, opened at): decoding, then each model's load and work.
+        if let [(_, sep_gpu, s0, s1), (_, let_gpu, l0, l1)] = opened[..] {
+            println!(
+                "decode {s0:.1?}; separator on {} load {:.1?} work {:.1?}; letters on {} load {:.1?} work {:.1?}",
+                if sep_gpu { "GPU" } else { "CPU" },
+                s1 - s0,
+                l0 - s1,
+                if let_gpu { "GPU" } else { "CPU" },
+                l1 - l0,
+                end - l1
+            );
+        }
         listen::save(&local.join("listened.bin"), "test", &em).unwrap();
         let em = listen::load(&local.join("listened.bin"), "test").unwrap();
         let texts = text_of(&lyrics);

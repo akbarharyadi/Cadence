@@ -2,6 +2,29 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.26 (2026-11-03)
+
+- **Discover new music.** A new **Discover** page finds songs you don't have yet, searched for on the web by the AI
+  DJ. Base it on what you've played in the last 30 days, an artist, a genre, or anything you describe in words. Each
+  song shows how close it is to what you asked for, how well listeners and critics rate it, which of your songs it's
+  like, why it was picked, and where to buy it (Qobuz, Bandcamp, OTOTOY, mora, iTunes or Amazon). Songs you already
+  have, or that are on an album you have, are never suggested, and a song comes back only if it's very well rated.
+- **New picks every day.** Discover's picks for this month's listening are made once a day and kept, so the page (and
+  **New music for you** on Listen Now) opens at once. **New picks** asks for fresh ones.
+- **Claude as the AI DJ.** Settings → AI DJ can now use Claude (Anthropic), which also searches the web for new
+  releases. Paste a Claude API key and Cadence switches to it; your other service's key is kept.
+- **Your Stats.** A new page with what you play most: songs, artists and albums, counting only songs heard to the
+  end, for the last week, month, year or all time, with your listening time and a chart of when you listened.
+- **Following the singer is faster on Windows.** It runs on the graphics card (any DirectX 12 GPU): well under a
+  minute per song instead of 2–3 minutes. Moving between pages stays quick while it works.
+- **Lighter while playing on phones.** The seek line and the little "now playing" bars no longer redraw the screen
+  60 times a second; Cadence uses a fraction of the processor it did while a song plays.
+- **Android: the music doesn't stop if the screen's drawing process ends.** When Android stops it (low memory, a
+  graphics driver problem), Cadence rebuilds the screen and keeps playing, instead of closing.
+- **Fixes.** On very wide screens, Listen Now's quick picks fill the width. Light-grey text is easier to read. Counts
+  say "1 song", not "1 songs". On Android, the status bar icons stay readable when the phone is in light mode. On
+  Linux, Cadence no longer closes at startup on a system without security certificates.
+
 ## 0.2.25 (2026-11-02)
 
 - **Lyrics follow the singer.** Press **Follow singer** under the lyrics. Cadence listens to the song once,

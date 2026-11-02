@@ -29,12 +29,44 @@ pub enum Provider {
     Off,
 }
 
+/// Which online service answers: Anthropic's Claude, or any OpenAI-compatible one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Service {
+    /// Claude, through Anthropic's Messages API (with its own web search).
+    #[default]
+    Claude,
+    /// An OpenAI-compatible chat service (Z.ai GLM by default).
+    #[serde(other)]
+    Openai,
+}
+
+impl Service {
+    /// Settings saved before Claude was offered were all for an OpenAI-compatible service.
+    fn legacy() -> Self {
+        Service::Openai
+    }
+
+    /// Each service keeps its own key (Windows Credential Manager / the keychain).
+    pub fn key_name(self) -> &'static str {
+        match self {
+            Service::Claude => "ai-key-claude",
+            Service::Openai => KEY_SECRET,
+        }
+    }
+}
+
+pub const CLAUDE_MODEL: &str = "claude-opus-5-5";
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AiSettings {
     pub provider: Provider,
+    #[serde(default = "Service::legacy")]
+    pub service: Service,
     pub cloud_url: String,
     pub cloud_model: String,
+    pub claude_model: String,
     /// Let the model search the web (new music, lyrics).
     pub web_search: bool,
 }
@@ -43,10 +75,12 @@ impl Default for AiSettings {
     fn default() -> Self {
         Self {
             provider: Provider::Off,
+            service: Service::Claude,
             web_search: true,
             // Z.ai's GLM Coding Plan (as the old Cadence used); any OpenAI-compatible service works.
             cloud_url: "https://api.z.ai/api/coding/paas/v4".into(),
             cloud_model: "glm-5.3-flash".into(),
+            claude_model: CLAUDE_MODEL.into(),
         }
     }
 }
@@ -61,23 +95,148 @@ fn endpoint(s: &AiSettings) -> Result<Endpoint, String> {
     match s.provider {
         Provider::Off => Err("The AI DJ is off. Turn it on in Settings.".into()),
         Provider::Cloud => {
-            let key = crate::secrets::get(KEY_SECRET)
-                .ok_or("Add your API key in Settings to use the online AI DJ.")?;
-            Ok(Endpoint {
-                url: s.cloud_url.trim_end_matches('/').to_string(),
-                model: s.cloud_model.clone(),
-                key: Some(key),
+            let key = crate::secrets::get(s.service.key_name()).ok_or(match s.service {
+                Service::Claude => "Add your Anthropic API key in Settings to use Claude.",
+                Service::Openai => "Add your API key in Settings to use the online AI DJ.",
+            })?;
+            Ok(match s.service {
+                Service::Claude => Endpoint {
+                    url: "https://api.anthropic.com/v1/messages".into(),
+                    model: if s.claude_model.trim().is_empty() { CLAUDE_MODEL.into() } else { s.claude_model.trim().to_string() },
+                    key: Some(key),
+                },
+                Service::Openai => Endpoint {
+                    url: s.cloud_url.trim_end_matches('/').to_string(),
+                    model: s.cloud_model.clone(),
+                    key: Some(key),
+                },
             })
         }
     }
 }
 
-fn client(timeout: u64) -> reqwest::blocking::Client {
+/// Claude answers one request (Messages API). With `search`, Claude searches the web itself (its
+/// server-side web search tool) before answering; a turn the server pauses after many searches
+/// is resumed. Returns the JSON object in the final answer.
+fn claude_json(s: &AiSettings, ep: &Endpoint, prompt: &str, search: bool) -> Result<Value, String> {
+    let search = search && s.web_search;
+    let http = client(if search { 300 } else { 180 })?;
+    let mut messages = vec![json!({ "role": "user", "content": prompt })];
+    for _ in 0..4 {
+        let (body, fallbacks) = claude_body(&ep.model, &messages, search);
+        let v = claude_send(&http, ep, &body, fallbacks)?;
+        // Many searches: the server paused the turn; send it back and it carries on.
+        if v["stop_reason"] == "pause_turn" {
+            messages.truncate(1);
+            messages.push(json!({ "role": "assistant", "content": v["content"].clone() }));
+            continue;
+        }
+        return claude_answer(&v);
+    }
+    Err("Claude took too many searches to answer. Try again.".into())
+}
+
+/// The Messages API request: the model, the DJ's instructions, the conversation, how hard to think,
+/// web search when wanted, and the server-side refusal fallback where the model has one (returned
+/// too: it needs its beta header).
+fn claude_body(model: &str, messages: &[Value], search: bool) -> (Value, bool) {
+    // The dynamic-filtering web search needs a current model; older ones (and Haiku) take the basic one.
+    let current = ["claude-opus-5", "claude-sonnet-5", "claude-fable", "claude-mythos", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4-6"];
+    let search_tool = if current.iter().any(|m| model.starts_with(m)) { "web_search_20260209" } else { "web_search_20250305" };
+    // On a decline, another model answers in the same call.
+    let fallbacks = ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1"].contains(&model);
+    let mut body = json!({
+        "model": model,
+        "max_tokens": 16000,
+        "system": "You are the DJ inside Cadence, a personal music player. Answer with strict JSON only: no markdown, no commentary.",
+        "messages": messages,
+    });
+    if ["claude-opus-5", "claude-sonnet-5", "claude-fable", "claude-haiku-5"].iter().any(|m| model.starts_with(m)) {
+        // Thinking is adaptive on these; effort says how hard to think (picking songs is light work).
+        body["output_config"] = json!({ "effort": "medium" });
+    }
+    if fallbacks {
+        body["fallbacks"] = json!("default");
+    }
+    if search {
+        body["tools"] = json!([{ "type": search_tool, "name": "web_search", "max_uses": 6 }]);
+    }
+    (body, fallbacks)
+}
+
+/// The JSON object in Claude's answer: in its last text block (earlier ones may be notes between
+/// searches), or in all the text together.
+fn claude_answer(v: &Value) -> Result<Value, String> {
+    if v["stop_reason"] == "refusal" {
+        return Err("Claude declined this request. Try asking another way.".into());
+    }
+    let texts: Vec<&str> = v["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|b| b["type"] == "text")
+        .filter_map(|b| b["text"].as_str())
+        .collect();
+    texts
+        .iter()
+        .rev()
+        .find_map(|t| extract_json(t))
+        .or_else(|| extract_json(&texts.concat()))
+        .ok_or_else(|| {
+            if v["stop_reason"] == "max_tokens" {
+                "Claude's answer was cut off. Try again.".into()
+            } else {
+                "Claude's answer wasn't in the expected format. Try again.".into()
+            }
+        })
+}
+
+/// One Messages API call, retried twice when Claude is busy (429, 529, 5xx).
+fn claude_send(http: &reqwest::blocking::Client, ep: &Endpoint, body: &Value, fallbacks: bool) -> Result<Value, String> {
+    let mut wait = Duration::from_secs(2);
+    for attempt in 0..3 {
+        let mut req = http
+            .post(&ep.url)
+            .header("anthropic-version", "2026-10-21")
+            .header("x-api-key", ep.key.as_deref().unwrap_or(""))
+            .json(body);
+        if fallbacks {
+            req = req.header("anthropic-beta", "server-side-fallback-2026-07-01");
+        }
+        let r = match req.send() {
+            Ok(r) => r,
+            Err(e) if e.is_timeout() => return Err("Claude took too long to answer. Try again.".into()),
+            Err(e) => return Err(format!("Can’t reach Claude: {e}")),
+        };
+        let status = r.status().as_u16();
+        let v: Value = r.json().map_err(|e| format!("Unexpected answer from Claude: {e}"))?;
+        if (200..300).contains(&status) {
+            return Ok(v);
+        }
+        let retry = matches!(status, 429 | 500..=599);
+        if retry && attempt < 2 {
+            std::thread::sleep(wait);
+            wait *= 3;
+            continue;
+        }
+        let msg = v["error"]["message"].as_str().unwrap_or("no details");
+        return Err(match status {
+            401 | 403 => "Anthropic didn’t accept the API key. Check it in Settings.".into(),
+            404 => format!("Anthropic doesn’t know the model “{}”. Check it in Settings.", ep.model),
+            429 => "Claude is busy or your usage limit is reached. Try again later.".into(),
+            529 => "Claude is overloaded right now. Try again in a minute.".into(),
+            _ => format!("Claude answered {status}: {msg}"),
+        });
+    }
+    unreachable!()
+}
+
+fn client(timeout: u64) -> Result<reqwest::blocking::Client, String> {
     crate::net::builder()
         .timeout(Duration::from_secs(timeout))
         .user_agent(concat!("Cadence/", env!("CARGO_PKG_VERSION")))
         .build()
-        .expect("http client")
+        .map_err(|e| format!("This system can’t make secure connections: {e}"))
 }
 
 pub const SYSTEM: &str = "You are the DJ inside Cadence, a personal music player. You pick songs only from \
@@ -86,8 +245,11 @@ the list you are given and answer with strict JSON only: no markdown, no comment
 /// Sends one chat request and returns the JSON object in the answer. `search`: allow web search.
 fn chat_json(s: &AiSettings, prompt: &str, search: bool) -> Result<Value, String> {
     let ep = endpoint(s)?;
+    if s.service == Service::Claude {
+        return claude_json(s, &ep, prompt, search);
+    }
     // Web search makes answers much slower (several searches before the reply).
-    let http = client(if search && s.web_search { 300 } else { 120 });
+    let http = client(if search && s.web_search { 300 } else { 120 })?;
     let mut body = json!({
         "model": ep.model,
         "temperature": 0.7,
@@ -376,6 +538,134 @@ pub struct Discovery {
     pub image_is_artist: bool,
     /// Already looked up in the catalogue.
     pub checked: bool,
+    /// How close it is to what was asked for and to the listener's taste, 0–100 (Discover).
+    pub similarity: u8,
+    /// How well listeners and critics rate the song (charts, streams, reviews), 0–100 (Discover).
+    pub rating: u8,
+    /// The song or artist in the listener's library it's most like (Discover).
+    pub like: String,
+}
+
+/// How often something was played: an artist, a genre or a song ("Artist - Title").
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Count {
+    pub name: String,
+    pub plays: u32,
+}
+
+/// What the listener plays: the last 30 days ("this month") and all time.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Profile {
+    pub month_artists: Vec<Count>,
+    pub month_genres: Vec<Count>,
+    pub month_songs: Vec<Count>,
+    pub artists: Vec<Count>,
+    pub genres: Vec<Count>,
+}
+
+/// The last Discover search and what it found (kept in ai-recommend.json).
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RecommendCache {
+    /// "month", "artist", "genre" or "search".
+    pub basis: String,
+    pub value: String,
+    pub at: u64,
+    pub picks: Vec<Discovery>,
+}
+
+/// A song Discover suggested before comes back only when it's rated at least this well (and the
+/// listener still doesn't have it).
+pub const REPEAT_AT: u8 = 85;
+
+impl Discovery {
+    /// Discover's order: how close it is, and how well it's rated.
+    pub fn score(&self) -> u32 {
+        self.similarity as u32 * 6 + self.rating as u32 * 4
+    }
+}
+
+/// A 0–100 number from the model ("91", 91, "91%"; out of range clamped, missing 0).
+fn percent(v: &Value) -> u8 {
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.trim_end_matches('%').trim().parse().ok()))
+        .unwrap_or(0.0)
+        .clamp(0.0, 100.0) as u8
+}
+
+fn counts(c: &[Count], n: usize) -> String {
+    if c.is_empty() {
+        return "none yet".into();
+    }
+    c.iter().take(n).map(|c| format!("{} ({})", c.name, c.plays)).collect::<Vec<_>>().join(", ")
+}
+
+/// Discover: new songs (not in the library) for what's asked — the listener's last 30 days, an
+/// artist, a genre, or anything said in words — each with how similar it is and to what.
+pub fn recommend(s: &AiSettings, basis: &str, value: &str, taste: &str, p: &Profile, owned_artists: &[String], before: &[String]) -> Result<Vec<Discovery>, String> {
+    let ask = match basis {
+        "artist" => format!(
+            "Songs for someone who loves {value}: newer songs by {value} that aren't in their library, and songs by \
+artists who sound like {value}. similarity: how close each is to {value}'s sound."
+        ),
+        "genre" => format!(
+            "{value} songs this listener would love, by artists they already like and by artists new to them. \
+similarity: how well it fits {value} and their taste."
+        ),
+        "search" => format!("What they asked for: \"{value}\". similarity: how well it matches that and their taste."),
+        _ => "Songs for what they're into this month (their last 30 days, below): like those artists, genres and \
+songs. similarity: how close it is to this month's listening."
+            .to_string(),
+    };
+    let prompt = format!(
+        "Now: {now}.\nLISTENER (all time):\n{taste}\n\
+THIS MONTH (last 30 days): top artists: {ma}. Top genres: {mg}. Top songs: {ms}.\n\
+Artists already in their library: {artists}\n{before}\nREQUEST: {ask}\n\n\
+Suggest 15 real songs NOT in their library (not even on an album they have). Search the web for recent releases \
+(this year and last) and include several. Only real, existing songs, credited to the right artist. similarity: a whole \
+number from 0 to 100. like: the one song (\"Artist - Title\") or artist from their listening above that it is most \
+like. rating: how well listeners and critics rate the song, 0–100, from what you find on the web (charts, \
+streams, reviews); prefer well-rated songs. why: at most 12 words.\n\
+Return JSON only: {{\"picks\":[{{\"artist\":\"\",\"title\":\"\",\"similarity\":0,\"rating\":0,\"like\":\"\",\"why\":\"\"}}]}}",
+        now = now_words(),
+        ma = counts(&p.month_artists, 10),
+        mg = counts(&p.month_genres, 6),
+        ms = counts(&p.month_songs, 12),
+        artists = owned_artists.iter().take(80).map(String::as_str).collect::<Vec<_>>().join(", "),
+        before = if before.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "Suggested to them before: {}. Suggest one of these again only if it's very well rated (rating {REPEAT_AT} or more).\n",
+                before.join("; ")
+            )
+        },
+    );
+    let v = chat_json(s, &prompt, true)?;
+    let text = |v: &Value, k: &str| v[k].as_str().unwrap_or("").trim().to_string();
+    let mut picks: Vec<Discovery> = v["picks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|d| Discovery {
+            artist: text(d, "artist"),
+            title: text(d, "title"),
+            why: text(d, "why"),
+            like: text(d, "like"),
+            similarity: percent(&d["similarity"]),
+            rating: percent(&d["rating"]),
+            ..Default::default()
+        })
+        .filter(|d| !d.artist.is_empty() && !d.title.is_empty())
+        .take(20)
+        .collect();
+    if picks.is_empty() {
+        return Err("The DJ couldn’t find songs for that. Try again or ask another way.".into());
+    }
+    picks.sort_by(|a, b| b.score().cmp(&a.score()));
+    Ok(picks)
 }
 
 fn to_mix(v: &Value, c: &[Candidate]) -> AiMix {
@@ -494,53 +784,7 @@ Never invent or translate lyrics.\ninstrumental: true if the song has no vocals.
 
 /// Songs the listener doesn't have yet, picked from their listening (taste, most played songs)
 /// with web search for recent releases.
-pub fn discover(s: &AiSettings, taste: &str, c: &[Candidate], owned_artists: &[String]) -> Result<Vec<Discovery>, String> {
-    let favourites: Vec<String> = c
-        .iter()
-        .take(25)
-        .map(|c| format!("{} - {}", c.track.artist, c.track.title))
-        .collect();
-    let artists: Vec<&str> = owned_artists.iter().take(80).map(String::as_str).collect();
-    let prompt = format!(
-        "Now: {now}.\nLISTENER:\n{taste}\nSome songs they have and play:\n{favs}\n\
-Artists already in their library: {artists}\n\n\
-Suggest 12 real songs NOT in their library that this listener would love. Search the web for recent \
-releases (this year and last) and include some. Mix: about a third by artists they already like, the \
-rest by artists they don't have yet. Only real, existing songs. why: at most 12 words, refer to their taste.\n\
-Return JSON only: {{\"picks\":[{{\"artist\":\"\",\"title\":\"\",\"why\":\"\"}}]}}",
-        now = now_words(),
-        favs = favourites.join("\n"),
-        artists = artists.join(", "),
-    );
-    let v = chat_json(s, &prompt, true)?;
-    let text = |v: &Value, k: &str| v[k].as_str().unwrap_or("").trim().to_string();
-    let picks: Vec<Discovery> = v["picks"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|d| Discovery {
-            artist: text(d, "artist"),
-            title: text(d, "title"),
-            why: text(d, "why"),
-            ..Default::default()
-        })
-        .filter(|d| !d.artist.is_empty() && !d.title.is_empty())
-        .take(15)
-        .collect();
-    if picks.is_empty() {
-        return Err("The DJ couldn’t find new music this time. Try again.".into());
-    }
-    Ok(picks)
-}
 
-#[derive(Default, Serialize, Deserialize)]
-pub struct DiscoverCache {
-    pub day: u64,
-    pub picks: Vec<Discovery>,
-    /// Why today's attempt failed; it isn't retried automatically until tomorrow.
-    #[serde(default)]
-    pub error: String,
-}
 
 /// Today's mixes, kept so they're only made once a day.
 #[derive(Default, Serialize, Deserialize)]
@@ -560,6 +804,56 @@ pub fn today() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_request() {
+        let msgs = [json!({ "role": "user", "content": "hi" })];
+        let (body, fallbacks) = claude_body("claude-opus-5-5", &msgs, true);
+        assert!(fallbacks);
+        assert_eq!(body["fallbacks"], "default");
+        assert_eq!(body["output_config"]["effort"], "medium");
+        assert_eq!(body["tools"][0]["type"], "web_search_20260209");
+        assert_eq!(body["tools"][0]["name"], "web_search");
+        assert!(body.get("thinking").is_none() && body.get("temperature").is_none());
+        // An older model: the basic web search, no fallback or effort.
+        let (body, fallbacks) = claude_body("claude-haiku-4-5", &msgs, true);
+        assert!(!fallbacks && body.get("fallbacks").is_none() && body.get("output_config").is_none());
+        assert_eq!(body["tools"][0]["type"], "web_search_20250305");
+        let (body, _) = claude_body("claude-opus-5-5", &msgs, false);
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn claude_answer_after_searching() {
+        // The shape of an answer that searched the web: a note, the search, its results, then
+        // the answer (cited, split into text blocks), and the JSON last.
+        let v = json!({
+            "stop_reason": "end_turn",
+            "content": [
+                { "type": "text", "text": "I'll look up recent releases {maybe}." },
+                { "type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": { "query": "YOASOBI 2026" } },
+                { "type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [{ "type": "web_search_result", "url": "https://example.com", "title": "x" }] },
+                { "type": "text", "text": "Found some.", "citations": [{ "type": "web_search_result_location", "url": "https://example.com" }] },
+                { "type": "text", "text": "{\"picks\":[{\"artist\":\"YOASOBI\",\"title\":\"Idol\",\"similarity\":91}]}" },
+            ],
+        });
+        let a = claude_answer(&v).unwrap();
+        assert_eq!(a["picks"][0]["similarity"], 91);
+        assert!(claude_answer(&json!({ "stop_reason": "refusal", "content": [] })).is_err());
+        assert!(claude_answer(&json!({ "stop_reason": "max_tokens", "content": [{ "type": "text", "text": "{\"picks\":[" }] })).unwrap_err().contains("cut off"));
+    }
+
+    /// Live, costs a little: `ANTHROPIC_API_KEY=… cargo test --lib ai::tests::claude_live -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn claude_live() {
+        let key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY");
+        let ep = Endpoint { url: "https://api.anthropic.com/v1/messages".into(), model: CLAUDE_MODEL.into(), key: Some(key) };
+        let s = AiSettings { provider: Provider::Cloud, ..Default::default() };
+        let v = claude_json(&s, &ep, "Search the web for one song released this year by YOASOBI. Return JSON only: {\"artist\":\"\",\"title\":\"\"}", true).unwrap();
+        println!("{v}");
+        assert!(v["title"].as_str().is_some_and(|t| !t.is_empty()));
+    }
 
     #[test]
     fn finds_json_after_thinking() {

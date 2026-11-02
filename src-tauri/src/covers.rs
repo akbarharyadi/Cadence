@@ -7,7 +7,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use lofty::config::WriteOptions;
@@ -15,9 +14,8 @@ use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::*;
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager};
+use crate::ctx::Ctx;
 
-use crate::state::AppState;
 
 /// A cover offered from the online catalogues.
 #[derive(Serialize)]
@@ -167,8 +165,8 @@ pub fn search(term: &str, artist: &str, title: &str) -> Result<Vec<Cover>, Strin
 }
 
 /// Puts a new cover on an album.
-pub fn set(app: &AppHandle, album_id: &str, source: crate::artists::Source) -> Result<Changed, String> {
-    let state = app.state::<Arc<AppState>>().inner().clone();
+pub fn set(ctx: &Ctx, album_id: &str, source: crate::artists::Source) -> Result<Changed, String> {
+    let state = ctx.state.clone();
     let bytes = crate::artists::read_source(source)?;
     let art_dir = state.art_dir();
     let (art, art_small) = crate::library::write_art(album_id, &bytes, &art_dir);
@@ -192,7 +190,7 @@ pub fn set(app: &AppHandle, album_id: &str, source: crate::artists::Source) -> R
         lib.set_tracks(tracks, albums);
         songs
     };
-    let _ = app.emit("library-changed", ());
+    ctx.emit("library-changed", ());
 
     let playing = {
         let s = state.engine.status();
@@ -202,12 +200,12 @@ pub fn set(app: &AppHandle, album_id: &str, source: crate::artists::Source) -> R
     for (id, path) in songs {
         if playing.as_deref() == Some(id.as_str()) {
             later += 1;
-            let (app, jpeg) = (app.clone(), jpeg.clone());
+            let (ctx, jpeg) = (ctx.clone(), jpeg.clone());
             crate::autotag::after_song(
                 &id,
                 Box::new(move || {
                     if embed(&path, &jpeg).is_ok() {
-                        crate::jobs::start_scan(app);
+                        crate::jobs::start_scan(ctx);
                     }
                 }),
             );
@@ -219,7 +217,7 @@ pub fn set(app: &AppHandle, album_id: &str, source: crate::artists::Source) -> R
         }
     }
     if written > 0 {
-        crate::jobs::start_scan(app.clone());
+        crate::jobs::start_scan(ctx.clone());
     }
     Ok(Changed { art, art_small, later, failed })
 }

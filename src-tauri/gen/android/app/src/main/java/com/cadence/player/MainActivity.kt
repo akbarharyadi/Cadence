@@ -7,12 +7,19 @@ import android.os.Build
 import android.os.Bundle
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import android.graphics.Bitmap
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.net.Uri
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -26,7 +33,10 @@ class MainActivity : TauriActivity() {
   @Volatile private var opened: String? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
-    enableEdgeToEdge()
+    // Cadence is always dark: light status-bar and navigation icons, whatever the phone's own theme
+    // (the default picks dark icons in light mode, unreadable on Cadence's background).
+    val bars = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+    enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
     super.onCreate(savedInstanceState)
     // Android 15+ draws apps under the status and gesture bars; keep Cadence's page clear of them,
     // with the app's own dark colour behind the bars.
@@ -147,6 +157,38 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     this.webView = webView
     webView.addJavascriptInterface(Bridge(), "CadenceAndroid")
+    // wry sets its own client right after this; wrap it on the next turn of the main thread.
+    webView.post { if (webView.webViewClient !is Survivor) webView.webViewClient = Survivor(webView.webViewClient) }
+  }
+
+  /**
+   * wry's client, plus what to do when the WebView's drawing process dies (killed for memory, a GPU
+   * driver crash). Unhandled, Android ends the whole app with it and the music stops; handled, the
+   * playback service plays on and the screen is rebuilt (wry recreates its page as it does when the
+   * activity is recreated).
+   */
+  private inner class Survivor(private val inner: WebViewClient) : WebViewClient() {
+    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+      inner.shouldInterceptRequest(view, request)
+
+    override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean =
+      inner.shouldOverrideUrlLoading(view, request)
+
+    override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) = inner.onPageStarted(view, url, favicon)
+
+    override fun onPageFinished(view: WebView, url: String) = inner.onPageFinished(view, url)
+
+    override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) =
+      inner.onReceivedError(view, request, error)
+
+    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+      android.util.Log.w("Cadence", "The page's process ended (crashed: ${detail.didCrash()}); rebuilding the screen")
+      (view.parent as? android.view.ViewGroup)?.removeView(view)
+      view.destroy()
+      if (webView === view) webView = null
+      if (!isFinishing && !isDestroyed) recreate()
+      return true
+    }
   }
 
   /** Called from the app's JavaScript with what's playing. */

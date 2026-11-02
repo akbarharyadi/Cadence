@@ -32,6 +32,8 @@
   import Settings from "#lib/views/Settings.svelte";
   import Songs from "#lib/views/Songs.svelte";
   import SimilarView from "#lib/views/SimilarView.svelte";
+  import Discover from "#lib/views/Discover.svelte";
+  import Stats from "#lib/views/Stats.svelte";
   import Sound from "#lib/views/Sound.svelte";
   import Welcome from "#lib/views/Welcome.svelte";
 
@@ -232,6 +234,10 @@
   {#key app.view.id}<PlaylistView id={app.view.id} />{/key}
 {:else if app.view.name === "similar"}
   {#key app.view.id}<SimilarView id={app.view.id} />{/key}
+{:else if app.view.name === "discover"}
+  <Discover />
+{:else if app.view.name === "stats"}
+  <Stats />
 {/if}
 {/snippet}
 

@@ -25,7 +25,7 @@
       </button>
       <div class="info">
         <h1>{artist.name}</h1>
-        <p class="facts">{albums.length} {albums.length === 1 ? "album" : "albums"}, {songs.length} songs, {formatDuration(time)}</p>
+        <p class="facts">{albums.length} {albums.length === 1 ? "album" : "albums"}, {songs.length} {songs.length === 1 ? "song" : "songs"}, {formatDuration(time)}</p>
         <div class="actions">
           <button class="pill" onclick={() => app.playTracks(songs)}><Icon name="play" size={15} />Play</button>
           <button class="pill ghost" onclick={() => app.playTracks(shuffled(songs))}><Icon name="shuffle" size={15} />Shuffle</button>

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { api, artUrl, formatTime, khz, qualityOf, type Lyrics } from "#lib/api.js";
+  import { eqBars } from "#lib/eq.js";
   import Icon from "#lib/components/Icon.svelte";
   import { app } from "#lib/store.svelte.js";
 
@@ -72,7 +73,7 @@
         <Icon name={s?.playing ? "pause" : "play"} size={18} />
       </button>
       <button class="btn" onclick={() => api.player("next")} aria-label="Next"><Icon name="next" size={18} /></button>
-      <span class="eq" class:on={s?.playing} aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <span class="eq" class:on={s?.playing} aria-hidden="true" use:eqBars={!!s?.playing}><i></i><i></i><i></i><i></i></span>
       <span class="time" data-tauri-drag-region>{formatTime(app.position)} / {formatTime(duration)}</span>
     </div>
   </div>
@@ -238,26 +239,7 @@
     transform-origin: bottom;
     transform: scaleY(0.3);
   }
-  .eq.on i {
-    animation: eq 0.8s ease-in-out infinite alternate;
-  }
-  .eq.on i:nth-child(2) {
-    animation-delay: -0.25s;
-  }
-  .eq.on i:nth-child(3) {
-    animation-delay: -0.5s;
-  }
-  .eq.on i:nth-child(4) {
-    animation-delay: -0.15s;
-  }
-  @keyframes eq {
-    from {
-      transform: scaleY(0.2);
-    }
-    to {
-      transform: scaleY(1);
-    }
-  }
+  /* While playing they bounce by eqBars. */
   .time {
     margin-left: auto;
     font-size: 11px;

@@ -9,13 +9,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 use lofty::config::WriteOptions;
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::prelude::*;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use crate::ctx::Ctx;
 
 use crate::library::Track;
 use crate::state::AppState;
@@ -62,8 +62,8 @@ pub fn untagged(t: &Track) -> bool {
 }
 
 /// Called when the playing song changes.
-pub fn on_track_change(app: &AppHandle, previous: Option<&str>, current: Option<&str>) {
-    let state = app.state::<Arc<AppState>>().inner().clone();
+pub fn on_track_change(ctx: &Ctx, previous: Option<&str>, current: Option<&str>) {
+    let state = ctx.state.clone();
     // Info waiting for its song to stop (found automatically, or picked in Fix Song Info).
     let (ready, jobs) = {
         let mut rt = runtime().lock().unwrap();
@@ -73,8 +73,8 @@ pub fn on_track_change(app: &AppHandle, previous: Option<&str>, current: Option<
         (ready, jobs)
     };
     if let Some((path, found)) = ready {
-        let app = app.clone();
-        std::thread::spawn(move || apply(&app, &path, &found));
+        let ctx = ctx.clone();
+        std::thread::spawn(move || apply(&ctx, &path, &found));
     }
     if !jobs.is_empty() {
         std::thread::spawn(move || jobs.into_iter().for_each(|job| job()));
@@ -97,7 +97,7 @@ pub fn on_track_change(app: &AppHandle, previous: Option<&str>, current: Option<
         }
         save_tried(&state.data_dir, tried);
     }
-    let app = app.clone();
+    let ctx = ctx.clone();
     let id = id.to_string();
     std::thread::spawn(move || {
         let Some(found) = lookup(&track) else {
@@ -111,7 +111,7 @@ pub fn on_track_change(app: &AppHandle, previous: Option<&str>, current: Option<
             rt.waiting.insert(id, (path, found));
         } else {
             drop(rt);
-            apply(&app, &path, &found);
+            apply(&ctx, &path, &found);
         }
     });
 }
@@ -132,12 +132,12 @@ fn save_tried(dir: &Path, tried: &HashSet<String>) {
 }
 
 /// Writes what was found into the file and refreshes the library.
-fn apply(app: &AppHandle, path: &Path, f: &Found) {
+fn apply(ctx: &Ctx, path: &Path, f: &Found) {
     let cover = f.cover_url.as_deref().and_then(|u| download(u).ok());
     match write(path, f, cover) {
         Ok(()) => {
             log::info!("tagged {}", path.display());
-            crate::jobs::start_scan(app.clone());
+            crate::jobs::start_scan(ctx.clone());
         }
         Err(e) => log::warn!("couldn't tag {}: {e}", path.display()),
     }
@@ -302,8 +302,8 @@ pub fn candidates(t: &Track, term: &str) -> Result<Vec<Candidate>, String> {
 
 /// Saves the info the user picked. A playing song shows it at once and its file is written
 /// when it stops (returns true then).
-pub fn save_choice(app: &AppHandle, id: &str, choice: Candidate) -> Result<bool, String> {
-    let state = app.state::<Arc<AppState>>().inner().clone();
+pub fn save_choice(ctx: &Ctx, id: &str, choice: Candidate) -> Result<bool, String> {
+    let state = ctx.state.clone();
     let path = {
         let mut lib = state.library.lock();
         let i = *lib.by_id.get(id).ok_or("Unknown song")?;
@@ -330,14 +330,14 @@ pub fn save_choice(app: &AppHandle, id: &str, choice: Candidate) -> Result<bool,
         rt.waiting.insert(id.to_string(), (path, found.clone()));
         drop(rt);
         show_now(&state, id, &found);
-        let _ = app.emit("library-changed", ());
+        ctx.emit("library-changed", ());
         return Ok(true);
     }
     rt.waiting.remove(id);
     drop(rt);
     let cover = found.cover_url.as_deref().and_then(|u| download(u).ok());
     write(&path, &found, cover)?;
-    crate::jobs::start_scan(app.clone());
+    crate::jobs::start_scan(ctx.clone());
     Ok(false)
 }
 

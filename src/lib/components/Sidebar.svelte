@@ -120,6 +120,12 @@
     <button class="item" class:active={app.view.name === "home"} onclick={() => app.go({ name: "home" })}>
       <Icon name="home" size={18} />Listen Now
     </button>
+    <button class="item" class:active={app.view.name === "discover"} onclick={() => app.go({ name: "discover" })}>
+      <Icon name="sparkle" size={18} />Discover
+    </button>
+    <button class="item" class:active={app.view.name === "stats"} onclick={() => app.go({ name: "stats" })}>
+      <Icon name="gauge" size={18} />Your Stats
+    </button>
 
     <div class="group">Library</div>
     {#each library as item}

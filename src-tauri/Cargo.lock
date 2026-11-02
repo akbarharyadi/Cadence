@@ -520,6 +520,7 @@ version = "0.2.25"
 dependencies = [
  "anyhow",
  "audioadapter-buffers",
+ "base64 0.22.1",
  "blake3",
  "bliss-audio",
  "cpal",
@@ -533,6 +534,7 @@ dependencies = [
  "libc",
  "lofty",
  "log",
+ "minisign-verify",
  "ndk",
  "ndk-context",
  "notify",

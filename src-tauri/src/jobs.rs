@@ -1,7 +1,6 @@
 //! Background jobs: library scanning and loudness analysis.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -10,11 +9,10 @@ use notify_debouncer_full::{DebounceEventResult, Debouncer, RecommendedCache, ne
 
 use rayon::prelude::*;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use crate::ctx::Ctx;
 
 use crate::audio::{Cmd, measure_album};
 use crate::library;
-use crate::state::AppState;
 
 /// Files written in the last few seconds are probably still being copied: measuring them now
 /// fails or gives wrong results, so they wait (Windows sets a copy's time when it finishes).
@@ -25,10 +23,10 @@ fn settling(t: &crate::library::Track) -> bool {
 }
 
 /// Runs the measurements again once files that were still being copied have settled.
-fn retry_later(app: AppHandle) {
+fn retry_later(ctx: Ctx) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(SETTLE_SECS + 5));
-        start_analysis(app);
+        start_analysis(ctx);
     });
 }
 
@@ -98,14 +96,14 @@ pub(crate) fn background_priority() {
 static WATCH_AFTER_SCAN: AtomicBool = AtomicBool::new(false);
 
 /// Rescans, then watches the folders for changes (at startup).
-pub fn start_scan_then_watch(app: AppHandle) {
+pub fn start_scan_then_watch(ctx: Ctx) {
     WATCH_AFTER_SCAN.store(true, Ordering::SeqCst);
-    start_scan(app);
+    start_scan(ctx);
 }
 
 /// Rescans every folder in the background and tells the UI when the library changed.
-pub fn start_scan(app: AppHandle) {
-    let state = app.state::<Arc<AppState>>().inner().clone();
+pub fn start_scan(ctx: Ctx) {
+    let state = ctx.state.clone();
     {
         let mut lib = state.library.lock();
         if lib.scanning {
@@ -114,13 +112,13 @@ pub fn start_scan(app: AppHandle) {
         }
         lib.scanning = true;
     }
-    let _ = app.emit("library-progress", Progress { done: 0, total: 0 });
+    ctx.emit("library-progress", Progress { done: 0, total: 0 });
     std::thread::spawn(move || {
         let folders = state.settings.lock().folders.clone();
         let previous = state.library.lock().snapshot.tracks.clone();
         let started = std::time::Instant::now();
         let mut tracks = library::scan(&folders, previous, |done, total| {
-            let _ = app.emit("library-progress", Progress { done, total });
+            ctx.emit("library-progress", Progress { done, total });
         });
         crate::tagedit::show_held(&state.data_dir, &mut tracks);
         let albums = library::build_albums(&mut tracks, &state.art_dir());
@@ -146,22 +144,22 @@ pub fn start_scan(app: AppHandle) {
             std::mem::take(&mut lib.rescan_pending)
         };
         state.save_library();
-        let _ = app.emit("library-changed", ());
+        ctx.emit("library-changed", ());
         if WATCH_AFTER_SCAN.swap(false, Ordering::SeqCst) {
-            watch_folders(app.clone());
+            watch_folders(ctx.clone());
         }
         if again {
-            start_scan(app);
+            start_scan(ctx);
         } else {
-            start_analysis(app);
+            start_analysis(ctx);
         }
     });
 }
 
 /// Measures the loudness of every album that has songs without ReplayGain data (EBU R128).
 /// Albums are measured whole so album gain is right; several albums run in parallel.
-pub fn start_analysis(app: AppHandle) {
-    let state = app.state::<Arc<AppState>>().inner().clone();
+pub fn start_analysis(ctx: Ctx) {
+    let state = ctx.state.clone();
     let mut waiting = false;
     let todo: Vec<(String, Vec<(String, String)>)> = {
         let mut lib = state.library.lock();
@@ -198,20 +196,20 @@ pub fn start_analysis(app: AppHandle) {
         if missing.is_empty() {
             drop(lib);
             if waiting {
-                retry_later(app.clone());
+                retry_later(ctx.clone());
             }
-            start_listening(app);
+            start_listening(ctx);
             return;
         }
         lib.analyzing = true;
         missing
     };
     if waiting {
-        retry_later(app.clone());
+        retry_later(ctx.clone());
     }
     std::thread::spawn(move || {
         let total: usize = todo.iter().map(|(_, t)| t.len()).sum();
-        let _ = app.emit("analysis-progress", Progress { done: 0, total });
+        ctx.emit("analysis-progress", Progress { done: 0, total });
         let started = std::time::Instant::now();
         // The background threads only measure; this thread files the results, so they never hold
         // a lock the UI or playback is waiting for.
@@ -246,7 +244,7 @@ pub fn start_analysis(app: AppHandle) {
             }
             state.engine.send(Cmd::UpdateGains(updates));
             done += tracks.len();
-            let _ = app.emit("analysis-progress", Progress { done, total });
+            ctx.emit("analysis-progress", Progress { done, total });
         }
         log::info!(
             "loudness analysis of {total} songs took {:?}",
@@ -254,16 +252,16 @@ pub fn start_analysis(app: AppHandle) {
         );
         state.library.lock().analyzing = false;
         state.save_library();
-        let _ = app.emit("analysis-progress", Progress { done: total, total });
-        let _ = app.emit("library-changed", ());
-        start_listening(app);
+        ctx.emit("analysis-progress", Progress { done: total, total });
+        ctx.emit("library-changed", ());
+        start_listening(ctx);
     });
 }
 
 /// Runs sound analysis (bliss) on every song that hasn't had it, a few at a time in the background.
 /// Results are saved every half minute so a long first run isn't lost if Cadence closes.
-pub fn start_listening(app: AppHandle) {
-    let state = app.state::<Arc<AppState>>().inner().clone();
+pub fn start_listening(ctx: Ctx) {
+    let state = ctx.state.clone();
     let todo: Vec<(String, String, String)> = {
         let mut lib = state.library.lock();
         if lib.listening || lib.scanning {
@@ -285,7 +283,7 @@ pub fn start_listening(app: AppHandle) {
     };
     std::thread::spawn(move || {
         let total = todo.len();
-        let _ = app.emit("sonic-progress", Progress { done: 0, total });
+        ctx.emit("sonic-progress", Progress { done: 0, total });
         let started = std::time::Instant::now();
         // As in start_analysis: the background threads analyse, this thread files the results.
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -305,7 +303,7 @@ pub fn start_listening(app: AppHandle) {
                 state.save_sonic();
                 saved = std::time::Instant::now();
             }
-            let _ = app.emit("sonic-progress", Progress { done: n + 1, total });
+            ctx.emit("sonic-progress", Progress { done: n + 1, total });
         }
         log::info!("sound analysis of {total} songs took {:?}", started.elapsed());
         // Forget songs that are no longer in the library.
@@ -315,7 +313,7 @@ pub fn start_listening(app: AppHandle) {
         }
         state.save_sonic();
         state.library.lock().listening = false;
-        let _ = app.emit("sonic-progress", Progress { done: total, total });
+        ctx.emit("sonic-progress", Progress { done: total, total });
     });
 }
 
@@ -323,7 +321,7 @@ pub type FolderWatcher = Debouncer<notify::RecommendedWatcher, RecommendedCache>
 
 /// Watches every music folder; when audio files appear, change or disappear, the library rescans
 /// (only changed files are re-read). Call again whenever the folder list changes.
-pub fn watch_folders(app: AppHandle) {
+pub fn watch_folders(ctx: Ctx) {
     // Watching a folder tree adds a watch for every folder in it, which takes seconds on a phone's
     // shared storage: done in the background, so startup (and adding a folder) doesn't wait for it.
     // When calls overlap, the latest one's watcher is kept.
@@ -331,9 +329,9 @@ pub fn watch_folders(app: AppHandle) {
     let generation = LATEST.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::spawn(move || {
         let started = std::time::Instant::now();
-        let watcher = make_watcher(&app);
+        let watcher = make_watcher(&ctx);
         if LATEST.load(Ordering::SeqCst) == generation {
-            let state = app.state::<Arc<AppState>>();
+            let state = &ctx.state;
             *state.watcher.lock() = watcher;
             log::info!("watching the music folders (set up in {:?})", started.elapsed());
         }
@@ -341,15 +339,15 @@ pub fn watch_folders(app: AppHandle) {
 }
 
 /// A watcher on every music folder (None without folders), rescanning when they change.
-fn make_watcher(app: &AppHandle) -> Option<FolderWatcher> {
-    let state = app.state::<Arc<AppState>>().inner().clone();
+fn make_watcher(ctx: &Ctx) -> Option<FolderWatcher> {
+    let state = ctx.state.clone();
     let folders = state.settings.lock().folders.clone();
     // Drop the old watcher first so removed folders stop being watched.
     *state.watcher.lock() = None;
     if folders.is_empty() {
         return None;
     }
-    let handle = app.clone();
+    let handle = ctx.clone();
     let debouncer = new_debouncer(
         Duration::from_secs(3),
         None,

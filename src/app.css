@@ -26,7 +26,7 @@
 
   --text: #ecedf5;
   --text-2: #9a9cb4;
-  --text-3: #64667f;
+  --text-3: #7b7e99;
 
   --accent: #8b7cff;
   --tint: #1b1c33;
@@ -60,7 +60,7 @@
   --hover: rgba(255, 255, 255, 0.06);
   --active: rgba(255, 255, 255, 0.1);
   --text-2: #a1a1aa;
-  --text-3: #6b6b74;
+  --text-3: #77777f;
   --panel: #161618;
   --well: #000000;
 }

@@ -1,13 +1,11 @@
 //! Tray icon, the mini player window, and showing/hiding the main window.
 
-use std::sync::Arc;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
 use crate::audio::Cmd;
-use crate::state::AppState;
 
 const TRAY_ID: &str = "cadence";
 pub const MINI_LABEL: &str = "mini";
@@ -31,7 +29,7 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
-            let send = |cmd| app.state::<Arc<AppState>>().engine.send(cmd);
+            let send = |cmd| app.state::<crate::ctx::Ctx>().state.engine.send(cmd);
             match event.id().as_ref() {
                 "toggle" => send(Cmd::Toggle),
                 "next" => send(Cmd::Next),

@@ -44,12 +44,15 @@ pub fn start(queue_file: PathBuf) -> Sender<Job> {
     tx
 }
 
-fn client() -> reqwest::blocking::Client {
+/// None when the system can't make secure connections (no CA certificates): scrobbling is off,
+/// rather than Cadence closing at launch.
+fn client() -> Option<reqwest::blocking::Client> {
     crate::net::builder()
         .timeout(Duration::from_secs(15))
         .user_agent(concat!("Cadence/", env!("CARGO_PKG_VERSION")))
         .build()
-        .expect("http client")
+        .inspect_err(|e| log::warn!("no HTTP client for scrobbling: {e}"))
+        .ok()
 }
 
 fn metadata(l: &Listen) -> serde_json::Value {
@@ -96,7 +99,11 @@ fn submit(
 }
 
 fn run(rx: Receiver<Job>, queue_file: PathBuf) {
-    let http = client();
+    let Some(http) = client() else {
+        // Nothing can be sent; take the jobs so senders never block.
+        for _ in rx {}
+        return;
+    };
     let mut queue: Vec<Listen> = std::fs::read_to_string(&queue_file)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -144,6 +151,7 @@ fn run(rx: Receiver<Job>, queue_file: PathBuf) {
 /// Checks a token and returns the ListenBrainz user name.
 pub fn validate(token: &str) -> Result<String, String> {
     let r = client()
+        .ok_or("This system can’t make secure connections (no CA certificates).")?
         .get(format!("{API}/validate-token"))
         .header("Authorization", format!("Token {}", token.trim()))
         .send()
