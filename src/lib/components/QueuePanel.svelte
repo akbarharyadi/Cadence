@@ -64,8 +64,7 @@
     border-left: 1px solid var(--line);
     background: rgba(16, 17, 26, 0.6);
     backdrop-filter: blur(20px);
-    /* Clears the floating player dock. */
-    padding-bottom: 100px;
+    padding-bottom: 12px;
     display: flex;
     flex-direction: column;
     animation: slide 0.18s ease-out;

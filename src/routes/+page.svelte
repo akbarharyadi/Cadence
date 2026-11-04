@@ -251,6 +251,7 @@
 <TitleBar />
 
 <div class="shell" class:docked={!!app.current}>
+  {#if !phone}<PlayerBar placement="top" />{/if}
   <div class="body">
     {#if showSidebar && !phone}<Sidebar />{/if}
     <div class="column">
@@ -276,7 +277,7 @@
     </div>
     {#if app.queueOpen}<QueuePanel />{/if}
   </div>
-  <PlayerBar />
+  {#if phone}<PlayerBar placement="bottom" />{/if}
   {#if phone && showSidebar}<TabBar />{/if}
 </div>
 
@@ -352,12 +353,8 @@
     min-width: 0;
     overflow-y: auto;
     position: relative;
+    /* The player is at the top on desktop; phones leave room for theirs (app.css). */
     padding-bottom: 32px;
-    transition: padding-bottom 0.3s;
-  }
-  /* Leave room for the floating player once something is queued. */
-  .docked .content {
-    padding-bottom: 104px;
   }
   .topbar {
     position: sticky;
@@ -447,9 +444,10 @@
     font-weight: 600;
     margin: 14px 0 0;
   }
+  /* Near the bottom edge; on phones, above the player and the tab bar. */
   .toast {
     position: fixed;
-    bottom: 120px;
+    bottom: 28px;
     left: 50%;
     transform: translateX(-50%);
     z-index: 95;
@@ -467,6 +465,11 @@
     from {
       opacity: 0;
       transform: translate(-50%, 10px);
+    }
+  }
+  @media (max-width: 720px) {
+    .toast {
+      bottom: calc(150px + env(safe-area-inset-bottom));
     }
   }
 </style>

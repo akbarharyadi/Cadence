@@ -176,8 +176,8 @@
     flex: none;
     display: flex;
     flex-direction: column;
-    /* Bottom padding clears the floating player dock. */
-    padding: 0 12px 106px;
+    /* The player is the window's top bar, so the sidebar runs to the bottom edge. */
+    padding: 0 12px 14px;
     background: rgba(16, 17, 26, 0.55);
     border-right: 1px solid var(--line);
     position: relative;

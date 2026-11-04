@@ -15,11 +15,11 @@
 </div>
 
 <style>
-  /* Same height as the page's top bar (52 px), so the window buttons line up with Back. */
+  /* Same height as the player's top bar (56 px), whose last 146 px are left for these buttons. */
   .titlebar {
     position: fixed;
     inset: 0 0 auto 0;
-    height: 52px;
+    height: 56px;
     z-index: 50;
     display: flex;
     align-items: center;

@@ -32,11 +32,12 @@
 {/if}
 
 <style>
-  /* Bottom right, above the player: clear of the sidebar and its Sound / Settings buttons. */
+  /* Bottom right, clear of the sidebar and its Sound / Settings buttons (on phones, above the
+     player and the tab bar). */
   .update {
     position: fixed;
     right: 24px;
-    bottom: 112px;
+    bottom: 24px;
     z-index: 35;
     display: flex;
     align-items: center;

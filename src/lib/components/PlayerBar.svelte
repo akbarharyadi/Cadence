@@ -6,6 +6,9 @@
   import Icon from "./Icon.svelte";
   import QualityBadge from "./QualityBadge.svelte";
 
+  /** "top": the desktop window's top bar (as in Apple Music). "bottom": the phone's player above the tab bar. */
+  let { placement = "bottom" }: { placement?: "top" | "bottom" } = $props();
+
   const s = $derived(app.status);
   const t = $derived(app.current);
   const album = $derived(app.currentAlbum);
@@ -94,14 +97,15 @@
   }
   let peek = $state<"prev" | "next" | null>(null);
 
-  /** The list grows out of the button: a small rise, scale and fade on top of its own offset. */
+  /** The list grows out of the button: a small rise (or drop, under the top bar), scale and fade on top of its own offset. */
   function pop(node: Element, { duration = 240 }: { duration?: number } = {}) {
     const base = getComputedStyle(node).transform;
     const offset = base === "none" ? "" : base;
+    const shift = placement === "top" ? -8 : 10;
     return {
       duration,
       easing: cubicOut,
-      css: (k: number) => `opacity: ${k}; transform: ${offset} translateY(${(1 - k) * 10}px) scale(${0.96 + 0.04 * k});`,
+      css: (k: number) => `opacity: ${k}; transform: ${offset} translateY(${(1 - k) * shift}px) scale(${0.96 + 0.04 * k});`,
     };
   }
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -120,39 +124,206 @@
   const list = $derived(shown ? around(shown === "next" ? 1 : -1, peek ? 5 : 1) : []);
 </script>
 
-<!-- The player appears once something is queued, and slides away when the queue is cleared. -->
-{#if t}
+{#snippet peekList(top: boolean)}
+  {#if list.length}
+    {#key shown}
+    <div
+      class="peek {shown}"
+      class:t={top}
+      role="dialog"
+      aria-label={shown === "next" ? "Up next" : "Played before"}
+      tabindex="-1"
+      onpointerenter={() => peek && openPeek(peek)}
+      onpointerleave={closePeek}
+      in:pop
+      out:pop={{ duration: 160 }}
+    >
+      <div class="peek-head">
+        <span>{shown === "next" ? (ending && !peek ? `Up next in ${Math.ceil(duration - app.position)}s` : "Up next") : "Played before"}</span>
+        {#if peek}
+          <button class="link" onclick={() => { app.queueOpen = true; peek = null; }}>Show all</button>
+        {/if}
+      </div>
+      {#each list as e, i (e.index)}
+        <button class="peek-row" class:first={i === 0} in:fly={{ y: top ? -6 : 6, duration: 260, delay: 40 + i * 28, easing: cubicOut }} onclick={() => { api.jump(e.index); peek = null; }} title="Play {e.track.title}">
+          <span class="peek-art">{#if e.album?.artSmall}<img src={artUrl(e.album.artSmall)} alt="" />{:else}<Icon name="note" size={14} />{/if}</span>
+          <span class="peek-text">
+            <span class="peek-title">{e.track.title}</span>
+            <span class="peek-artist">{e.track.artist}</span>
+          </span>
+          <span class="peek-time">{formatTime(e.track.duration)}</span>
+        </button>
+      {/each}
+    </div>
+    {/key}
+  {/if}
+{/snippet}
+
+{#snippet seekLine()}
+  <div
+    class="seek"
+    class:active={dragging}
+    class:glide
+    bind:this={seekEl}
+    bind:clientWidth={seekWidth}
+    role="slider"
+    tabindex="0"
+    aria-label="Seek"
+    aria-valuemin={0}
+    aria-valuemax={Math.round(duration)}
+    aria-valuenow={Math.round(shownPos)}
+    aria-valuetext="{formatTime(shownPos)} of {formatTime(duration)}"
+    onpointerdown={seekDown}
+    onpointermove={seekMove}
+    onpointerup={seekUp}
+    onpointerleave={() => (hoverX = null)}
+    onkeydown={seekKey}
+  >
+    <div class="rail"><div class="fill" style="transform: scaleX({pct / 100})"></div></div>
+    <div class="thumb-track" style="transform: translateX({pct}%)"><div class="thumb"></div></div>
+    {#if hoverX != null && duration}
+      <div class="tip" style="left: {hoverX * 100}%">{formatTime(dragging ? dragValue : hoverTime)}</div>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet songTools()}
+  {#if t && app.needsInfo(t)}
+    <button class="icon-btn fix" onclick={() => (app.fixing = t)} aria-label="Fix song info" title="Fix song info: find the title, artist, album and cover">
+      <Icon name="sparkle" size={16} />
+    </button>
+  {/if}
+  {#if t}
+    <button class="icon-btn skip" onclick={() => t && app.setSkipped([t], true)} aria-label="Skip this song from now on" title="Skip this song from now on: it's left out when albums, playlists and shuffles play">
+      <Icon name="skip" size={16} />
+    </button>
+  {/if}
+{/snippet}
+
+{#snippet rightTools()}
+  {#if path && s}
+    <button
+      class="path {path.tier}"
+      class:clipping={s.output.clipping}
+      onclick={() => app.go({ name: "sound" })}
+      title={`${path.steps.join(", ")}, to ${s.output.device} at ${khz(s.output.sampleRate)}${s.output.clipping ? ". The output reached full scale." : ""}`}
+    >
+      <span class="led"></span>{s.output.clipping ? "Clipping" : path.label}
+    </button>
+  {/if}
+  <div class="tools">
+    <button
+      class="icon-btn"
+      class:on={app.nowPlayingOpen && app.lyricsOpen}
+      disabled={!t}
+      onclick={() => {
+        app.lyricsOpen = true;
+        app.nowPlayingOpen = true;
+      }}
+      aria-label="Lyrics"
+      title="Lyrics"
+    >
+      <Icon name="lyrics" size={18} />
+    </button>
+    {#if placement === "top"}
+      <button class="icon-btn" class:on={app.queueOpen} onclick={() => (app.queueOpen = !app.queueOpen)} aria-label="Up Next" title="Up Next">
+        <Icon name="queue" size={18} />
+      </button>
+    {/if}
+    <button class="icon-btn" onclick={() => api.toggleMini()} aria-label="Mini player" title="Mini player">
+      <Icon name="mini" size={18} />
+    </button>
+    <button class="icon-btn" class:on={app.dsp?.eq.enabled} onclick={() => app.go({ name: "sound" })} aria-label="Sound" title="Sound: leveling, equalizer, crossfeed">
+      <Icon name="eq" size={18} />
+    </button>
+  </div>
+  <div class="vol">
+    <button class="icon-btn" onclick={() => setVolume(volume > 0 ? 0 : lastNonZero)} aria-label={volume === 0 ? "Unmute" : "Mute"}>
+      <Icon name={volume === 0 ? "mute" : volume < 0.5 ? "volumeLow" : "volume"} size={18} />
+    </button>
+    <input
+      type="range"
+      class="slider volume"
+      min="0"
+      max="1"
+      step="0.01"
+      value={volume}
+      style="--pct: {volume * 100}%"
+      onpointerdown={() => (volDragging = true)}
+      onpointerup={() => (volDragging = false)}
+      oninput={(e) => setVolume(+e.currentTarget.value)}
+      aria-label="Volume"
+      title="Volume {Math.round(volume * 100)}%"
+    />
+  </div>
+{/snippet}
+
+{#if placement === "top"}
+  <!-- Desktop: the player is the window's top bar, as in Apple Music: the buttons on the left, the
+       song and its seek line in the middle, the tools on the right (the window's own buttons
+       follow them, see TitleBar). Nothing floats over the page. -->
+  <header class="top" data-tauri-drag-region>
+    <div class="t-left" data-tauri-drag-region>
+      <div class="transport">
+        <button class="icon-btn" class:on={s?.repeat !== "off"} onclick={cycleRepeat} disabled={!t} aria-label={repeatLabel} title={repeatLabel}>
+          <Icon name={s?.repeat === "one" ? "repeatOne" : "repeat"} size={16} />
+        </button>
+        <button class="icon-btn" onclick={() => api.player("prev")} onpointerenter={() => openPeek("prev")} onpointerleave={closePeek} disabled={!t} aria-label="Previous"><Icon name="prev" size={19} /></button>
+        <button class="main-btn" class:playing={s?.playing} onclick={() => api.player("toggle")} disabled={!t} aria-label={s?.playing ? "Pause" : "Play"} title="{s?.playing ? 'Pause' : 'Play'} (Space)">
+          <Icon name={s?.playing ? "pause" : "play"} size={18} />
+        </button>
+        <button class="icon-btn" onclick={() => api.player("next")} onpointerenter={() => openPeek("next")} onpointerleave={closePeek} disabled={!t} aria-label="Next"><Icon name="next" size={19} /></button>
+      </div>
+      {@render peekList(true)}
+    </div>
+
+    <div class="lcd" class:idle={!t}>
+      {#if t}
+        <button class="art" onclick={() => (app.nowPlayingOpen = true)} aria-label="Open Now Playing" title="Open Now Playing">
+          {#if album?.artSmall}<img src={artUrl(album.artSmall)} alt="" />{:else}<Icon name="note" size={18} />{/if}
+          <span class="expand"><Icon name="expand" size={14} /></span>
+        </button>
+        <div class="lcd-body">
+          {#if album?.artSmall}<div class="lcd-glow" style="background-image: url('{artUrl(album.artSmall)}')" aria-hidden="true"></div>{/if}
+          <div class="meta" role="group" oncontextmenu={(e) => t && app.trackMenu(e, [t])}>
+            {#key t.id}
+              <div class="meta-in">
+                <button class="title" onclick={() => t && app.go({ name: "album", id: t.albumId })}>{t.title}</button>
+                <span class="sub">
+                  <button class="artist" onclick={() => t && app.go({ name: "artist", artist: app.artistOf(t.albumArtist) })}>{t.artist}</button>{#if t.album}<span class="dash">—</span><button class="album-link" onclick={() => t && app.go({ name: "album", id: t.albumId })}>{t.album}</button>{/if}
+                </span>
+              </div>
+            {/key}
+          </div>
+          <div class="lcd-side">
+            {@render songTools()}
+            {#if quality}<QualityBadge {quality} {detail} />{/if}
+          </div>
+          <span class="time l">{formatTime(shownPos)}</span>
+          <span class="time r">-{formatTime(Math.max(0, duration - shownPos))}</span>
+          {@render seekLine()}
+        </div>
+      {:else}
+        <div class="lcd-idle" data-tauri-drag-region>
+          <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15c2.5-7 4.5-7 6 0s3.5 7 6 0 3.5-7 6 0" /></svg>
+        </div>
+      {/if}
+    </div>
+
+    <div class="t-right" data-tauri-drag-region>
+      {@render rightTools()}
+    </div>
+  </header>
+{:else if t}
+  <!-- Phones: the player sits above the tab bar once something is queued, and slides away when
+       the queue is cleared. -->
   <footer class="dock" transition:fly={{ y: 40, duration: 320, easing: cubicOut }}>
     <div class="clip" aria-hidden="true">
       {#if album?.artSmall}<div class="glow" style="background-image: url('{artUrl(album.artSmall)}')"></div>{/if}
     </div>
 
     <!-- Seek: the whole top edge of the player. -->
-    <div
-      class="seek"
-      class:active={dragging}
-      class:glide
-      bind:this={seekEl}
-      bind:clientWidth={seekWidth}
-      role="slider"
-      tabindex="0"
-      aria-label="Seek"
-      aria-valuemin={0}
-      aria-valuemax={Math.round(duration)}
-      aria-valuenow={Math.round(shownPos)}
-      aria-valuetext="{formatTime(shownPos)} of {formatTime(duration)}"
-      onpointerdown={seekDown}
-      onpointermove={seekMove}
-      onpointerup={seekUp}
-      onpointerleave={() => (hoverX = null)}
-      onkeydown={seekKey}
-    >
-      <div class="rail"><div class="fill" style="transform: scaleX({pct / 100})"></div></div>
-      <div class="thumb-track" style="transform: translateX({pct}%)"><div class="thumb"></div></div>
-      {#if hoverX != null && duration}
-        <div class="tip" style="left: {hoverX * 100}%">{formatTime(dragging ? dragValue : hoverTime)}</div>
-      {/if}
-    </div>
+    {@render seekLine()}
 
     <div class="left">
       <button class="art" onclick={() => (app.nowPlayingOpen = true)} aria-label="Open Now Playing" title="Open Now Playing">
@@ -168,14 +339,7 @@
           </div>
         {/key}
       </div>
-      {#if app.needsInfo(t)}
-        <button class="icon-btn fix" onclick={() => (app.fixing = t)} aria-label="Fix song info" title="Fix song info: find the title, artist, album and cover">
-          <Icon name="sparkle" size={16} />
-        </button>
-      {/if}
-      <button class="icon-btn skip" onclick={() => app.setSkipped([t], true)} aria-label="Skip this song from now on" title="Skip this song from now on: it's left out when albums, playlists and shuffles play">
-        <Icon name="skip" size={16} />
-      </button>
+      {@render songTools()}
     </div>
 
     <div class="center">
@@ -193,96 +357,19 @@
           <Icon name="queue" size={18} />
         </button>
       </div>
-      {#if list.length}
-        {#key shown}
-        <div
-          class="peek {shown}"
-          role="dialog"
-          aria-label={shown === "next" ? "Up next" : "Played before"}
-          tabindex="-1"
-          onpointerenter={() => peek && openPeek(peek)}
-          onpointerleave={closePeek}
-          in:pop
-          out:pop={{ duration: 160 }}
-        >
-          <div class="peek-head">
-            <span>{shown === "next" ? (ending && !peek ? `Up next in ${Math.ceil(duration - app.position)}s` : "Up next") : "Played before"}</span>
-            {#if peek}
-              <button class="link" onclick={() => { app.queueOpen = true; peek = null; }}>Show all</button>
-            {/if}
-          </div>
-          {#each list as e, i (e.index)}
-            <button class="peek-row" class:first={i === 0} in:fly={{ y: 6, duration: 260, delay: 40 + i * 28, easing: cubicOut }} onclick={() => { api.jump(e.index); peek = null; }} title="Play {e.track.title}">
-              <span class="peek-art">{#if e.album?.artSmall}<img src={artUrl(e.album.artSmall)} alt="" />{:else}<Icon name="note" size={14} />{/if}</span>
-              <span class="peek-text">
-                <span class="peek-title">{e.track.title}</span>
-                <span class="peek-artist">{e.track.artist}</span>
-              </span>
-              <span class="peek-time">{formatTime(e.track.duration)}</span>
-            </button>
-          {/each}
-        </div>
-        {/key}
-      {/if}
+      {@render peekList(false)}
       <span class="time right">-{formatTime(Math.max(0, duration - shownPos))}</span>
     </div>
 
     <div class="right">
-      {#if path && s}
-        <button
-          class="path {path.tier}"
-          class:clipping={s.output.clipping}
-          onclick={() => app.go({ name: "sound" })}
-          title={`${path.steps.join(", ")}, to ${s.output.device} at ${khz(s.output.sampleRate)}${s.output.clipping ? ". The output reached full scale." : ""}`}
-        >
-          <span class="led"></span>{s.output.clipping ? "Clipping" : path.label}
-        </button>
-      {/if}
-      <div class="tools">
-        <button
-          class="icon-btn"
-          class:on={app.nowPlayingOpen && app.lyricsOpen}
-          onclick={() => {
-            app.lyricsOpen = true;
-            app.nowPlayingOpen = true;
-          }}
-          aria-label="Lyrics"
-          title="Lyrics"
-        >
-          <Icon name="lyrics" size={18} />
-        </button>
-        <button class="icon-btn" onclick={() => api.toggleMini()} aria-label="Mini player" title="Mini player">
-          <Icon name="mini" size={18} />
-        </button>
-        <button class="icon-btn" class:on={app.dsp?.eq.enabled} onclick={() => app.go({ name: "sound" })} aria-label="Sound" title="Sound: leveling, equalizer, crossfeed">
-          <Icon name="eq" size={18} />
-        </button>
-      </div>
-      <div class="vol">
-        <button class="icon-btn" onclick={() => setVolume(volume > 0 ? 0 : lastNonZero)} aria-label={volume === 0 ? "Unmute" : "Mute"}>
-          <Icon name={volume === 0 ? "mute" : volume < 0.5 ? "volumeLow" : "volume"} size={18} />
-        </button>
-        <input
-          type="range"
-          class="slider volume"
-          min="0"
-          max="1"
-          step="0.01"
-          value={volume}
-          style="--pct: {volume * 100}%"
-          onpointerdown={() => (volDragging = true)}
-          onpointerup={() => (volDragging = false)}
-          oninput={(e) => setVolume(+e.currentTarget.value)}
-          aria-label="Volume"
-          title="Volume {Math.round(volume * 100)}%"
-        />
-      </div>
+      {@render rightTools()}
     </div>
   </footer>
 {/if}
 
 <style>
-  /* A floating player, tinted by the album that's playing. */
+  /* Phones: the player above the tab bar, tinted by the album that's playing (sized in the
+     phone rules below). */
   .dock {
     position: fixed;
     left: 14px;
@@ -731,6 +818,243 @@
   .path.clipping .led {
     background: var(--bad);
     box-shadow: 0 0 8px var(--bad);
+  }
+
+  /* ---------- desktop: the window's top bar ---------- */
+  /* Above the page, not over it: nothing scrolls under it, so it needs no live blur; the album's
+     colours come through from the ambient light behind the window. */
+  .top {
+    position: relative;
+    z-index: 30;
+    flex: none;
+    height: 56px;
+    display: grid;
+    grid-template-columns: 240px minmax(280px, 1fr) auto;
+    align-items: center;
+    gap: 16px;
+    /* The window's own buttons (TitleBar) sit in the last 146 px. */
+    padding: 0 146px 0 0;
+    background: color-mix(in srgb, var(--ink) 55%, transparent);
+    border-bottom: 1px solid var(--line);
+  }
+  .t-left {
+    position: relative;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .top .transport {
+    gap: 6px;
+  }
+  .top .main-btn {
+    width: 34px;
+    height: 34px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  }
+  .top .main-btn.playing {
+    box-shadow:
+      0 2px 10px rgba(0, 0, 0, 0.35),
+      0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .top :disabled {
+    opacity: 0.35;
+    pointer-events: none;
+  }
+  .t-right {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    min-width: 0;
+  }
+  .top .volume {
+    width: 90px;
+  }
+
+  /* The middle: the song, like a small display, with the seek line along its bottom edge. */
+  .lcd {
+    justify-self: center;
+    width: min(100%, 680px);
+    height: 44px;
+    display: flex;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.045);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .lcd-idle {
+    width: 100%;
+    height: 100%;
+    display: grid;
+    place-items: center;
+  }
+  .lcd-idle .mark {
+    width: 22px;
+    height: 22px;
+    fill: none;
+    stroke: var(--text-3);
+    stroke-width: 2;
+    stroke-linecap: round;
+  }
+  .lcd .art {
+    width: 44px;
+    height: 44px;
+    border-radius: 9px 0 0 9px;
+    box-shadow: none;
+  }
+  .lcd .art:hover {
+    transform: none;
+  }
+  .lcd-body {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px 2px 0;
+  }
+  /* The cover's colours, faintly, from the left. */
+  .lcd-glow {
+    position: absolute;
+    inset: 0;
+    background-size: cover;
+    background-position: center;
+    filter: blur(24px) saturate(1.6);
+    opacity: 0.22;
+    clip-path: inset(0 round 0 9px 9px 0);
+    mask-image: linear-gradient(to right, black, transparent 75%);
+    pointer-events: none;
+  }
+  /* Room at the sides for the times, which show over the corners. */
+  .lcd .meta {
+    position: relative;
+    padding: 0 38px;
+  }
+  .lcd .meta-in {
+    align-items: center;
+    gap: 0;
+  }
+  .lcd .title {
+    font-size: 13px;
+  }
+  .sub {
+    display: flex;
+    min-width: 0;
+    max-width: 100%;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+  .sub .artist,
+  .album-link {
+    flex: 0 1 auto;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .album-link:hover {
+    text-decoration: underline;
+  }
+  .dash {
+    flex: none;
+    margin: 0 6px;
+    color: var(--text-3);
+  }
+  .lcd-side {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  /* Just "Lossless" here; the bit depth and rate show on hover (the badge's tooltip). */
+  .lcd-side :global(.detail) {
+    display: none;
+  }
+  .lcd .fix,
+  .lcd .skip {
+    width: 26px;
+    height: 26px;
+    margin: 0;
+  }
+  .lcd:hover .skip {
+    opacity: 1;
+  }
+  .lcd .time {
+    position: absolute;
+    bottom: 6px;
+    width: auto;
+    font-size: 10.5px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .lcd .time.l {
+    left: 10px;
+    text-align: left;
+  }
+  .lcd .time.r {
+    right: 10px;
+    text-align: right;
+  }
+  .lcd:hover .time,
+  .lcd:focus-within .time {
+    opacity: 1;
+  }
+  /* The hit area reaches a little below the display, so the line is easy to grab. */
+  .lcd .seek {
+    left: 6px;
+    right: 6px;
+    top: auto;
+    bottom: -6px;
+    height: 12px;
+  }
+  .lcd .rail {
+    top: auto;
+    bottom: 6px;
+    border-radius: 2px;
+  }
+  .lcd .thumb {
+    top: 0;
+    margin: -1px 0 0 -6px;
+  }
+  .lcd .tip {
+    top: 16px;
+  }
+  /* The lists of songs before and after drop down from the buttons. */
+  .peek.t {
+    top: calc(100% + 4px);
+    bottom: auto;
+  }
+  .peek.t::after {
+    top: auto;
+    bottom: 100%;
+    height: 12px;
+  }
+  .peek.t.prev {
+    left: 8px;
+    transform: none;
+    transform-origin: 30% 0;
+  }
+  .peek.t.next {
+    left: 40px;
+    transform: none;
+    transform-origin: 45% 0;
+  }
+  @media (max-width: 1080px) {
+    .top {
+      grid-template-columns: 200px minmax(280px, 1fr) auto;
+    }
+    .top .volume {
+      display: none;
+    }
+    /* Only the gold mark; the words show on hover. */
+    .lcd-side :global(.q) {
+      display: none;
+    }
   }
 
   /* Narrower windows: drop the signal chip, then the times. */
