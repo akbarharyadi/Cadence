@@ -1381,9 +1381,17 @@ pub fn listening_stats(ctx: &Ctx, range: String) -> ListeningStats {
     out
 }
 
-/// The last Discover search, shown again when the page opens.
+/// The last Discover search, shown again when the page opens (without what the library has now).
 pub fn ai_recommended(ctx: &Ctx) -> crate::ai::RecommendCache {
-    crate::state::read_json(&ctx.state.data_dir.join("ai-recommend.json"))
+    let mut last: crate::ai::RecommendCache = crate::state::read_json(&ctx.state.data_dir.join("ai-recommend.json"));
+    last.picks = ai_still_new(ctx, last.picks);
+    last
+}
+
+/// Suggestions the library still doesn't have: the UI asks again when the library changes, so
+/// songs downloaded since drop out of Discover and Home.
+pub fn ai_still_new(ctx: &Ctx, picks: Vec<crate::ai::Discovery>) -> Vec<crate::ai::Discovery> {
+    crate::catalog::still_new(picks, &ctx.state.library.lock().snapshot.tracks)
 }
 
 /// A song as Discover remembers it ("artist|title", lower-case).
@@ -1472,12 +1480,21 @@ static DAILY: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 pub fn ai_daily_picks(ctx: &Ctx, refresh: bool) -> Result<crate::ai::RecommendCache, String> {
     let _one = DAILY.lock();
     let file = ctx.state.data_dir.join("ai-recommend-daily.json");
-    let cache: DailyPicks = crate::state::read_json(&file);
+    let mut cache: DailyPicks = crate::state::read_json(&file);
     if !refresh && cache.day == crate::ai::today() {
         if !cache.picks.picks.is_empty() {
-            return Ok(cache.picks);
-        }
-        if !cache.error.is_empty() {
+            // Without what the library has now: downloaded since, or there under other names
+            // (looked up once for picks saved without them). When it has all of them, new ones.
+            let library = ctx.state.library.lock().snapshot.tracks.clone();
+            if crate::catalog::add_other_names(&mut cache.picks.picks, &library) {
+                crate::state::write_json(&file, &cache);
+            }
+            let mut today = cache.picks;
+            today.picks = crate::catalog::still_new(today.picks, &library);
+            if !today.picks.is_empty() {
+                return Ok(today);
+            }
+        } else if !cache.error.is_empty() {
             return Err(cache.error);
         }
     }
@@ -1530,6 +1547,7 @@ macro_rules! cadence_commands {
             plain ui_busy() -> ();
             plain listening_stats(range: String) -> $crate::api::ListeningStats;
             plain ai_recommended() -> $crate::ai::RecommendCache;
+            plain ai_still_new(picks: Vec<$crate::ai::Discovery>) -> Vec<$crate::ai::Discovery>;
             blocking ai_daily_picks(refresh: bool) -> $crate::ai::RecommendCache;
             blocking ai_recommend(basis: String, value: String) -> $crate::ai::RecommendCache;
             plain play_tracks(ids: Vec<String>, start: usize, picked: Option<bool>) -> ();

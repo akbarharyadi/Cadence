@@ -438,6 +438,8 @@ export const api = {
   listeningProfile: () => invoke<ListeningProfile>("listening_profile"),
   listeningStats: (range: StatsRange) => invoke<ListeningStats>("listening_stats", { range }),
   aiRecommended: () => invoke<Recommendations>("ai_recommended"),
+  /** The suggestions the library still doesn't have (asked again when the library changes). */
+  aiStillNew: (picks: NewSong[]) => invoke<NewSong[]>("ai_still_new", { picks }),
   aiRecommend: (basis: DiscoverBasis, value: string) => invoke<Recommendations>("ai_recommend", { basis, value }),
   /** Today's picks for this month's listening: made once a day and kept. */
   aiDailyPicks: (refresh: boolean) => invoke<Recommendations>("ai_daily_picks", { refresh }),

@@ -544,6 +544,20 @@ pub struct Discovery {
     pub rating: u8,
     /// The song or artist in the listener's library it's most like (Discover).
     pub like: String,
+    /// The song's names in the catalogue's other store, for recognising it in the library.
+    pub other_names: OtherNames,
+}
+
+/// What a song is called in the catalogue's other store: Japanese releases are "米津玄師 -
+/// KICK BACK" in Japan and "Kenshi Yonezu - KICK BACK" elsewhere, and a library may use either.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OtherNames {
+    /// Looked up (even if the names turned out to be the same).
+    pub checked: bool,
+    pub artists: Vec<String>,
+    pub titles: Vec<String>,
+    pub albums: Vec<String>,
 }
 
 /// How often something was played: an artist, a genre or a song ("Artist - Title").

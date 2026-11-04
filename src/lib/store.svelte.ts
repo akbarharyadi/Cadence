@@ -322,6 +322,7 @@ class AppState {
       listen("library-changed", async () => {
         await this.loadLibrary();
         this.scan = null;
+        await this.dropOwnedSuggestions();
       }),
       listen<{ done: number; total: number }>("library-progress", (e) => (this.scan = e.payload)),
       listen("history-changed", async () => (this.listening = await api.history())),
@@ -438,6 +439,21 @@ class AppState {
     } catch (e) {
       this.dailyError = String(e);
       this.dailyState = "error";
+    }
+  }
+
+  /** The library changed: Discover's and Home's suggestions without the songs it has now. */
+  async dropOwnedSuggestions() {
+    const [daily, found, aiNew] = [this.daily, this.discover, this.aiNew];
+    const still = (picks: import("./api").NewSong[]) => (picks.length ? api.aiStillNew(picks) : Promise.resolve(picks));
+    try {
+      const [d, f, n] = await Promise.all([still(daily?.picks ?? []), still(found?.picks ?? []), still(aiNew)]);
+      // Unless new ones came in meanwhile.
+      if (daily && this.daily === daily) this.daily = { ...daily, picks: d };
+      if (found && this.discover === found) this.discover = { ...found, picks: f };
+      if (this.aiNew === aiNew) this.aiNew = n;
+    } catch {
+      // Kept as they are.
     }
   }
 
