@@ -2,6 +2,18 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.27 (2026-11-04)
+
+- **The player is the window's top bar.** On computers, the player no longer floats over the bottom of the page: it
+  sits at the top of the window, with the controls on the left and the song in the middle like a small display, its
+  seek line along the bottom edge and the album's colours behind it. Lists and pages now run to the bottom edge.
+  Phones keep the player at the bottom, above the tab bar.
+- **Discover knows the songs you have under other names.** Japanese songs are often tagged in Latin letters
+  ("Kenshi Yonezu – KICK BACK") while the AI DJ names them in Japanese (米津玄師), so Discover could suggest a song you
+  already had. It now checks both names, for the song, the artist and the album.
+- **Songs you get drop out of Discover at once.** When a song from Discover or **New music for you** arrives in your
+  library, it disappears from the picks right away, instead of staying until the next day's picks.
+
 ## 0.2.26 (2026-11-03)
 
 - **Discover new music.** A new **Discover** page finds songs you don't have yet, searched for on the web by the AI
