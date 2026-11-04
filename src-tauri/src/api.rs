@@ -1,7 +1,6 @@
 //! Everything the UI can ask of Cadence, as plain functions over `Ctx`. The Tauri app wraps them
-//! as commands (commands.rs) and the native Windows app calls them through ffi.rs; the list at the
-//! end (`cadence_commands!`) drives both. Slow ones block: Tauri runs them on a worker thread,
-//! the native app calls them off its UI thread.
+//! as commands (commands.rs) from the list at the end (`cadence_commands!`). Slow ones block, and
+//! Tauri runs them on a worker thread.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1515,7 +1514,7 @@ pub fn ai_discover(ctx: &Ctx, refresh: bool) -> Result<Vec<crate::ai::Discovery>
     ai_daily_picks(ctx, refresh).map(|r| r.picks)
 }
 
-/// Every command, for both front ends (commands.rs for Tauri, ffi.rs for the native app).
+/// Every command (made into Tauri commands by commands.rs).
 /// `plain` returns a value, `fallible` a Result, `blocking` a Result after slow work (network,
 /// files, AI), which Tauri runs on a worker thread. Argument names are the UI's, in camelCase.
 #[macro_export]

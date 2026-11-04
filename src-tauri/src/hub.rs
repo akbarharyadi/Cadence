@@ -1,6 +1,5 @@
-//! Starting Cadence's core and passing the engine's status on. Shared by the Tauri app (lib.rs)
-//! and the native Windows app (ffi.rs), so both get the same history, scrobbling, saved session,
-//! media overlay, folder scanning and background analysis.
+//! Starting Cadence's core and passing the engine's status on (for lib.rs): history, scrobbling,
+//! saved session, media overlay, folder scanning and background analysis.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

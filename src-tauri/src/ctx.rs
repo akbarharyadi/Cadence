@@ -1,6 +1,6 @@
 //! What the core needs from the app around it: the shared state, the voice models, and somewhere
-//! to send events. The Tauri app (web UI) and the native Windows app (ffi.rs) each provide a
-//! `Host`; everything else — commands, scans, analysis, voice — is the same code for both.
+//! to send events, provided by the Tauri app as a `Host`; commands, scans, analysis and voice
+//! only go through it.
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -5,11 +5,6 @@ mod autotag;
 mod catalog;
 mod covers;
 mod ctx;
-/// C ABI for the native Windows front end; see `ffi.rs`.
-#[cfg(feature = "ffi")]
-pub mod ffi;
-#[cfg(feature = "ffi")]
-mod update;
 pub mod audio;
 mod commands;
 pub mod history;
