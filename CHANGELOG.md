@@ -2,6 +2,25 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.28 (2026-11-06)
+
+- **An easier player.** The song's time and time left now always show, either side of a thicker seek line that's
+  easier to grab. Click anywhere on the song display to open Now Playing; the title, artist and album are still links.
+  **+** adds the song to a playlist, and **⋯** opens its menu. "Skip this song from now on" has moved into that menu,
+  away from Next, and its message has an **Undo** button. When nothing is playing, the display offers **Shuffle your
+  library**.
+- **Shuffle.** A new Shuffle button sits beside the play buttons, with Repeat on the other side; both light up when
+  on. Shuffle plays the songs coming up in a random order, and keeps doing that for anything you play next, always
+  starting with the song you picked. Turn it off and the songs go back in their order. It's in Now Playing too.
+- **Player at the top or the bottom.** Settings → Appearance → **Player position**: keep the player as the window's
+  top bar, or put it in a bar along the bottom of the window, with the song on the left and the buttons in the
+  middle. You can also switch it from the player's **⋯** menu, which now holds the mini player and sound settings.
+- **Keyboard shortcuts:** Ctrl+S shuffle, Ctrl+R repeat, Ctrl+U Up Next, Ctrl+L lyrics. The buttons' tooltips show
+  their shortcuts.
+- **The queue follows songs that move.** When a song's file is moved, renamed or replaced by another copy (for
+  example, when duplicates are cleaned up), the songs waiting in Up Next now play from the new file instead of
+  failing. The player also keeps showing the song that's playing instead of going blank.
+
 ## 0.2.27 (2026-11-04)
 
 - **The player is the window's top bar.** On computers, the player no longer floats over the bottom of the page: it
