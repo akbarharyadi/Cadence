@@ -191,6 +191,12 @@ pub enum Cmd {
     SetVolume(f32),
     SetDsp(DspSettings),
     SetRepeat(Repeat),
+    /// Shuffle the songs after the current one (and every list played from now on); off puts
+    /// them back in their order.
+    SetShuffle(bool),
+    /// Songs whose files moved (found again by a rescan): the queue entry with the old id gets
+    /// the new one, in place.
+    Replace(Vec<(String, QueueItem)>),
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -249,6 +255,7 @@ pub struct Status {
     pub duration: f64,
     pub volume: f32,
     pub repeat: Repeat,
+    pub shuffle: bool,
     pub source: Option<SourceInfo>,
     pub output: OutputInfo,
     pub error: Option<String>,
@@ -265,12 +272,14 @@ impl Engine {
         volume: f32,
         dsp: DspSettings,
         repeat: Repeat,
+        shuffle: bool,
         on_status: impl Fn(&Status) + Send + 'static,
     ) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
         let status = Arc::new(Mutex::new(Status {
             volume,
             repeat,
+            shuffle,
             ..Default::default()
         }));
         let status2 = status.clone();
@@ -279,7 +288,7 @@ impl Engine {
         std::thread::Builder::new()
             .name("cadence-audio".into())
             .spawn(move || {
-                Worker::new(rx, status2, Box::new(on_status), shared2, volume, dsp, repeat).run()
+                Worker::new(rx, status2, Box::new(on_status), shared2, volume, dsp, repeat, shuffle).run()
             })
             .expect("audio thread");
         Self { tx, status, shared }
@@ -368,6 +377,9 @@ struct Worker {
     pending: Vec<f32>,
     mapped: Vec<f32>,
     repeat: Repeat,
+    shuffle: bool,
+    /// While shuffled: the order the songs after the current one had, to put back.
+    unshuffled: Vec<String>,
     volume: f32,
     error: Option<String>,
     last_emit: Instant,
@@ -398,6 +410,7 @@ impl Worker {
         volume: f32,
         dsp: DspSettings,
         repeat: Repeat,
+        shuffle: bool,
     ) -> Self {
         Self {
             rx,
@@ -430,6 +443,8 @@ impl Worker {
             pending: Vec::new(),
             mapped: Vec::new(),
             repeat,
+            shuffle,
+            unshuffled: Vec::new(),
             volume,
             error: None,
             last_emit: Instant::now(),
@@ -693,13 +708,25 @@ impl Worker {
     fn handle(&mut self, cmd: Cmd) {
         self.dirty = true;
         match cmd {
-            Cmd::Load { items, index } => {
+            Cmd::Load { mut items, mut index } => {
+                self.unshuffled.clear();
+                if self.shuffle && index < items.len() && items.len() > 1 {
+                    // The chosen song first, the rest in a random order (put back in the list's
+                    // order, from that song on, if shuffle is turned off).
+                    let first = items.remove(index);
+                    items.rotate_left(index);
+                    self.unshuffled = items.iter().map(|q| q.id.clone()).collect();
+                    shuffle_in_place(&mut items);
+                    items.insert(0, first);
+                    index = 0;
+                }
                 self.queue = items;
                 if index < self.queue.len() {
                     self.start_at(index, 0.0, true);
                 }
             }
             Cmd::Restore { items, index, position } => {
+                self.unshuffled.clear();
                 self.queue = items;
                 if let Some(item) = self.queue.get(index) {
                     // Not right at the very end, or it would simply move on to the next song.
@@ -821,6 +848,52 @@ impl Worker {
                 }
             }
             Cmd::SetRepeat(r) => self.repeat = r,
+            Cmd::SetShuffle(on) => self.set_shuffle(on),
+            Cmd::Replace(pairs) => {
+                for q in self.queue.iter_mut() {
+                    if let Some((_, new)) = pairs.iter().find(|(old, _)| *old == q.id) {
+                        *q = new.clone();
+                    }
+                }
+                for id in self.unshuffled.iter_mut() {
+                    if let Some((_, new)) = pairs.iter().find(|(old, _)| old == id) {
+                        *id = new.id.clone();
+                    }
+                }
+                self.dirty = true;
+            }
+        }
+    }
+
+    fn set_shuffle(&mut self, on: bool) {
+        if on == self.shuffle {
+            return;
+        }
+        self.shuffle = on;
+        self.dirty = true;
+        let Some(pi) = self.play_index else {
+            self.unshuffled.clear();
+            return;
+        };
+        let mut rest = self.queue.split_off(pi + 1);
+        if on {
+            self.unshuffled = rest.iter().map(|q| q.id.clone()).collect();
+            shuffle_in_place(&mut rest);
+        } else {
+            // Back in the order they had; songs added since keep their place at the end.
+            let mut ordered = Vec::with_capacity(rest.len());
+            for id in std::mem::take(&mut self.unshuffled) {
+                if let Some(k) = rest.iter().position(|q| q.id == id) {
+                    ordered.push(rest.remove(k));
+                }
+            }
+            ordered.append(&mut rest);
+            rest = ordered;
+        }
+        self.queue.append(&mut rest);
+        // The next song may already be on its way to the device: prepare the new one instead.
+        if self.dec_index > pi || self.boundaries.iter().any(|b| b.index > pi) {
+            self.restart_here(None);
         }
     }
 
@@ -1387,6 +1460,7 @@ impl Worker {
             duration,
             volume: self.volume,
             repeat: self.repeat,
+            shuffle: self.shuffle,
             source: current.map(|b| b.info.clone()),
             output,
             error: self.error.clone(),
@@ -1465,5 +1539,20 @@ mod tests {
         let mut out = Vec::new();
         map_channels(&[0.5, -0.5], 1, 2, &mut out);
         assert_eq!(out, vec![0.5, 0.5, -0.5, -0.5]);
+    }
+}
+
+/// Fisher–Yates with a small xorshift generator seeded from the clock (no crate needed for this).
+fn shuffle_in_place<T>(items: &mut [T]) {
+    let mut x = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+        | 1;
+    for i in (1..items.len()).rev() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        items.swap(i, (x % (i as u64 + 1)) as usize);
     }
 }

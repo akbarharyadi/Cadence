@@ -120,9 +120,6 @@
             <button class="icon-btn light skip" onclick={(e) => app.trackMenu(e, [t])} aria-label="More options" title="More options">
               <Icon name="more" size={20} />
             </button>
-            <button class="icon-btn light skip" onclick={() => app.setSkipped([t], true)} aria-label="Skip this song from now on" title="Skip this song from now on">
-              <Icon name="skip" size={20} />
-            </button>
           </div>
           <button class="artist" onclick={() => app.go({ name: "artist", artist: app.artistOf(t.albumArtist) })}>{t.artist}</button>
           <button class="album" onclick={() => app.go({ name: "album", id: t.albumId })}>{t.album}{t.year ? `, ${t.year}` : ""}</button>
@@ -148,17 +145,24 @@
         </div>
 
         <div class="transport">
-          <button class="icon-btn light" class:on={s?.repeat !== "off"} onclick={() => api.setRepeat(s?.repeat === "off" ? "all" : s?.repeat === "all" ? "one" : "off")} aria-label="Repeat" title="Repeat">
-            <Icon name={s?.repeat === "one" ? "repeatOne" : "repeat"} size={20} />
-          </button>
+          <div class="side">
+            <button class="icon-btn light" class:on={s?.shuffle} onclick={() => app.toggleShuffle()} aria-label="Shuffle" aria-pressed={!!s?.shuffle} title="Shuffle (Ctrl+S)">
+              <Icon name="shuffle" size={20} />
+            </button>
+            <button class="icon-btn light" class:on={s?.repeat !== "off"} onclick={() => app.cycleRepeat()} aria-label="Repeat" aria-pressed={s?.repeat !== "off"} title="Repeat (Ctrl+R)">
+              <Icon name={s?.repeat === "one" ? "repeatOne" : "repeat"} size={20} />
+            </button>
+          </div>
           <button class="icon-btn light big" onclick={() => api.player("prev")} aria-label="Previous"><Icon name="prev" size={30} /></button>
           <button class="icon-btn light huge" onclick={() => api.player("toggle")} aria-label={s?.playing ? "Pause" : "Play"}>
             <Icon name={s?.playing ? "pause" : "play"} size={38} />
           </button>
           <button class="icon-btn light big" onclick={() => api.player("next")} aria-label="Next"><Icon name="next" size={30} /></button>
-          <button class="icon-btn light" class:on={app.lyricsOpen} onclick={() => (app.lyricsOpen = !app.lyricsOpen)} aria-label="Lyrics" title="Lyrics">
-            <Icon name="lyrics" size={20} />
-          </button>
+          <div class="side end">
+            <button class="icon-btn light" class:on={app.lyricsOpen} onclick={() => (app.lyricsOpen = !app.lyricsOpen)} aria-label="Lyrics" title="Lyrics (Ctrl+L)">
+              <Icon name="lyrics" size={20} />
+            </button>
+          </div>
         </div>
 
         <div class="facts">
@@ -396,12 +400,21 @@
     font-variant-numeric: tabular-nums;
     margin-top: 4px;
   }
+  /* Play in the middle; shuffle and repeat on the left, lyrics on the right. */
   .transport {
     width: 100%;
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: 1fr auto auto auto 1fr;
     align-items: center;
+    gap: 6px;
     margin-top: 14px;
+  }
+  .side {
+    display: flex;
+    gap: 2px;
+  }
+  .side.end {
+    justify-content: flex-end;
   }
   .icon-btn.light {
     color: rgba(255, 255, 255, 0.85);

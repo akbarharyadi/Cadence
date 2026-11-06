@@ -145,6 +145,7 @@ pub fn run() {
             commands::remove_from_queue,
             commands::set_volume,
             commands::set_repeat,
+            commands::set_shuffle,
             commands::get_status,
             commands::get_dsp,
             commands::set_dsp,

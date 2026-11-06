@@ -116,6 +116,11 @@ pub fn start_scan(ctx: Ctx) {
     std::thread::spawn(move || {
         let folders = state.settings.lock().folders.clone();
         let previous = state.library.lock().snapshot.tracks.clone();
+        // The queue's songs as they are now, to find again if their files move.
+        let queued: Vec<library::Track> = {
+            let ids: std::collections::HashSet<String> = state.engine.status().queue.into_iter().collect();
+            previous.iter().filter(|t| ids.contains(&t.id)).cloned().collect()
+        };
         let started = std::time::Instant::now();
         let mut tracks = library::scan(&folders, previous, |done, total| {
             ctx.emit("library-progress", Progress { done, total });
@@ -143,6 +148,10 @@ pub fn start_scan(ctx: Ctx) {
             lib.scanning = false;
             std::mem::take(&mut lib.rescan_pending)
         };
+        let found = state.remap_queue(&queued);
+        if found > 0 {
+            log::info!("{found} queued songs moved; the queue follows them");
+        }
         state.save_library();
         ctx.emit("library-changed", ());
         if WATCH_AFTER_SCAN.swap(false, Ordering::SeqCst) {

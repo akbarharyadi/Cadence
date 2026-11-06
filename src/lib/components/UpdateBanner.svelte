@@ -83,6 +83,10 @@
     transform-origin: left;
     transition: transform 0.2s;
   }
+  /* Above the player when it's along the bottom (Settings > Appearance). */
+  :global(html.player-bottom) .update {
+    bottom: 104px;
+  }
   @media (max-width: 720px) {
     .update {
       left: 8px;

@@ -83,6 +83,10 @@
     [["Ctrl", "←"], "Previous song"],
     [["→"], "Forward 10 seconds"],
     [["←"], "Back 10 seconds"],
+    [["Ctrl", "S"], "Shuffle on or off"],
+    [["Ctrl", "R"], "Repeat: off, all, this song"],
+    [["Ctrl", "U"], "Show or hide Up Next"],
+    [["Ctrl", "L"], "Lyrics"],
     [["Ctrl", "K"], "Search"],
     [["Alt", "←"], "Go back"],
     [["Esc"], "Close Now Playing"],
@@ -195,6 +199,26 @@
         onchange={(v) => app.setTheme(v)}
       />
     </div>
+    {#if !droid}
+      <div class="title-row">
+        <div>
+          <h2 class="section-title">Player position</h2>
+          <p class="desc">
+            {#if app.playerPosition === "top"}The player is the window’s top bar: buttons on the left, the song in the middle.
+            {:else}The player runs along the bottom of the window: the song on the left, the buttons and seek line in the middle.{/if}
+          </p>
+        </div>
+        <Segmented
+          label="Player position"
+          options={[
+            { value: "top", label: "Top" },
+            { value: "bottom", label: "Bottom" },
+          ]}
+          value={app.playerPosition}
+          onchange={(v) => app.setPlayerPosition(v)}
+        />
+      </div>
+    {/if}
   </section>
 
   {#if droid?.getPlayOnBluetooth}
@@ -432,6 +456,9 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: 24px;
+  }
+  .title-row + .title-row {
+    margin-top: 22px;
   }
   .desc {
     margin: 6px 0 0;

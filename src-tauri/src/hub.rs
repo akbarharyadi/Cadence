@@ -28,7 +28,7 @@ pub fn open(data_dir: PathBuf, local_dir: &Path, host: Arc<dyn Host>) -> (Ctx, R
     crate::tagedit::write_leftovers(&data_dir);
 
     let (status_tx, status_rx) = crossbeam_channel::unbounded::<Status>();
-    let engine = Engine::start(settings.volume, settings.dsp.clone(), settings.repeat, move |s| {
+    let engine = Engine::start(settings.volume, settings.dsp.clone(), settings.repeat, settings.shuffle, move |s| {
         let _ = status_tx.send(s.clone());
     });
 

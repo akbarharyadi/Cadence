@@ -101,6 +101,7 @@ export interface Status {
   duration: number;
   volume: number;
   repeat: Repeat;
+  shuffle: boolean;
   source: SourceInfo | null;
   output: OutputInfo;
   error: string | null;
@@ -379,6 +380,8 @@ export const api = {
   removeFromQueue: (index: number) => invoke<void>("remove_from_queue", { index }),
   setVolume: (volume: number) => invoke<void>("set_volume", { volume }),
   setRepeat: (repeat: Repeat) => invoke<void>("set_repeat", { repeat }),
+  /** Shuffle the songs coming up (and every list played from now on); off puts them back in order. */
+  setShuffle: (on: boolean) => invoke<void>("set_shuffle", { on }),
   status: () => invoke<Status>("get_status"),
   dsp: () => invoke<DspSettings>("get_dsp"),
   setDsp: (dsp: DspSettings) => invoke<void>("set_dsp", { dsp }),

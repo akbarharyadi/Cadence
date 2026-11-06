@@ -655,6 +655,13 @@ pub fn set_repeat(ctx: &Ctx, repeat: Repeat) {
     state.save_settings();
 }
 
+pub fn set_shuffle(ctx: &Ctx, on: bool) {
+    let state = &ctx.state;
+    state.engine.send(Cmd::SetShuffle(on));
+    state.settings.lock().shuffle = on;
+    state.save_settings();
+}
+
 pub fn get_status(ctx: &Ctx) -> Status {
     let state = &ctx.state;
     state.engine.status()
@@ -1557,6 +1564,7 @@ macro_rules! cadence_commands {
             plain remove_from_queue(index: usize) -> ();
             plain set_volume(volume: f32) -> ();
             plain set_repeat(repeat: $crate::audio::Repeat) -> ();
+            plain set_shuffle(on: bool) -> ();
             plain get_status() -> $crate::audio::Status;
             plain get_dsp() -> $crate::audio::DspSettings;
             plain set_dsp(dsp: $crate::audio::DspSettings) -> ();

@@ -16,6 +16,8 @@ pub struct Settings {
     pub volume: f32,
     pub dsp: DspSettings,
     pub repeat: Repeat,
+    /// Songs play in a random order.
+    pub shuffle: bool,
     /// Closing the window keeps Cadence playing in the tray.
     pub close_to_tray: bool,
     /// Look up lyrics on LRCLIB when a song has none (sends artist, title and album).
@@ -45,6 +47,7 @@ impl Default for Settings {
             volume: 1.0,
             dsp: DspSettings::default(),
             repeat: Repeat::Off,
+            shuffle: false,
             close_to_tray: true,
             lyrics_online: true,
             listenbrainz_user: String::new(),
@@ -188,6 +191,51 @@ impl AppState {
         }
     }
 
+    /// Songs in the queue whose files went away in a rescan (moved, renamed, or deleted as a
+    /// duplicate of another copy) are pointed at the copy the library has now: same title and
+    /// length, the same artist and album preferred. `before`: those songs as the library had them.
+    /// Returns how many were found.
+    pub fn remap_queue(&self, before: &[Track]) -> usize {
+        let pairs: Vec<(String, String)> = {
+            let lib = self.library.lock();
+            let gone: Vec<&Track> = before.iter().filter(|t| !lib.by_id.contains_key(&t.id)).collect();
+            if gone.is_empty() {
+                return 0;
+            }
+            let mut by_title: HashMap<String, Vec<&Track>> = HashMap::new();
+            for t in &lib.snapshot.tracks {
+                by_title.entry(match_key(&t.title)).or_default().push(t);
+            }
+            gone.iter()
+                .filter_map(|old| {
+                    let best = by_title
+                        .get(&match_key(&old.title))?
+                        .iter()
+                        .filter(|t| (t.duration - old.duration).abs() < 2.5)
+                        .min_by_key(|t| {
+                            (
+                                match_key(&t.artist) != match_key(&old.artist),
+                                match_key(&t.album) != match_key(&old.album),
+                                ((t.duration - old.duration).abs() * 1000.0) as u64,
+                            )
+                        })?;
+                    Some((old.id.clone(), best.id.clone()))
+                })
+                .collect()
+        };
+        if pairs.is_empty() {
+            return 0;
+        }
+        let items = self.queue_items(&pairs.iter().map(|(_, new)| new.clone()).collect::<Vec<_>>());
+        let replace: Vec<(String, QueueItem)> = pairs
+            .into_iter()
+            .filter_map(|(old, new)| items.iter().find(|q| q.id == new).map(|q| (old, q.clone())))
+            .collect();
+        let n = replace.len();
+        self.engine.send(crate::audio::Cmd::Replace(replace));
+        n
+    }
+
     pub fn queue_items(&self, ids: &[String]) -> Vec<QueueItem> {
         let lib = self.library.lock();
         let sonic = self.sonic.lock();
@@ -266,5 +314,26 @@ mod tests {
         for t in ["Instinct", "Institute of Sound", "24k Magic", "-FINAL SIGMA-"] {
             assert!(!is_instrumental(t), "{t}");
         }
+    }
+}
+
+/// A name reduced to its letters and digits, lower-case: "コノヨ Loading..." and "コノヨLoading…"
+/// match, as do "REOL" and "Reol".
+fn match_key(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+#[cfg(test)]
+mod match_tests {
+    use super::match_key;
+
+    #[test]
+    fn names_match_across_spacing_case_and_punctuation() {
+        assert_eq!(match_key("コノヨ Loading..."), match_key("コノヨLoading…"));
+        assert_eq!(match_key("REOL"), match_key("Reol"));
+        assert_ne!(match_key("RE"), match_key("REOL"));
     }
 }

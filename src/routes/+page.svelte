@@ -176,6 +176,18 @@
       app.seek(Math.max(0, app.position + (e.key === "ArrowRight" ? 10 : -10)));
     } else if (e.altKey && e.key === "ArrowLeft") {
       app.back();
+    } else if (e.ctrlKey && !e.shiftKey && !e.altKey && ["s", "r", "u", "l"].includes(e.key.toLowerCase())) {
+      // The player's toggles: Shuffle, Repeat, Up Next, Lyrics (and no browser Save or Reload).
+      e.preventDefault();
+      const k = e.key.toLowerCase();
+      if (k === "u") app.queueOpen = !app.queueOpen;
+      else if (!app.current) return;
+      else if (k === "s") app.toggleShuffle();
+      else if (k === "r") app.cycleRepeat();
+      else if (k === "l") {
+        app.lyricsOpen = true;
+        app.nowPlayingOpen = true;
+      }
     }
   }
 
@@ -196,6 +208,12 @@
   /** Android uses the light page animation (html.phone); narrow desktop windows keep view transitions. */
   const onAndroid = typeof navigator !== "undefined" && navigator.userAgent.includes("Android");
   const ambient = $derived(app.theme === "album" ? artUrl(app.themeAlbum?.artSmall) : "");
+  /** Desktop: the player as the top bar, or along the bottom (Settings > Appearance). */
+  const playerAt = $derived(phone ? "dock" : app.playerPosition);
+  // Toasts and the update banner sit above a bottom player.
+  $effect(() => {
+    document.documentElement.classList.toggle("player-bottom", playerAt === "bottom");
+  });
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -248,10 +266,10 @@
   {/key}
 </div>
 
-<TitleBar />
+<TitleBar tall={playerAt === "top"} />
 
 <div class="shell" class:docked={!!app.current}>
-  {#if !phone}<PlayerBar placement="top" />{/if}
+  {#if playerAt === "top"}<PlayerBar placement="top" />{/if}
   <div class="body">
     {#if showSidebar && !phone}<Sidebar />{/if}
     <div class="column">
@@ -277,7 +295,8 @@
     </div>
     {#if app.queueOpen}<QueuePanel />{/if}
   </div>
-  {#if phone}<PlayerBar placement="bottom" />{/if}
+  {#if playerAt === "bottom"}<PlayerBar placement="bottom" />{/if}
+  {#if phone}<PlayerBar placement="dock" />{/if}
   {#if phone && showSidebar}<TabBar />{/if}
 </div>
 
@@ -301,7 +320,10 @@
 {/if}
 
 {#if app.toast}
-  <div class="toast" role="status">{app.toast}</div>
+  <div class="toast" role="status">
+    {app.toast}
+    {#if app.toastAction}<button class="toast-action" onclick={() => app.toastAction?.run()}>{app.toastAction.label}</button>{/if}
+  </div>
 {/if}
 
 <style>
@@ -459,7 +481,20 @@
       0 0 0 1px var(--line-strong),
       0 10px 30px rgba(0, 0, 0, 0.45);
     max-width: 70vw;
+    display: flex;
+    align-items: center;
+    gap: 14px;
     animation: up 0.2s ease-out;
+  }
+  :global(html.player-bottom) .toast {
+    bottom: 108px;
+  }
+  .toast-action {
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .toast-action:hover {
+    text-decoration: underline;
   }
   @keyframes up {
     from {

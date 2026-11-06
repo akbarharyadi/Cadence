@@ -28,6 +28,11 @@ export interface AndroidBridge {
 export type Theme = "album" | "dark" | "black";
 const DEFAULT_ACCENT = "#8b7cff";
 const DEFAULT_TINT = "#1b1c33";
+/** Desktop: the player as the window's top bar, or a bar along the bottom. */
+export type PlayerPosition = "top" | "bottom";
+function savedPlayerPosition(): PlayerPosition {
+  return typeof localStorage !== "undefined" && localStorage.getItem("cadence-player-position") === "bottom" ? "bottom" : "top";
+}
 function savedTheme(): Theme {
   const t = typeof localStorage === "undefined" ? null : localStorage.getItem("cadence-theme");
   return t === "dark" || t === "black" ? t : "album";
@@ -116,6 +121,8 @@ class AppState {
   queueOpen = $state(false);
   search = $state("");
   toast = $state<string | null>(null);
+  /** A button in the toast (e.g. Undo). */
+  toastAction = $state<{ label: string; run: () => void } | null>(null);
   dsp = $state<DspSettings | null>(null);
   analysis = $state<{ done: number; total: number } | null>(null);
   /** How much of the library has had sound analysis ("sounds like"). */
@@ -156,6 +163,13 @@ class AppState {
   artistImages = $state<Record<string, import("./api").ArtistImage>>({});
   /** Settings > Appearance. */
   theme = $state<Theme>(savedTheme());
+
+  /** Settings > Appearance: where the player sits on the desktop. */
+  playerPosition = $state<PlayerPosition>(savedPlayerPosition());
+  setPlayerPosition(p: PlayerPosition) {
+    this.playerPosition = p;
+    localStorage.setItem("cadence-player-position", p);
+  }
 
   setTheme(theme: Theme) {
     this.theme = theme;
@@ -212,12 +226,26 @@ class AppState {
     return this.creditIndex.get(credit)?.[0] ?? credit;
   }
 
+  /** The song and album last shown as playing: a rescan can drop a song that's still playing
+   * (its file moved or was deleted as a duplicate), and the player keeps showing it until it ends. */
+  private lastCurrent: Track | null = null;
+  private lastAlbum: Album | null = null;
+
   current = $derived.by(() => {
     const s = this.status;
     if (!s || s.index == null) return null;
-    return this.trackById.get(s.queue[s.index]) ?? null;
+    const id = s.queue[s.index];
+    const t = this.trackById.get(id);
+    if (t) this.lastCurrent = t;
+    return t ?? (this.lastCurrent?.id === id ? this.lastCurrent : null);
   });
-  currentAlbum = $derived(this.current ? (this.albumById.get(this.current.albumId) ?? null) : null);
+  currentAlbum = $derived.by(() => {
+    const t = this.current;
+    if (!t) return null;
+    const a = this.albumById.get(t.albumId);
+    if (a) this.lastAlbum = a;
+    return a ?? (this.lastAlbum?.id === t.albumId ? this.lastAlbum : null);
+  });
 
   /** The album whose colours theme the app: the one playing, else the one on screen. */
   themeAlbum = $derived.by(() => this.currentAlbum ?? (this.view.name === "album" ? (this.albumById.get(this.view.id) ?? null) : null));
@@ -285,7 +313,28 @@ class AppState {
     const ids = tracks.map((t) => t.id);
     this.skipped = skip ? [...new Set([...this.skipped, ...ids])] : this.skipped.filter((id) => !ids.includes(id));
     await api.setSkipped(ids, skip);
-    this.showToast(skip ? `Skipping ${label(tracks, true)} from now on` : `No longer skipping ${label(tracks, true)}`);
+    this.showToast(skip ? `Skipping ${label(tracks, true)} from now on` : `No longer skipping ${label(tracks, true)}`, {
+      label: "Undo",
+      run: () => {
+        this.skipped = skip ? this.skipped.filter((id) => !ids.includes(id)) : [...new Set([...this.skipped, ...ids])];
+        api.setSkipped(ids, !skip);
+        this.toast = this.toastAction = null;
+      },
+    });
+  }
+
+  /** Shuffle the songs coming up (and lists played from now on), or put them back in order. */
+  toggleShuffle() {
+    const on = !this.status?.shuffle;
+    api.setShuffle(on);
+    this.showToast(on ? "Shuffle on" : "Shuffle off");
+  }
+
+  cycleRepeat() {
+    const r = this.status?.repeat ?? "off";
+    const next = r === "off" ? "all" : r === "all" ? "one" : "off";
+    api.setRepeat(next);
+    this.showToast(next === "all" ? "Repeat all" : next === "one" ? "Repeat this song" : "Repeat off");
   }
 
   setSkipInstrumentals(on: boolean) {
@@ -537,10 +586,11 @@ class AppState {
       });
   }
 
-  showToast(message: string) {
+  showToast(message: string, action: { label: string; run: () => void } | null = null) {
     this.toast = message;
+    this.toastAction = action;
     clearTimeout(this.toastTimer);
-    this.toastTimer = setTimeout(() => (this.toast = null), 4000);
+    this.toastTimer = setTimeout(() => (this.toast = this.toastAction = null), action ? 6000 : 4000);
   }
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
 

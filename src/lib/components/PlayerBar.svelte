@@ -2,12 +2,13 @@
   import { fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { api, artUrl, formatTime, khz, qualityOf, type Album, type Track } from "#lib/api.js";
-  import { app, signalPath } from "#lib/store.svelte.js";
+  import { app, shuffled, signalPath, type MenuItem } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import QualityBadge from "./QualityBadge.svelte";
 
-  /** "top": the desktop window's top bar (as in Apple Music). "bottom": the phone's player above the tab bar. */
-  let { placement = "bottom" }: { placement?: "top" | "bottom" } = $props();
+  /** "top": the desktop window's top bar. "bottom": a bar along the bottom of the desktop window
+   * (Settings > Appearance). "dock": the phone's player above the tab bar. */
+  let { placement = "dock" }: { placement?: "top" | "bottom" | "dock" } = $props();
 
   const s = $derived(app.status);
   const t = $derived(app.current);
@@ -71,9 +72,34 @@
     api.setVolume(v * v);
   }
 
-  const repeatLabel = $derived(s?.repeat === "one" ? "Repeat one" : s?.repeat === "all" ? "Repeat all" : "Repeat off");
-  function cycleRepeat() {
-    api.setRepeat(s?.repeat === "off" ? "all" : s?.repeat === "all" ? "one" : "off");
+  const repeatLabel = $derived(
+    s?.repeat === "one" ? "Repeat: this song (Ctrl+R)" : s?.repeat === "all" ? "Repeat: all (Ctrl+R)" : "Repeat: off (Ctrl+R)",
+  );
+  const shuffleLabel = $derived(s?.shuffle ? "Shuffle: on (Ctrl+S)" : "Shuffle: off (Ctrl+S)");
+
+  /** A menu dropping from (or, at the bottom, rising above) the button that opened it. */
+  function menuFrom(e: MouseEvent, items: MenuItem[]) {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    app.menu = { x: r.left, y: placement === "top" ? r.bottom + 6 : Math.max(8, r.top - 6 - items.length * 36), items };
+  }
+  /** The song's own menu (play next, add to playlist, fix info, skip from now on…). */
+  function songMenu(e: MouseEvent) {
+    if (!t) return;
+    const at = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    app.trackMenu(e, [t]);
+    if (app.menu && e.type === "click") app.menu = { ...app.menu, x: at.left, y: placement === "top" ? at.bottom + 6 : Math.max(8, at.top - 6 - app.menu.items.length * 36) };
+  }
+  function toolsMenu(e: MouseEvent) {
+    menuFrom(e, [
+      { label: "Mini Player", icon: "mini", action: () => api.toggleMini() },
+      { label: "Sound Settings", icon: "eq", action: () => app.go({ name: "sound" }) },
+      app.playerPosition === "top"
+        ? { label: "Move Player to the Bottom", icon: "down", action: () => app.setPlayerPosition("bottom") }
+        : { label: "Move Player to the Top", icon: "display", action: () => app.setPlayerPosition("top") },
+    ]);
+  }
+  function shuffleLibrary() {
+    if (app.tracks.length) app.playTracks(shuffled(app.tracks));
   }
 
   const detail = $derived(s?.source ? `${s.source.bits ? `${s.source.bits}-bit/` : ""}${khz(s.source.sampleRate)}` : "");
@@ -109,12 +135,17 @@
     };
   }
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
+  let openTimer: ReturnType<typeof setTimeout> | undefined;
+  // Only when the pointer rests on the button, so passing over it doesn't pop a list open.
   function openPeek(which: "prev" | "next") {
     clearTimeout(closeTimer);
-    peek = which;
+    clearTimeout(openTimer);
+    if (peek) peek = which;
+    else openTimer = setTimeout(() => (peek = which), 450);
   }
   // A short delay, so the pointer can move from the button onto the list.
   function closePeek() {
+    clearTimeout(openTimer);
     clearTimeout(closeTimer);
     closeTimer = setTimeout(() => (peek = null), 180);
   }
@@ -187,15 +218,46 @@
   </div>
 {/snippet}
 
-{#snippet songTools()}
-  {#if t && app.needsInfo(t)}
-    <button class="icon-btn fix" onclick={() => (app.fixing = t)} aria-label="Fix song info" title="Fix song info: find the title, artist, album and cover">
-      <Icon name="sparkle" size={16} />
+{#snippet seekRow()}
+  <div class="seek-row">
+    <span class="time">{formatTime(shownPos)}</span>
+    {@render seekLine()}
+    <span class="time r">-{formatTime(Math.max(0, duration - shownPos))}</span>
+  </div>
+{/snippet}
+
+<!-- Shuffle and repeat flank the three buttons, as in most players; when on, they light up in the
+     accent colour with a dot underneath. -->
+{#snippet transport(big: boolean)}
+  <div class="transport">
+    <button class="icon-btn toggle" class:on={s?.shuffle} onclick={() => app.toggleShuffle()} disabled={!t} aria-label={shuffleLabel} aria-pressed={!!s?.shuffle} title={shuffleLabel}>
+      <Icon name="shuffle" size={big ? 18 : 16} />
     </button>
-  {/if}
+    <button class="icon-btn" onclick={() => api.player("prev")} onpointerenter={() => openPeek("prev")} onpointerleave={closePeek} disabled={!t} aria-label="Previous" title="Previous (Ctrl+←)"><Icon name="prev" size={big ? 20 : 19} /></button>
+    <button class="main-btn" class:playing={s?.playing} onclick={() => api.player("toggle")} disabled={!t} aria-label={s?.playing ? "Pause" : "Play"} title="{s?.playing ? 'Pause' : 'Play'} (Space)">
+      <Icon name={s?.playing ? "pause" : "play"} size={big ? 22 : 18} />
+    </button>
+    <button class="icon-btn next" onclick={() => api.player("next")} onpointerenter={() => openPeek("next")} onpointerleave={closePeek} disabled={!t} aria-label="Next" title="Next (Ctrl+→)"><Icon name="next" size={big ? 20 : 19} /></button>
+    <button class="icon-btn toggle" class:on={s?.repeat !== "off"} onclick={() => app.cycleRepeat()} disabled={!t} aria-label={repeatLabel} aria-pressed={s?.repeat !== "off"} title={repeatLabel}>
+      <Icon name={s?.repeat === "one" ? "repeatOne" : "repeat"} size={big ? 18 : 16} />
+    </button>
+  </div>
+{/snippet}
+
+<!-- The song's own buttons: add to a playlist, and its menu (where "Skip this song from now on"
+     lives, away from Next). Untagged songs also get the fix button, in the accent colour. -->
+{#snippet songActions()}
   {#if t}
-    <button class="icon-btn skip" onclick={() => t && app.setSkipped([t], true)} aria-label="Skip this song from now on" title="Skip this song from now on: it's left out when albums, playlists and shuffles play">
-      <Icon name="skip" size={16} />
+    {#if app.needsInfo(t)}
+      <button class="icon-btn fix" onclick={() => (app.fixing = t)} aria-label="Fix song info" title="Fix song info: find the title, artist, album and cover">
+        <Icon name="sparkle" size={16} />
+      </button>
+    {/if}
+    <button class="icon-btn act" onclick={() => (app.picker = t ? [t] : null)} aria-label="Add to a playlist" title="Add to a playlist">
+      <Icon name="plus" size={17} />
+    </button>
+    <button class="icon-btn act" onclick={songMenu} aria-label="More for this song" title="More for this song: play next, go to album, skip from now on…">
+      <Icon name="more" size={17} />
     </button>
   {/if}
 {/snippet}
@@ -206,7 +268,7 @@
       class="path {path.tier}"
       class:clipping={s.output.clipping}
       onclick={() => app.go({ name: "sound" })}
-      title={`${path.steps.join(", ")}, to ${s.output.device} at ${khz(s.output.sampleRate)}${s.output.clipping ? ". The output reached full scale." : ""}`}
+      title={`Sound: ${path.steps.join(", ")}, to ${s.output.device} at ${khz(s.output.sampleRate)}${s.output.clipping ? ". The output reached full scale." : ""}. Click for sound settings.`}
     >
       <span class="led"></span>{s.output.clipping ? "Clipping" : path.label}
     </button>
@@ -221,24 +283,19 @@
         app.nowPlayingOpen = true;
       }}
       aria-label="Lyrics"
-      title="Lyrics"
+      title="Lyrics (Ctrl+L)"
     >
       <Icon name="lyrics" size={18} />
     </button>
-    {#if placement === "top"}
-      <button class="icon-btn" class:on={app.queueOpen} onclick={() => (app.queueOpen = !app.queueOpen)} aria-label="Up Next" title="Up Next">
-        <Icon name="queue" size={18} />
-      </button>
-    {/if}
-    <button class="icon-btn" onclick={() => api.toggleMini()} aria-label="Mini player" title="Mini player">
-      <Icon name="mini" size={18} />
+    <button class="icon-btn" class:on={app.queueOpen} onclick={() => (app.queueOpen = !app.queueOpen)} aria-label="Up Next" title="Up Next (Ctrl+U)">
+      <Icon name="queue" size={18} />
     </button>
-    <button class="icon-btn" class:on={app.dsp?.eq.enabled} onclick={() => app.go({ name: "sound" })} aria-label="Sound" title="Sound: leveling, equalizer, crossfeed">
-      <Icon name="eq" size={18} />
+    <button class="icon-btn" onclick={toolsMenu} aria-label="More" title="More: mini player, sound settings, player position">
+      <Icon name="more" size={18} />
     </button>
   </div>
   <div class="vol">
-    <button class="icon-btn" onclick={() => setVolume(volume > 0 ? 0 : lastNonZero)} aria-label={volume === 0 ? "Unmute" : "Mute"}>
+    <button class="icon-btn" onclick={() => setVolume(volume > 0 ? 0 : lastNonZero)} aria-label={volume === 0 ? "Unmute" : "Mute"} title={volume === 0 ? "Unmute" : "Mute"}>
       <Icon name={volume === 0 ? "mute" : volume < 0.5 ? "volumeLow" : "volume"} size={18} />
     </button>
     <input
@@ -258,55 +315,58 @@
   </div>
 {/snippet}
 
+<!-- Nothing playing: say so, and offer something to play. -->
+{#snippet idle()}
+  {#if app.tracks.length}
+    <button class="idle-btn" onclick={shuffleLibrary} title="Play your whole library in a random order">
+      <span class="idle-text">Nothing playing</span>
+      <span class="idle-cta"><Icon name="shuffle" size={14} />Shuffle your library</span>
+    </button>
+  {:else}
+    <div class="idle-btn quiet" data-tauri-drag-region><span class="idle-text">Nothing playing</span></div>
+  {/if}
+{/snippet}
+
 {#if placement === "top"}
-  <!-- Desktop: the player is the window's top bar, as in Apple Music: the buttons on the left, the
-       song and its seek line in the middle, the tools on the right (the window's own buttons
-       follow them, see TitleBar). Nothing floats over the page. -->
+  <!-- Desktop: the player is the window's top bar: the buttons on the left, the song with its
+       times and seek line in the middle, the tools on the right (the window's own buttons follow
+       them, see TitleBar). Nothing floats over the page. -->
   <header class="top" data-tauri-drag-region>
     <div class="t-left" data-tauri-drag-region>
-      <div class="transport">
-        <button class="icon-btn" class:on={s?.repeat !== "off"} onclick={cycleRepeat} disabled={!t} aria-label={repeatLabel} title={repeatLabel}>
-          <Icon name={s?.repeat === "one" ? "repeatOne" : "repeat"} size={16} />
-        </button>
-        <button class="icon-btn" onclick={() => api.player("prev")} onpointerenter={() => openPeek("prev")} onpointerleave={closePeek} disabled={!t} aria-label="Previous"><Icon name="prev" size={19} /></button>
-        <button class="main-btn" class:playing={s?.playing} onclick={() => api.player("toggle")} disabled={!t} aria-label={s?.playing ? "Pause" : "Play"} title="{s?.playing ? 'Pause' : 'Play'} (Space)">
-          <Icon name={s?.playing ? "pause" : "play"} size={18} />
-        </button>
-        <button class="icon-btn" onclick={() => api.player("next")} onpointerenter={() => openPeek("next")} onpointerleave={closePeek} disabled={!t} aria-label="Next"><Icon name="next" size={19} /></button>
-      </div>
+      {@render transport(false)}
       {@render peekList(true)}
     </div>
 
     <div class="lcd" class:idle={!t}>
       {#if t}
-        <button class="art" onclick={() => (app.nowPlayingOpen = true)} aria-label="Open Now Playing" title="Open Now Playing">
+        <!-- The whole display opens Now Playing; the title, artist and album are links on top. -->
+        <button class="lcd-open" onclick={() => (app.nowPlayingOpen = true)} aria-label="Open Now Playing" title="Open Now Playing"></button>
+        <span class="art" aria-hidden="true">
           {#if album?.artSmall}<img src={artUrl(album.artSmall)} alt="" />{:else}<Icon name="note" size={18} />{/if}
           <span class="expand"><Icon name="expand" size={14} /></span>
-        </button>
+        </span>
         <div class="lcd-body">
           {#if album?.artSmall}<div class="lcd-glow" style="background-image: url('{artUrl(album.artSmall)}')" aria-hidden="true"></div>{/if}
-          <div class="meta" role="group" oncontextmenu={(e) => t && app.trackMenu(e, [t])}>
-            {#key t.id}
-              <div class="meta-in">
-                <button class="title" onclick={() => t && app.go({ name: "album", id: t.albumId })}>{t.title}</button>
-                <span class="sub">
-                  <button class="artist" onclick={() => t && app.go({ name: "artist", artist: app.artistOf(t.albumArtist) })}>{t.artist}</button>{#if t.album}<span class="dash">—</span><button class="album-link" onclick={() => t && app.go({ name: "album", id: t.albumId })}>{t.album}</button>{/if}
-                </span>
-              </div>
-            {/key}
+          <div class="lcd-row">
+            <div class="meta" role="group" oncontextmenu={(e) => t && app.trackMenu(e, [t])}>
+              {#key t.id}
+                <div class="meta-in">
+                  <button class="title" onclick={() => t && app.go({ name: "album", id: t.albumId })} title="Go to the album">{t.title}</button>
+                  <span class="sub">
+                    <button class="artist" onclick={() => t && app.go({ name: "artist", artist: app.artistOf(t.albumArtist) })} title="Go to the artist">{t.artist}</button>{#if t.album}<span class="dash">—</span><button class="album-link" onclick={() => t && app.go({ name: "album", id: t.albumId })} title="Go to the album">{t.album}</button>{/if}
+                  </span>
+                </div>
+              {/key}
+            </div>
+            <div class="lcd-side">
+              {#if quality}<QualityBadge {quality} {detail} />{/if}
+              {@render songActions()}
+            </div>
           </div>
-          <div class="lcd-side">
-            {@render songTools()}
-            {#if quality}<QualityBadge {quality} {detail} />{/if}
-          </div>
-          <span class="time l">{formatTime(shownPos)}</span>
-          <span class="time r">-{formatTime(Math.max(0, duration - shownPos))}</span>
-          {@render seekLine()}
+          {@render seekRow()}
         </div>
       {:else}
-        <div class="lcd-idle" data-tauri-drag-region>
-          <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15c2.5-7 4.5-7 6 0s3.5 7 6 0 3.5-7 6 0" /></svg>
-        </div>
+        {@render idle()}
       {/if}
     </div>
 
@@ -314,6 +374,41 @@
       {@render rightTools()}
     </div>
   </header>
+{:else if placement === "bottom"}
+  <!-- Desktop, Settings > Appearance > Player at the bottom: the song on the left, the buttons with
+       the seek line under them in the middle, the tools on the right. -->
+  <footer class="bar">
+    <div class="b-left">
+      {#if t}
+        <button class="art" onclick={() => (app.nowPlayingOpen = true)} aria-label="Open Now Playing" title="Open Now Playing">
+          {#if album?.artSmall}<img src={artUrl(album.artSmall)} alt="" />{:else}<Icon name="note" size={22} />{/if}
+          <span class="expand"><Icon name="expand" size={16} /></span>
+        </button>
+        <div class="meta" role="group" oncontextmenu={(e) => t && app.trackMenu(e, [t])}>
+          {#key t.id}
+            <div class="meta-in">
+              <button class="title" onclick={() => t && app.go({ name: "album", id: t.albumId })} title="Go to the album">{t.title}</button>
+              <button class="artist" onclick={() => t && app.go({ name: "artist", artist: app.artistOf(t.albumArtist) })} title="Go to the artist">{t.artist}</button>
+            </div>
+          {/key}
+        </div>
+        <div class="b-actions">{@render songActions()}</div>
+      {:else}
+        {@render idle()}
+      {/if}
+    </div>
+    <div class="b-center">
+      <div class="b-transport">
+        {@render transport(true)}
+        {@render peekList(false)}
+      </div>
+      {@render seekRow()}
+    </div>
+    <div class="b-right">
+      {#if quality}<QualityBadge {quality} {detail} />{/if}
+      {@render rightTools()}
+    </div>
+  </footer>
 {:else if t}
   <!-- Phones: the player sits above the tab bar once something is queued, and slides away when
        the queue is cleared. -->
@@ -339,24 +434,11 @@
           </div>
         {/key}
       </div>
-      {@render songTools()}
     </div>
 
     <div class="center">
       <span class="time">{formatTime(shownPos)}</span>
-      <div class="transport">
-        <button class="icon-btn" class:on={s?.repeat !== "off"} onclick={cycleRepeat} aria-label={repeatLabel} title={repeatLabel}>
-          <Icon name={s?.repeat === "one" ? "repeatOne" : "repeat"} size={17} />
-        </button>
-        <button class="icon-btn" onclick={() => api.player("prev")} onpointerenter={() => openPeek("prev")} onpointerleave={closePeek} aria-label="Previous"><Icon name="prev" size={20} /></button>
-        <button class="main-btn" class:playing={s?.playing} onclick={() => api.player("toggle")} aria-label={s?.playing ? "Pause" : "Play"} title="{s?.playing ? 'Pause' : 'Play'} (Space)">
-          <Icon name={s?.playing ? "pause" : "play"} size={22} />
-        </button>
-        <button class="icon-btn" onclick={() => api.player("next")} onpointerenter={() => openPeek("next")} onpointerleave={closePeek} aria-label="Next"><Icon name="next" size={20} /></button>
-        <button class="icon-btn" class:on={app.queueOpen} onclick={() => (app.queueOpen = !app.queueOpen)} aria-label="Up Next" title="Up Next">
-          <Icon name="queue" size={18} />
-        </button>
-      </div>
+      {@render transport(true)}
       {@render peekList(false)}
       <span class="time right">-{formatTime(Math.max(0, duration - shownPos))}</span>
     </div>
@@ -366,6 +448,7 @@
     </div>
   </footer>
 {/if}
+
 
 <style>
   /* Phones: the player above the tab bar, tinted by the album that's playing (sized in the
@@ -589,25 +672,6 @@
     margin-left: -4px;
     color: var(--accent);
   }
-  /* Shown when the pointer is over the song (or it has keyboard focus). */
-  .skip {
-    flex: none;
-    width: 30px;
-    height: 30px;
-    margin-left: -4px;
-    color: var(--text-2);
-    opacity: 0;
-    transition: opacity 0.15s;
-  }
-  .left:hover .skip,
-  .skip:focus-visible {
-    opacity: 1;
-  }
-  @media (hover: none) {
-    .skip {
-      display: none;
-    }
-  }
 
   /* ---------- transport ---------- */
   .center {
@@ -820,6 +884,126 @@
     box-shadow: 0 0 8px var(--bad);
   }
 
+  /* ---------- shuffle / repeat ---------- */
+  /* On: the accent colour and a dot underneath, so on and off differ by more than brightness. */
+  .toggle {
+    position: relative;
+    color: var(--text-2);
+  }
+  .toggle.on {
+    color: var(--accent);
+  }
+  .toggle.on::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    bottom: 2px;
+    width: 4px;
+    height: 4px;
+    margin-left: -2px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  /* ---------- seek row: time, line, time (always shown) ---------- */
+  .seek-row {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .seek-row .time {
+    flex: none;
+    width: 38px;
+    font-size: 11px;
+    color: var(--text-2);
+    text-align: right;
+  }
+  .seek-row .time.r {
+    text-align: left;
+  }
+  /* In the row, the line sits in the middle of a 16 px hit area: 4 px thick, 6 px under the pointer. */
+  .seek-row .seek {
+    position: relative;
+    left: auto;
+    right: auto;
+    top: auto;
+    flex: 1;
+    height: 16px;
+  }
+  .seek-row .rail {
+    top: 6px;
+    height: 4px;
+    border-radius: 2px;
+    transition:
+      height 0.2s cubic-bezier(0.2, 0.8, 0.2, 1),
+      top 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .seek-row .seek:hover .rail,
+  .seek-row .seek.active .rail,
+  .seek-row .seek:focus-visible .rail {
+    top: 5px;
+    height: 6px;
+  }
+  /* The knob shows while a song is loaded, a little bigger under the pointer. */
+  .seek-row .thumb {
+    top: 8px;
+    margin: -6px 0 0 -6px;
+    transform: scale(0.7);
+  }
+  .seek-row .seek:hover .thumb,
+  .seek-row .seek.active .thumb,
+  .seek-row .seek:focus-visible .thumb {
+    transform: scale(1);
+  }
+  .seek-row .tip {
+    top: auto;
+    bottom: 18px;
+  }
+
+  /* ---------- the song's buttons ---------- */
+  .act {
+    flex: none;
+    width: 28px;
+    height: 28px;
+    color: var(--text-2);
+  }
+  .act:hover {
+    color: var(--text);
+  }
+
+  /* ---------- nothing playing ---------- */
+  .idle-btn {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    border-radius: inherit;
+    color: var(--text-3);
+    font-size: 13px;
+  }
+  .idle-text {
+    font-weight: 600;
+  }
+  .idle-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 999px;
+    background: var(--hover);
+    color: var(--text-2);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .idle-btn:hover .idle-cta {
+    background: var(--accent);
+    color: white;
+  }
+
   /* ---------- desktop: the window's top bar ---------- */
   /* Above the page, not over it: nothing scrolls under it, so it needs no live blur; the album's
      colours come through from the ambient light behind the window. */
@@ -827,9 +1011,9 @@
     position: relative;
     z-index: 30;
     flex: none;
-    height: 56px;
+    height: 60px;
     display: grid;
-    grid-template-columns: 240px minmax(280px, 1fr) auto;
+    grid-template-columns: 250px minmax(300px, 1fr) auto;
     align-items: center;
     gap: 16px;
     /* The window's own buttons (TitleBar) sit in the last 146 px. */
@@ -845,11 +1029,11 @@
     justify-content: center;
   }
   .top .transport {
-    gap: 6px;
+    gap: 4px;
   }
   .top .main-btn {
-    width: 34px;
-    height: 34px;
+    width: 36px;
+    height: 36px;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
   }
   .top .main-btn.playing {
@@ -857,7 +1041,8 @@
       0 2px 10px rgba(0, 0, 0, 0.35),
       0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent);
   }
-  .top :disabled {
+  .top :disabled,
+  .bar :disabled {
     opacity: 0.35;
     pointer-events: none;
   }
@@ -872,49 +1057,53 @@
   .top .volume {
     width: 90px;
   }
-
-  /* The middle: the song, like a small display, with the seek line along its bottom edge. */
+  /* The middle: the song, like a small display, with its times and seek line along the bottom. */
   .lcd {
+    position: relative;
     justify-self: center;
-    width: min(100%, 680px);
-    height: 44px;
+    width: min(100%, 700px);
+    height: 50px;
     display: flex;
-    border-radius: 9px;
+    border-radius: 10px;
     background: rgba(255, 255, 255, 0.045);
     box-shadow: inset 0 0 0 1px var(--line);
   }
-  .lcd-idle {
-    width: 100%;
-    height: 100%;
-    display: grid;
-    place-items: center;
+  /* The whole display opens Now Playing; everything else in it sits on top. */
+  .lcd-open {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
   }
-  .lcd-idle .mark {
-    width: 22px;
-    height: 22px;
-    fill: none;
-    stroke: var(--text-3);
-    stroke-width: 2;
-    stroke-linecap: round;
+  .lcd:not(.idle):hover {
+    background: rgba(255, 255, 255, 0.07);
   }
   .lcd .art {
-    width: 44px;
-    height: 44px;
-    border-radius: 9px 0 0 9px;
+    position: relative;
+    z-index: 1;
+    width: 50px;
+    height: 50px;
+    border-radius: 10px 0 0 10px;
     box-shadow: none;
+    pointer-events: none;
   }
-  .lcd .art:hover {
-    transform: none;
+  .lcd:hover .expand {
+    opacity: 1;
   }
   .lcd-body {
     position: relative;
+    z-index: 1;
     flex: 1;
     min-width: 0;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 6px;
-    padding: 0 10px 2px 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 2px 10px 0 12px;
+    /* Clicks between the links fall through to the display (Now Playing). */
+    pointer-events: none;
+  }
+  .lcd-body :is(button, .seek, .meta) {
+    pointer-events: auto;
   }
   /* The cover's colours, faintly, from the left. */
   .lcd-glow {
@@ -924,38 +1113,48 @@
     background-position: center;
     filter: blur(24px) saturate(1.6);
     opacity: 0.22;
-    clip-path: inset(0 round 0 9px 9px 0);
+    clip-path: inset(0 round 0 10px 10px 0);
     mask-image: linear-gradient(to right, black, transparent 75%);
     pointer-events: none;
   }
-  /* Room at the sides for the times, which show over the corners. */
-  .lcd .meta {
+  .lcd-row {
     position: relative;
-    padding: 0 38px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .lcd .meta {
+    flex: 1;
+    /* Only the text itself is a link; the gaps open Now Playing. */
+    pointer-events: none;
   }
   .lcd .meta-in {
-    align-items: center;
     gap: 0;
   }
   .lcd .title {
     font-size: 13px;
+    line-height: 16px;
+    pointer-events: auto;
   }
   .sub {
     display: flex;
     min-width: 0;
     max-width: 100%;
-    font-size: 12px;
+    font-size: 11.5px;
+    line-height: 15px;
     color: var(--text-2);
   }
   .sub .artist,
   .album-link {
     flex: 0 1 auto;
     min-width: 0;
-    font-size: 12px;
+    font-size: 11.5px;
     color: var(--text-2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    pointer-events: auto;
   }
   .album-link:hover {
     text-decoration: underline;
@@ -966,7 +1165,7 @@
     color: var(--text-3);
   }
   .lcd-side {
-    position: relative;
+    flex: none;
     display: flex;
     align-items: center;
     gap: 2px;
@@ -975,55 +1174,21 @@
   .lcd-side :global(.detail) {
     display: none;
   }
-  .lcd .fix,
-  .lcd .skip {
-    width: 26px;
-    height: 26px;
+  .lcd .fix {
+    width: 28px;
+    height: 28px;
     margin: 0;
   }
-  .lcd:hover .skip {
-    opacity: 1;
+  .lcd .seek-row {
+    margin: -1px 0 1px -2px;
+    height: 14px;
   }
-  .lcd .time {
-    position: absolute;
-    bottom: 6px;
+  .lcd .seek-row .time {
     width: auto;
+    min-width: 30px;
     font-size: 10.5px;
-    opacity: 0;
-    transition: opacity 0.15s;
   }
-  .lcd .time.l {
-    left: 10px;
-    text-align: left;
-  }
-  .lcd .time.r {
-    right: 10px;
-    text-align: right;
-  }
-  .lcd:hover .time,
-  .lcd:focus-within .time {
-    opacity: 1;
-  }
-  /* The hit area reaches a little below the display, so the line is easy to grab. */
-  .lcd .seek {
-    left: 6px;
-    right: 6px;
-    top: auto;
-    bottom: -6px;
-    height: 12px;
-  }
-  .lcd .rail {
-    top: auto;
-    bottom: 6px;
-    border-radius: 2px;
-  }
-  .lcd .thumb {
-    top: 0;
-    margin: -1px 0 0 -6px;
-  }
-  .lcd .tip {
-    top: 16px;
-  }
+
   /* The lists of songs before and after drop down from the buttons. */
   .peek.t {
     top: calc(100% + 4px);
@@ -1040,31 +1205,95 @@
     transform-origin: 30% 0;
   }
   .peek.t.next {
-    left: 40px;
+    left: 60px;
     transform: none;
     transform-origin: 45% 0;
   }
+
+  /* ---------- desktop: a bar along the bottom (Settings > Appearance) ---------- */
+  .bar {
+    position: relative;
+    z-index: 30;
+    flex: none;
+    height: 84px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 620px) minmax(0, 1fr);
+    align-items: center;
+    gap: 20px;
+    padding: 0 18px 0 12px;
+    background: color-mix(in srgb, var(--ink) 62%, transparent);
+    border-top: 1px solid var(--line);
+  }
+  .b-left {
+    position: relative;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+  }
+  .b-left .idle-btn {
+    justify-content: flex-start;
+    padding-left: 6px;
+  }
+  .b-actions {
+    flex: none;
+    display: flex;
+    align-items: center;
+  }
+  .b-center {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .b-transport {
+    position: relative;
+    display: flex;
+    justify-content: center;
+  }
+  .bar .transport {
+    gap: 8px;
+  }
+  .bar .main-btn {
+    width: 40px;
+    height: 40px;
+  }
+  .b-right {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    min-width: 0;
+  }
+  .b-right :global(.detail) {
+    display: none;
+  }
+
   @media (max-width: 1080px) {
     .top {
-      grid-template-columns: 200px minmax(280px, 1fr) auto;
+      grid-template-columns: 220px minmax(280px, 1fr) auto;
     }
-    .top .volume {
+    .top .volume,
+    .bar .volume {
       display: none;
     }
     /* Only the gold mark; the words show on hover. */
-    .lcd-side :global(.q) {
+    .lcd-side :global(.q),
+    .b-right :global(.q) {
       display: none;
     }
   }
 
-  /* Narrower windows: drop the signal chip, then the times. */
+  /* Narrower windows: drop the signal chip, then the album name. */
   @media (max-width: 1180px) {
     .path {
       display: none;
     }
   }
   @media (max-width: 960px) {
-    .time {
+    .dash,
+    .album-link {
       display: none;
     }
     .volume {
