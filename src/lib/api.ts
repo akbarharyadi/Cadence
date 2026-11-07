@@ -546,8 +546,10 @@ export interface SongInfo {
   coverUrl: string | null;
   thumb: string | null;
   duration: number;
-  /** Same title (and artist) and about the same length. */
+  /** Same title (and artist) and about the same length; or, for a title in another script, the same artists and length. */
   likely: boolean;
+  /** The catalogue it's from: "iTunes" or "Deezer". */
+  source: string;
 }
 
 /** A picture the user chose for an artist (large and small files). */

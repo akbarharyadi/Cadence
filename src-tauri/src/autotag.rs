@@ -204,8 +204,12 @@ pub struct Candidate {
     /// 100 px cover, for the list.
     pub thumb: Option<String>,
     pub duration: f64,
-    /// Same title (and artist, when the file name has one) and about the same length.
+    /// Same title (and artist, when the file name has one) and about the same length; or, for a
+    /// title in another script, the same artists and length.
     pub likely: bool,
+    /// The catalogue it's from: "iTunes" or "Deezer".
+    #[serde(default)]
+    pub source: String,
 }
 
 impl From<Candidate> for Found {
@@ -285,53 +289,37 @@ pub fn candidates(t: &Track, term: &str) -> Result<Vec<Candidate>, String> {
         .user_agent(concat!("Cadence/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?;
+    let want = Want {
+        title: title.clone(),
+        artists: artist.as_deref().map(artist_names).unwrap_or_default(),
+        credit: artist.as_deref().map(split_credit).unwrap_or_default(),
+        duration: t.duration,
+    };
     let mut seen = HashSet::new();
     let mut out: Vec<(Rank4, Candidate)> = Vec::new();
     // Scores a result against the song; None when it's neither the song nor close to the search.
     let rank = |c: &Candidate| -> Option<Rank4> {
         let off = (c.duration - t.duration).abs();
-        let likely = similar(&c.title, &title) && artist.as_deref().is_none_or(|a| similar(&c.artist, a)) && off < 75.0;
+        let same_title = similar(&c.title, &title) && artist.as_deref().is_none_or(|a| similar(&c.artist, a)) && off < 75.0;
+        let likely = same_title || want.same_song_by_credits(c);
         let score = relevance(&words, &c.title, &c.artist, &c.album);
         if !likely && score < MIN_RELEVANCE {
             return None;
         }
-        let label = format!("{} {}", c.title, c.album).to_lowercase();
-        let other_version = VERSIONS.iter().any(|v| label.contains(v) && !title.to_lowercase().contains(v));
         // Not the song: the ones sharing most of the search first, then the closest length.
-        Some(Rank4(!likely as u8, if likely { 0.0 } else { -(score * 10.0).round() }, other_version as u8, off))
+        Some(Rank4(!likely as u8, if likely { 0.0 } else { -(score * 10.0).round() }, want.other_version(c) as u8, off))
     };
     let mut reached = false;
     for country in ["US", "ID", "JP", "KR", "GB"] {
-        let url = format!(
-            "https://itunes.apple.com/search?media=music&entity=song&limit=15&country={country}&term={}",
-            urlencoding::encode(term)
-        );
-        let Ok(r) = client.get(&url).send() else { continue };
-        let Ok(s) = r.json::<Search>() else { continue };
+        let Some(hits) = itunes_candidates(&client, term, country, 15) else { continue };
         reached = true;
-        for h in s.results {
-            let (Some(name), Some(by)) = (h.track_name.clone(), h.artist_name.clone()) else { continue };
-            let album = h.collection_name.clone().unwrap_or_default();
-            if !seen.insert(norm(&format!("{name}|{by}|{album}"))) {
+        for c in hits {
+            if !seen.insert(norm(&format!("{}|{}|{}", c.title, c.artist, c.album))) {
                 continue;
             }
-            let mut c = Candidate {
-                title: name,
-                album_artist: h.collection_artist_name.clone().unwrap_or_else(|| by.clone()),
-                artist: by,
-                album,
-                year: h.release_date.as_deref().and_then(|d| d.get(..4)?.parse().ok()),
-                track_no: h.track_number,
-                disc_no: h.disc_number,
-                genre: h.primary_genre_name.clone().unwrap_or_default(),
-                cover_url: h.artwork_url100.as_ref().map(|u| u.replace("100x100bb", "600x600bb")),
-                thumb: h.artwork_url100.clone(),
-                duration: h.track_time_millis.unwrap_or(0.0) / 1000.0,
-                likely: false,
-            };
             if let Some(r) = rank(&c) {
-                c.likely = r.0 == 0;
-                out.push((r, c));
+                let likely = r.0 == 0;
+                out.push((r, Candidate { likely, ..c }));
             }
         }
         // Enough good matches: no need to ask other stores.
@@ -340,55 +328,201 @@ pub fn candidates(t: &Track, term: &str) -> Result<Vec<Candidate>, String> {
         }
     }
     // Deezer has releases Apple doesn't list (many game soundtracks and Asian singles).
-    if let Some(found) = deezer_candidates(&client, term) {
+    if let Some(found) = deezer_candidates(&client, term, 15) {
         reached = true;
         let mut fresh: Vec<(Rank4, Candidate, u64)> = Vec::new();
         for (c, id) in found {
-            // Already offered from iTunes: same title, artist and length (iTunes adds " - Single"
-            // to album names, so those can't be compared).
-            let dupe = out.iter().any(|(_, o)| {
-                norm(&o.title) == norm(&c.title) && norm(&o.artist) == norm(&c.artist) && (o.duration - c.duration).abs() < 2.0
-            });
-            if dupe || !seen.insert(norm(&format!("deezer|{id}"))) {
+            if is_dupe(&out, &c) || !seen.insert(format!("deezer|{id}")) {
                 continue;
             }
             if let Some(r) = rank(&c) {
-                let mut c = c;
-                c.likely = r.0 == 0;
                 fresh.push((r, c, id));
             }
         }
-        // The search lists only the main artist and no date: ask for the best few in full.
+        // The search lists only the main artist and no date: ask for the best few in full, then
+        // rank them again (all the credits can show it's the song).
         fresh.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         fresh.truncate(6);
-        std::thread::scope(|s| {
-            for (_, c, id) in fresh.iter_mut() {
-                let client = &client;
-                s.spawn(move || {
-                    if let Some(more) = deezer_details(client, *id) {
-                        if let Some(a) = more.artist {
-                            c.artist = a;
-                        }
-                        c.year = more.year;
-                        c.track_no = more.track_no;
-                        c.disc_no = more.disc_no;
-                    }
-                });
-            }
-        });
-        out.extend(fresh.into_iter().map(|(r, c, _)| (r, c)));
+        complete_from_deezer(&client, fresh.iter_mut().map(|(_, c, id)| (c, *id)));
+        for (r, c, _) in fresh {
+            let r = rank(&c).unwrap_or(r);
+            let likely = r.0 == 0;
+            out.push((r, Candidate { likely, ..c }));
+        }
     }
     if !reached {
         return Err("Couldn't reach the iTunes or Deezer catalogue. Check your internet connection.".into());
+    }
+    // Nothing is clearly the song (often a title in Chinese, Japanese or Korean that the
+    // catalogues list in English): look through the artists' songs for one of the same length.
+    if !out.iter().any(|(r, _)| r.0 == 0) && !want.artists.is_empty() {
+        for c in by_credits(&client, &want) {
+            if is_dupe(&out, &c) {
+                continue;
+            }
+            let likely = want.same_song_by_credits(&c);
+            let off = (c.duration - t.duration).abs();
+            out.push((Rank4(!likely as u8, -10.0, want.other_version(&c) as u8, off), Candidate { likely, ..c }));
+        }
     }
     out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     Ok(out.into_iter().take(12).map(|(_, c)| c).collect())
 }
 
+/// What Fix Song Info looks for, to tell the song from other songs by its artists.
+struct Want {
+    title: String,
+    /// Everyone credited in the file, letters and digits only ("jixwang", "visionsound").
+    artists: Vec<String>,
+    /// The same names as written, for searching ("VISION SOUND").
+    credit: Vec<String>,
+    duration: f64,
+}
+
+impl Want {
+    /// A live, instrumental, remix… recording, unless the song's own title says so.
+    fn other_version(&self, c: &Candidate) -> bool {
+        let label = format!("{} {}", c.title, c.album).to_lowercase();
+        let title = self.title.to_lowercase();
+        VERSIONS.iter().any(|v| label.contains(v) && !title.contains(v))
+    }
+
+    /// The song under another name: titles in different scripts (悠忽舞于梦中 is listed as
+    /// "Dancing Through Fantasies") can't be compared, so the credits and length must agree: two
+    /// artists in common within two seconds, or the only artist within one.
+    fn same_song_by_credits(&self, c: &Candidate) -> bool {
+        if cjk(&self.title) == cjk(&c.title) || self.other_version(c) {
+            return false;
+        }
+        let theirs = artist_names(&c.artist);
+        let shared = self.artists.iter().filter(|a| theirs.contains(a)).count();
+        let off = (c.duration - self.duration).abs();
+        (shared >= 2 && off < 2.0) || (shared >= 1 && self.artists.len() == 1 && off < 1.0)
+    }
+}
+
+/// Written with Chinese, Japanese or Korean letters.
+fn cjk(s: &str) -> bool {
+    use crate::romanize::{is_han, is_hangul, is_kana};
+    s.chars().any(|c| is_han(c) || is_hangul(c) || is_kana(c))
+}
+
+/// The names in an artist credit, letters and digits only:
+/// "鸣潮先约电台/jixwang/VISION SOUND" → ["鸣潮先约电台", "jixwang", "visionsound"].
+fn artist_names(credit: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for name in split_credit(credit) {
+        let n = norm(&name);
+        if !n.is_empty() && !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    names
+}
+
+/// The names in an artist credit as written.
+fn split_credit(credit: &str) -> Vec<String> {
+    let mut s = format!(" {credit} ");
+    for joiner in [" feat. ", " feat ", " ft. ", " featuring ", " x ", " X ", " with "] {
+        s = s.replace(joiner, "/");
+    }
+    s.split(['/', ';', ',', '&', '、', '，', '＆'])
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Already offered: same title, artist and length (iTunes adds " - Single" to album names, so
+/// those can't be compared).
+fn is_dupe(out: &[(Rank4, Candidate)], c: &Candidate) -> bool {
+    out.iter().any(|(_, o)| norm(&o.title) == norm(&c.title) && norm(&o.artist) == norm(&c.artist) && (o.duration - c.duration).abs() < 2.0)
+}
+
+/// Songs by the file's artists about as long as it, from both catalogues. Names in Latin letters
+/// are searched (the catalogues spell the others differently, 鸣潮 / 鳴潮); a credit with
+/// none is searched as written.
+fn by_credits(client: &reqwest::blocking::Client, want: &Want) -> Vec<Candidate> {
+    let latin: Vec<&str> = want.credit.iter().filter(|a| !cjk(a)).map(String::as_str).collect();
+    let term = if latin.is_empty() { want.credit.join(" ") } else { latin.join(" ") };
+    let close = |c: &Candidate| (c.duration - want.duration).abs() < 3.0;
+    let known = |out: &[Candidate], c: &Candidate| out.iter().any(|o| norm(&o.title) == norm(&c.title) && (o.duration - c.duration).abs() < 2.0);
+    let mut out: Vec<Candidate> = Vec::new();
+    for country in ["US", "JP"] {
+        for c in itunes_candidates(client, &term, country, 50).unwrap_or_default() {
+            if close(&c) && !known(&out, &c) {
+                out.push(c);
+            }
+        }
+    }
+    let mut deezer: Vec<(Candidate, u64)> = deezer_candidates(client, &term, 50)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(c, _)| close(c) && !known(&out, c))
+        .take(6)
+        .collect();
+    // The search names only the main artist ("Wuthering Waves"); the song's page has them all.
+    complete_from_deezer(client, deezer.iter_mut().map(|(c, id)| (c, *id)));
+    out.extend(deezer.into_iter().map(|(c, _)| c));
+    // Keep only songs that share an artist with the file.
+    out.retain(|c| artist_names(&c.artist).iter().any(|a| want.artists.contains(a)));
+    out
+}
+
+/// Songs for `term` in one iTunes store; None when it can't be reached.
+fn itunes_candidates(client: &reqwest::blocking::Client, term: &str, country: &str, limit: u32) -> Option<Vec<Candidate>> {
+    let url = format!(
+        "https://itunes.apple.com/search?media=music&entity=song&limit={limit}&country={country}&term={}",
+        urlencoding::encode(term)
+    );
+    let s: Search = client.get(&url).send().ok()?.json().ok()?;
+    Some(
+        s.results
+            .into_iter()
+            .filter_map(|h| {
+                let (name, by) = (h.track_name?, h.artist_name?);
+                Some(Candidate {
+                    title: name,
+                    album_artist: h.collection_artist_name.unwrap_or_else(|| by.clone()),
+                    artist: by,
+                    album: h.collection_name.unwrap_or_default(),
+                    year: h.release_date.as_deref().and_then(|d| d.get(..4)?.parse().ok()),
+                    track_no: h.track_number,
+                    disc_no: h.disc_number,
+                    genre: h.primary_genre_name.unwrap_or_default(),
+                    cover_url: h.artwork_url100.as_ref().map(|u| u.replace("100x100bb", "600x600bb")),
+                    thumb: h.artwork_url100,
+                    duration: h.track_time_millis.unwrap_or(0.0) / 1000.0,
+                    likely: false,
+                    source: "iTunes".into(),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Fills in Deezer results from their song pages, all at once.
+fn complete_from_deezer<'a>(client: &reqwest::blocking::Client, songs: impl Iterator<Item = (&'a mut Candidate, u64)>) {
+    std::thread::scope(|s| {
+        for (c, id) in songs {
+            s.spawn(move || {
+                if let Some(more) = deezer_details(client, id) {
+                    if let Some(a) = more.artist {
+                        c.artist = a;
+                    }
+                    c.year = more.year;
+                    c.track_no = more.track_no;
+                    c.disc_no = more.disc_no;
+                }
+            });
+        }
+    });
+}
+
 /// Songs for `term` in Deezer's public catalogue (no account or key), with their Deezer ids.
 /// None when Deezer can't be reached.
-fn deezer_candidates(client: &reqwest::blocking::Client, term: &str) -> Option<Vec<(Candidate, u64)>> {
-    let url = format!("https://api.deezer.com/search?q={}&limit=15", urlencoding::encode(term));
+fn deezer_candidates(client: &reqwest::blocking::Client, term: &str, limit: u32) -> Option<Vec<(Candidate, u64)>> {
+    let url = format!("https://api.deezer.com/search?q={}&limit={limit}", urlencoding::encode(term));
     let v: serde_json::Value = client.get(&url).send().ok()?.json().ok()?;
     let hits = v["data"].as_array()?;
     Some(
@@ -414,6 +548,7 @@ fn deezer_candidates(client: &reqwest::blocking::Client, term: &str) -> Option<V
                         thumb: cover("cover_medium"),
                         duration: h["duration"].as_f64().unwrap_or(0.0),
                         likely: false,
+                        source: "Deezer".into(),
                     },
                     id,
                 ))
@@ -635,7 +770,7 @@ pub fn lookup(t: &Track) -> Option<Found> {
     }
     // No exact original on iTunes: Deezer lists releases Apple doesn't (game soundtracks, Asian singles).
     if !best_so_far.as_ref().is_some_and(|(r, _)| r.0 == 0 && r.1 == 0) {
-        let hits: Vec<Hit> = deezer_candidates(&client, &term)
+        let hits: Vec<Hit> = deezer_candidates(&client, &term, 15)
             .unwrap_or_default()
             .into_iter()
             .map(|(c, id)| Hit {
@@ -753,6 +888,66 @@ mod tests {
         assert_eq!(top.title, "Dancing Through Fantasies");
         assert!(top.artist.contains("jixwang"), "{}", top.artist);
         assert_eq!(top.year, Some(2025));
+        assert_eq!(top.source, "Deezer");
+        // Its title is in English, but two of the file's artists and the length agree.
+        assert!(top.likely);
+    }
+
+    /// Needs the internet: the song is found from its Chinese tags alone, with no typing.
+    #[test]
+    #[ignore]
+    fn finds_a_song_listed_under_another_name() {
+        let t = Track {
+            title: "悠忽舞于梦中".into(),
+            artist: "鸣潮先约电台/jixwang/VISION SOUND".into(),
+            duration: 200.0,
+            ..Default::default()
+        };
+        let found = candidates(&t, &search_term(&t)).unwrap();
+        for c in &found {
+            println!("{} | {} | {} | {} | {} | likely {}", c.title, c.artist, c.album, c.duration, c.source, c.likely);
+        }
+        assert_eq!(found[0].title, "Dancing Through Fantasies");
+        assert!(found[0].likely);
+        assert_eq!(found.iter().filter(|c| c.likely).count(), 1, "the instrumental isn't the song");
+    }
+
+    #[test]
+    fn splits_artist_credits() {
+        assert_eq!(artist_names("鸣潮先约电台/jixwang/VISION SOUND"), ["鸣潮先约电台", "jixwang", "visionsound"]);
+        assert_eq!(artist_names("Wuthering Waves, jixwang & Vision Sound"), ["wutheringwaves", "jixwang", "visionsound"]);
+        assert_eq!(artist_names("YOASOBI feat. Ayase x ikura"), ["yoasobi", "ayase", "ikura"]);
+    }
+
+    #[test]
+    fn same_song_by_credits_needs_artists_and_length() {
+        let want = Want { title: "悠忽舞于梦中".into(), artists: artist_names("鸣潮先约电台/jixwang/VISION SOUND"), credit: vec![], duration: 200.0 };
+        let c = |title: &str, artist: &str, secs: f64| Candidate {
+            title: title.into(),
+            artist: artist.into(),
+            album: "Album".into(),
+            album_artist: String::new(),
+            year: None,
+            track_no: None,
+            disc_no: None,
+            genre: String::new(),
+            cover_url: None,
+            thumb: None,
+            duration: secs,
+            likely: false,
+            source: String::new(),
+        };
+        assert!(want.same_song_by_credits(&c("Dancing Through Fantasies", "Wuthering Waves, jixwang & Vision Sound", 200.0)));
+        // Only one artist in common, another length, or another recording: not enough.
+        assert!(!want.same_song_by_credits(&c("Dancing Through Fantasies", "Wuthering Waves & jixwang", 200.0)));
+        assert!(!want.same_song_by_credits(&c("Reveries in the Crimson Beyond", "Wuthering Waves, jixwang & Vision Sound", 205.0)));
+        assert!(!want.same_song_by_credits(&c("Dancing Through Fantasies (Instrumental)", "Wuthering Waves, jixwang & Vision Sound", 200.0)));
+        // Titles in the same script are compared by name instead.
+        assert!(!want.same_song_by_credits(&c("梦中", "jixwang & VISION SOUND", 200.0)));
+        // A single artist must match within a second.
+        let one = Want { title: "レモン".into(), artists: artist_names("Kenshi Yonezu"), credit: vec![], duration: 255.0 };
+        assert!(one.same_song_by_credits(&c("Lemon", "Kenshi Yonezu", 255.5)));
+        assert!(!one.same_song_by_credits(&c("Lemon", "Kenshi Yonezu", 257.0)));
     }
 
     #[test]

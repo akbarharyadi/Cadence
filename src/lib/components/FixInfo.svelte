@@ -12,6 +12,14 @@
   let picked = $state<SongInfo | null>(null);
   let busy = $state<"search" | "save" | null>(null);
   let error = $state("");
+  /** Keep the song's own title (null: not chosen, so on when the match's is in another script). */
+  let keepTitle = $state<boolean | null>(null);
+
+  const cjk = (s: string) => /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(s);
+  const plain = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+  // Only a tagged song has a title of its own (an untagged one's is its file name).
+  const canKeep = $derived(!!picked && !app.needsInfo(track) && plain(picked.title) !== plain(track.title));
+  const keeping = $derived(canKeep && (keepTitle ?? (!!picked && cjk(track.title) !== cjk(picked.title))));
 
   async function search(q?: string) {
     busy = "search";
@@ -36,8 +44,9 @@
     busy = "save";
     error = "";
     try {
-      const later = await api.saveSongInfo(track.id, $state.snapshot(picked) as SongInfo);
-      app.showToast(later ? `Saved. The file and cover are updated when “${picked.title}” finishes.` : `Saved “${picked.title}”`);
+      const info = { ...($state.snapshot(picked) as SongInfo), ...(keeping ? { title: track.title } : {}) };
+      const later = await api.saveSongInfo(track.id, info);
+      app.showToast(later ? `Saved. The file and cover are updated when “${info.title}” finishes.` : `Saved “${info.title}”`);
       close();
     } catch (e) {
       error = String(e);
@@ -79,12 +88,19 @@
             <span class="sub">{c.artist}, {c.album}{c.year ? ` (${c.year})` : ""}</span>
           </span>
           {#if c.likely}<span class="match">Match</span>{/if}
+          {#if c.source}<span class="src" title="From the {c.source} catalogue">{c.source}</span>{/if}
           <span class="len">{formatTime(c.duration)}</span>
         </button>
       {/each}
     {/if}
   </div>
   {#if error}<p class="error">{error}</p>{/if}
+  {#if canKeep && picked}
+    <label class="keep">
+      <input type="checkbox" checked={keeping} onchange={(e) => (keepTitle = e.currentTarget.checked)} />
+      <span>Keep my title <b>{track.title}</b> <span class="secondary">instead of “{picked.title}”</span></span>
+    </label>
+  {/if}
 
   {#snippet footer()}
     <button class="link note" onclick={editByHand}>Edit by hand…</button>
@@ -193,6 +209,27 @@
     border-radius: 99px;
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .src {
+    flex: none;
+    font-size: 11px;
+    color: var(--text-3);
+    padding: 1px 6px;
+    border-radius: 99px;
+    box-shadow: inset 0 0 0 1px var(--line-strong);
+  }
+  .keep {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0 0;
+    font-size: 13px;
+    min-width: 0;
+  }
+  .keep > span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .len {
     flex: none;
