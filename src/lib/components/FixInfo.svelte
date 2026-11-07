@@ -22,6 +22,7 @@
       results = r.results;
       picked = r.results.find((c) => c.likely) ?? null;
       if (!r.results.length) error = "Nothing found. Try other words, like the artist and the song title.";
+      else if (!picked) error = "None of these is clearly this song; it may not be in the iTunes catalogue (demos and unreleased songs often aren't). Pick one only if it's right, or use Edit by hand.";
     } catch (e) {
       error = String(e);
     } finally {

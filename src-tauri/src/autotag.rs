@@ -240,16 +240,52 @@ fn wanted(t: &Track) -> (Option<String>, String) {
     }
 }
 
+/// How much of the search a result contains (0 to 1): the share of the search's words found in
+/// its title, artist and album. Words in scripts without spaces (Japanese, Chinese) count when
+/// they appear anywhere in it.
+fn relevance(words: &[String], name: &str, by: &str, album: &str) -> f64 {
+    if words.is_empty() {
+        return 1.0;
+    }
+    let hay = format!("{name} {by} {album}");
+    let hay_words: HashSet<String> = search_words(&hay).into_iter().collect();
+    let hay_all = norm(&hay);
+    let found = words.iter().filter(|w| hay_words.contains(*w) || (!w.is_ascii() && hay_all.contains(w.as_str()))).count();
+    found as f64 / words.len() as f64
+}
+
+/// Lower-case words of letters and digits ("Don't" → "dont").
+fn search_words(s: &str) -> Vec<String> {
+    s.split(|c: char| c.is_whitespace() || matches!(c, '-' | '–' | '—' | '|' | '/' | ',' | '&' | '(' | ')' | '[' | ']'))
+        .map(norm)
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Results sharing less of the search than this are left out (unless they are the song).
+const MIN_RELEVANCE: f64 = 0.4;
+
 /// Catalogue results for `term`, the likeliest matches for `t` first.
 pub fn candidates(t: &Track, term: &str) -> Result<Vec<Candidate>, String> {
-    let (artist, title) = wanted(t);
+    // "Artist - Title" typed into the search box says what the song should be, like a file name.
+    let (artist, title) = match guess(term) {
+        (Some(a), title) => (Some(a), title),
+        _ => wanted(t),
+    };
+    let words = search_words(term);
+    // The catalogue reads "Artist - Title" worse than "Artist Title".
+    let term = match guess(term) {
+        (Some(a), title) => format!("{a} {title}"),
+        (None, _) => term.to_string(),
+    };
+    let term = term.as_str();
     let client = crate::net::builder()
         .timeout(std::time::Duration::from_secs(12))
         .user_agent(concat!("Cadence/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())?;
     let mut seen = HashSet::new();
-    let mut out: Vec<(Rank, Candidate)> = Vec::new();
+    let mut out: Vec<(Rank4, Candidate)> = Vec::new();
     let mut reached = false;
     for country in ["US", "ID", "JP", "KR", "GB"] {
         let url = format!(
@@ -268,10 +304,15 @@ pub fn candidates(t: &Track, term: &str) -> Result<Vec<Candidate>, String> {
             let length = h.track_time_millis.unwrap_or(0.0) / 1000.0;
             let off = (length - t.duration).abs();
             let likely = similar(&name, &title) && artist.as_deref().is_none_or(|a| similar(&by, a)) && off < 75.0;
+            let score = relevance(&words, &name, &by, &album);
+            if !likely && score < MIN_RELEVANCE {
+                continue;
+            }
             let label = format!("{name} {album}").to_lowercase();
             let other_version = VERSIONS.iter().any(|v| label.contains(v) && !title.to_lowercase().contains(v));
             out.push((
-                Rank(!likely as u8, other_version as u8, off),
+                // Not the song: the ones sharing most of the search first, then the closest length.
+                Rank4(!likely as u8, if likely { 0.0 } else { -(score * 10.0).round() }, other_version as u8, off),
                 Candidate {
                     title: name,
                     album_artist: h.collection_artist_name.clone().unwrap_or_else(|| by.clone()),
@@ -493,6 +534,10 @@ const VERSIONS: [&str; 12] = [
 #[derive(PartialEq, PartialOrd)]
 struct Rank(u8, u8, f64);
 
+/// Fix Song Info order, lower first: (not the song?, minus share of the search, another version?, seconds off).
+#[derive(PartialEq, PartialOrd)]
+struct Rank4(u8, f64, u8, f64);
+
 /// The result that is really this song, if any, preferring the original recording.
 fn best(hits: &[Hit], artist: Option<&str>, title: &str, duration: f64) -> Option<(Rank, Found)> {
     let wanted = title.to_lowercase();
@@ -640,6 +685,20 @@ mod tests {
 
 #[cfg(test)]
 mod fix_tests {
+    #[test]
+    fn relevance_counts_shared_words() {
+        let words = super::search_words("My Chemical Romance - My Way Home Is Through You");
+        // Same band, other song: kept, below the song itself.
+        assert!(super::relevance(&words, "I Don't Love You", "My Chemical Romance", "The Black Parade") >= super::MIN_RELEVANCE);
+        // Shares one word ("Chemical", "You"): left out.
+        assert!(super::relevance(&words, "Chemical", "VIXX", "CONTINUUM - EP") < super::MIN_RELEVANCE);
+        assert!(super::relevance(&words, "You", "benny blanco, Marshmello & Vance Joy", "You - Single") < super::MIN_RELEVANCE);
+        assert!(super::relevance(&words, "The Nights", "Avicii", "Stories") < super::MIN_RELEVANCE);
+        // Japanese searches have no spaces between words.
+        let jp = super::search_words("米津玄師 Lemon");
+        assert_eq!(super::relevance(&jp, "Lemon", "米津玄師", "Lemon - Single"), 1.0);
+    }
+
     /// Live: `cargo test --lib fix_tests -- --ignored --nocapture`.
     #[test]
     #[ignore]
@@ -656,5 +715,25 @@ mod fix_tests {
             println!("{} | {} | {} | {:.0}s | likely {}", c.title, c.artist, c.album, c.duration, c.likely);
         }
         assert!(found.first().is_some_and(|c| c.likely));
+    }
+
+    /// Live: a song the catalogue doesn't have gets only related results, none marked as the song.
+    #[test]
+    #[ignore]
+    fn unreleased_song_gets_related_results_only() {
+        let t = crate::library::Track {
+            title: "My Chemical Romance - My Way Home Is Through Yo".into(),
+            artist: "Unknown Artist".into(),
+            duration: 178.0,
+            ..Default::default()
+        };
+        for term in [super::search_term(&t), "My Chemical Romance - My Way Home Is Through You".to_string()] {
+            let found = super::candidates(&t, &term).unwrap();
+            println!("== {term}");
+            for c in &found {
+                println!("{} | {} | {} | {:.0}s | likely {}", c.title, c.artist, c.album, c.duration, c.likely);
+            }
+            assert!(found.iter().all(|c| c.artist == "My Chemical Romance" && !c.likely));
+        }
     }
 }
