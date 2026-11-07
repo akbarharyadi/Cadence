@@ -14,7 +14,7 @@
 #![cfg_attr(not(desktop), allow(dead_code, unused_imports))]
 
 pub mod align;
-#[cfg(desktop)]
+// Telling singers apart needs the separated vocals (desktop); its results are read everywhere.
 pub mod sing;
 #[cfg(desktop)]
 mod listen;

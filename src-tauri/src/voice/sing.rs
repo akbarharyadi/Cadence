@@ -9,6 +9,7 @@
 use std::io::{Read, Write};
 use std::path::Path;
 
+#[cfg(desktop)]
 use realfft::RealFftPlanner;
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +48,7 @@ impl Voices {
 }
 
 /// Describes mono vocals at 16 kHz.
+#[cfg(desktop)]
 pub fn analyze(audio: &[f32]) -> Voices {
     let frames = audio.len() / HOP;
     let mut planner = RealFftPlanner::<f32>::new();
@@ -101,6 +103,7 @@ pub fn analyze(audio: &[f32]) -> Voices {
     out
 }
 
+#[cfg(desktop)]
 fn quarter_semitones(hz: f32) -> u8 {
     (12.0 * (hz / PITCH_BASE_HZ).log2() * 4.0).round().clamp(1.0, 255.0) as u8
 }
@@ -110,6 +113,7 @@ const MIN_LAG: usize = RATE / 1000;
 const MAX_LAG: usize = RATE / 70;
 
 /// YIN pitch (Hz) of a frame, if it has a clear one.
+#[cfg(desktop)]
 fn yin(x: &[f32], d: &mut [f32]) -> Option<f32> {
     let n = x.len() - MAX_LAG;
     for (lag, v) in d.iter_mut().enumerate().skip(1) {
@@ -144,6 +148,7 @@ fn yin(x: &[f32], d: &mut [f32]) -> Option<f32> {
 }
 
 /// Triangular mel filters from 80 Hz to 7.6 kHz: (first bin, weights).
+#[cfg(desktop)]
 fn mel_bank() -> Vec<(usize, Vec<f32>)> {
     let mel = |hz: f32| 2595.0 * (1.0 + hz / 700.0).log10();
     let hz = |m: f32| 700.0 * (10f32.powf(m / 2595.0) - 1.0);
@@ -446,7 +451,7 @@ pub fn is_saved(path: &Path, stamp: &str) -> bool {
         && &head[16..] == stamp.as_bytes()
 }
 
-#[cfg(test)]
+#[cfg(all(test, desktop))]
 mod tests {
     use super::*;
 
