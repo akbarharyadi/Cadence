@@ -24,7 +24,7 @@ jobs:
             args: ""
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -33,21 +33,23 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
             libasound2-dev libdbus-1-dev pkg-config
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
         with:
           version: 10
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           cache: pnpm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          # Pinned to a commit, the action can't tell the toolchain from its ref: name it.
+          toolchain: stable
           # macOS builds one app for both Apple Silicon and Intel Macs.
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "./src-tauri -> target"
 
@@ -67,7 +69,31 @@ jobs:
           notes=$(awk -v v="## $version " 'index($0, v) == 1 {on = 1; next} /^## / {on = 0} on' CHANGELOG.md)
           { echo "body<<NOTES_EOF"; echo "$notes"; echo "NOTES_EOF"; } >> "$GITHUB_OUTPUT"
 
-      - uses: tauri-apps/tauri-action@v1
+      # Windows: build first and scan the program and installers with Microsoft Defender, so a build
+      # it flags is never published (0.2.34's cadence.exe was a false positive, Trojan:Win32/
+      # Bearfoos.A!ml, and was removed from users' PCs after updating). tauri-action below reuses
+      # this build (cargo has nothing left to compile) and uploads it.
+      - name: Build and scan with Microsoft Defender (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          pnpm tauri build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          if (-not (Test-Path $mp)) { Write-Warning "Microsoft Defender isn't on this runner: the build isn't scanned"; exit 0 }
+          & $mp -SignatureUpdate | Out-Host
+          $files = @("src-tauri\target\release\cadence.exe") + (Get-ChildItem src-tauri\target\release\bundle -Recurse -Include *.exe, *.msi).FullName
+          foreach ($f in $files) {
+            & $mp -Scan -ScanType 3 -File $f -DisableRemediation | Out-Host
+            # MpCmdRun: 0 = nothing found, 2 = a threat found.
+            if ($LASTEXITCODE -eq 2) { Write-Error "Microsoft Defender flags ${f}: not publishing this build"; exit 1 }
+            Get-FileHash -Algorithm SHA256 $f | Format-List | Out-Host
+          }
+
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Signs the update bundles; tauri-action then publishes latest.json for the in-app updater.
@@ -100,27 +126,29 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
         with:
           version: 10
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           cache: pnpm
 
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
         with:
           distribution: temurin
           java-version: 17
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          # Pinned to a commit, the action can't tell the toolchain from its ref: name it.
+          toolchain: stable
           targets: aarch64-linux-android
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "./src-tauri -> target"
 
