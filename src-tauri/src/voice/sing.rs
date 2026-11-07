@@ -416,12 +416,16 @@ pub fn split(v: &Voices, lines: &[Line]) -> Option<Split> {
     }
     let spans = spans(lines);
     let mut out = vec![None; lines.len()];
+    // "Both" needs the two voices' ranges apart: each is within 3 semitones of its own pitch, so
+    // closer than 6 they overlap, a note between them counts for both, and a line sung by one
+    // voice looked sung together (Doushite: voices 4.6 semitones apart, 29 of 33 lines "both").
+    let together_possible = gap >= 6.0;
     for (k, (i, _)) in known.iter().enumerate() {
         let x = &z[k];
         let (d0, d1) = (dist(x, &centre[0]).sqrt(), dist(x, &centre[1]).sqrt());
         // Sung together: a good share of the line clearly in each voice's range (a third
         // each; pitch trackers sometimes jump an octave, so a little of the other doesn't count).
-        if let Some(span) = spans[*i] {
+        if let Some(span) = spans[*i].filter(|_| together_possible) {
             let (low, high, all) = ranges(v, span, loud, p0 + 3.0, p1 - 3.0);
             if all >= 8 && low * 10 >= all * 3 && high * 10 >= all * 3 {
                 out[*i] = Some(2);
@@ -503,6 +507,65 @@ pub fn is_saved(path: &Path, stamp: &str) -> bool {
 #[cfg(all(test, desktop))]
 mod tests {
     use super::*;
+
+    /// Per line of one song (read-only): the split's verdict, how much is in each voice's range,
+    /// and how often the pitch switches between them. Two people singing at once make a
+    /// one-pitch tracker flip between their voices; one singer moving through their range doesn't.
+    /// `CADENCE_DATA` (roaming), `CADENCE_LOCAL` (local), `CADENCE_SONG` (track id).
+    #[test]
+    #[ignore]
+    fn line_singers() {
+        let data = std::path::PathBuf::from(std::env::var("CADENCE_DATA").unwrap());
+        let local = std::path::PathBuf::from(std::env::var("CADENCE_LOCAL").unwrap());
+        let id = std::env::var("CADENCE_SONG").unwrap();
+        #[derive(Deserialize)]
+        struct Lib {
+            tracks: Vec<crate::library::Track>,
+        }
+        let lib: Lib = serde_json::from_slice(&std::fs::read(data.join("library.json")).unwrap()).unwrap();
+        let t = lib.tracks.iter().find(|t| t.id == id).expect("song");
+        let stamp = std::env::var("CADENCE_STAMP").unwrap_or_else(|_| crate::sonic::stamp(t));
+        let v = load(&local.join("voice").join(format!("{id}.sing")), &stamp).expect("saved voices");
+        #[derive(Deserialize)]
+        struct Placed {
+            lines: Vec<Line>,
+        }
+        let placed: Placed = serde_json::from_slice(&std::fs::read(data.join("lyrics").join(format!("{id}.voice.json"))).unwrap()).unwrap();
+        let split = split(&v, &placed.lines).expect("a split");
+        let [p0, p1] = split.pitch;
+        let mut levels: Vec<u8> = v.level.iter().copied().filter(|&l| l > 30).collect();
+        levels.sort_unstable();
+        let loud = levels[levels.len() * 95 / 100].saturating_sub(25);
+        println!("voices: low {p0:.1} st, high {p1:.1} st");
+        for (i, span) in spans(&placed.lines).into_iter().enumerate() {
+            let Some(span) = span else { continue };
+            let (low, high, all) = ranges(&v, span, loud, p0 + 3.0, p1 - 3.0);
+            // Switches between the two ranges (frames in between are skipped).
+            let (a, b) = (((span.0 * FPS) as usize).min(v.frames()), ((span.1 * FPS).ceil() as usize).min(v.frames()));
+            let (mut last, mut switches) = (None, 0);
+            for f in a..b {
+                let Some(p) = v.semitones(f).filter(|_| v.level[f] >= loud) else { continue };
+                let side = if p <= p0 + 3.0 { Some(0) } else if p >= p1 - 3.0 { Some(1) } else { None };
+                if let Some(s) = side {
+                    if last.is_some_and(|l| l != s) {
+                        switches += 1;
+                    }
+                    last = Some(s);
+                }
+            }
+            let verdict = match split.lines[i] { Some(0) => "lower", Some(1) => "higher", Some(2) => "BOTH", _ => "?" };
+            println!(
+                "{:6} low {:3} high {:3} all {:3} switches {:3} ({:4.1}/s)  {}",
+                verdict,
+                low,
+                high,
+                all,
+                switches,
+                switches as f64 / (span.1 - span.0).max(0.1),
+                placed.lines[i].text.chars().take(28).collect::<String>()
+            );
+        }
+    }
 
     fn tone(hz: f32, secs: f32) -> Vec<f32> {
         (0..(secs * RATE as f32) as usize)
