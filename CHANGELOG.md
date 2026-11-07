@@ -2,6 +2,42 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.34 (2026-11-07)
+
+- **Fix song info finds much more.** It now searches Deezer as well as iTunes, so songs Apple doesn't list (many
+  game soundtracks and Asian singles) are found. A song tagged in Chinese, Japanese or Korean is found even when
+  the catalogues only know its English name (悠忽舞于梦中 is "Dancing Through Fantasies"): by its artists and its
+  length, with no typing. Each result says where it's from.
+  - **Keep my title**: take the album, year and cover but keep your title; the catalogue's is kept as the song's
+    subtitle, so searching your library finds it by either name.
+  - **The whole album at once**: the other songs of the album (in its folder) get the same album, year, genre and
+    cover, each matched to its own song (伴奏, カラオケ and 반주 are known as instrumentals), so the album never
+    splits in two.
+  - The cover you pick now replaces the file's own.
+- **Fix Album Info** (album menu): find the album, check which song each file is (any can be changed), and save the
+  album's info, cover and every song's title, artist and number in one go. The album whose songs are as long as
+  yours comes first.
+- **Needs Attention** (sidebar, with a count of what to fix): albums split in two with a one-click fix, songs
+  without info (**Find info for all** looks them up in the background, then shows what it found for you to check
+  before anything is saved), albums without a cover, and **the same artist under two names** (米津玄師 and Kenshi
+  Yonezu): Cadence asks the catalogue which names belong together, and you pick the one to keep.
+- **Undo.** Every change Cadence makes to your songs' files (Fix song info, Fix Album Info, renaming an artist,
+  merging an album, editing info by hand, and info it filled in by itself) can be undone: from the message that
+  appears, or later from **Recent changes** in Needs Attention. Undo puts the files back as they were, cover included.
+- **Now Playing, easier to read and use.** The background darkens as much as each cover needs, so the words stay
+  readable on white and pastel covers too, and upcoming lyrics are brighter. Everything fits the window, short or
+  narrow: nothing is cut off at the bottom any more. The lyrics have fewer buttons (Sing along, Latin letters, and ⋯
+  for the rest), the sleep timer moved into ⋯, and with "reduce motion" on in your system, nothing drifts.
+- **Favorites and ratings.** Heart a song and give it 1 to 5 stars; they follow the song if its file moves. Smart
+  playlists can use them, and the format, sample rate, bit depth and bitrate.
+- **Sleep timer**: stop after some minutes (with a fade-out), at the end of the song or of the album.
+- **Up Next tools**: clear it, save it as a playlist, drag songs to reorder, undo.
+- **Hotkeys that work in any app** on computers: Ctrl+Alt+Space plays or pauses, Ctrl+Alt+← / → skip, Ctrl+Alt+↑ / ↓
+  change the volume and Ctrl+Alt+H hearts the song. Turn them off in Settings.
+- **Library Health** (sidebar): songs you have twice, lossless files made from lossy or CD-quality sources, and
+  damaged files (FLAC checksum). The file checks run in the background, each file once.
+- **CUE sheets**: albums ripped as one big file with a .cue sheet show up as their songs.
+
 ## 0.2.33 (2026-11-07)
 
 - **No more "500 Internal Error".** On Android, turning the screen off and on again could leave Cadence on a blank
