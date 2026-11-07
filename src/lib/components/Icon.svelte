@@ -50,6 +50,12 @@
     smart: '<path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.7" fill="none"/>',
     edit: '<path d="M4 20h4L19 9l-4-4L4 16z" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linejoin="round"/>',
     mini: '<rect x="3" y="5" width="18" height="14" rx="2.5" stroke="currentColor" stroke-width="1.7" fill="none"/><rect x="11" y="11" width="7" height="5" rx="1" fill="currentColor"/>',
+    shield: '<path d="M12 3.5 5 6v5.5c0 4.2 2.9 7.4 7 9 4.1-1.6 7-4.8 7-9V6z" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linejoin="round"/><path d="m8.8 12.2 2.2 2.2 4.2-4.4" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+    moon: '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5Z" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linejoin="round"/>',
+    heart: '<path d="M12 20.2s-7.7-4.7-7.7-10.4A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.7 2.6c0 5.7-7.7 10.4-7.7 10.4Z" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linejoin="round"/>',
+    heartFill: '<path d="M12 20.2s-7.7-4.7-7.7-10.4A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.7 2.6c0 5.7-7.7 10.4-7.7 10.4Z" fill="currentColor" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
+    star: '<path d="m12 3.8 2.4 5 5.4.7-4 3.8 1 5.4-4.8-2.6-4.8 2.6 1-5.4-4-3.8 5.4-.7Z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/>',
+    starFill: '<path d="m12 3.8 2.4 5 5.4.7-4 3.8 1 5.4-4.8-2.6-4.8 2.6 1-5.4-4-3.8 5.4-.7Z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>',
     note: '<path d="M9 18V6l10-2v12" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/><circle cx="6.5" cy="18" r="2.5" fill="currentColor"/><circle cx="16.5" cy="16" r="2.5" fill="currentColor"/>',
   };
 </script>

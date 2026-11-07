@@ -117,6 +117,16 @@
                 <Icon name="sparkle" size={20} />
               </button>
             {/if}
+            <button
+              class="icon-btn light skip"
+              style:color={app.isLoved(t) ? "var(--accent)" : undefined}
+              onclick={() => app.toggleLoved(t)}
+              aria-label={app.isLoved(t) ? "Remove from Favorites" : "Add to Favorites"}
+              aria-pressed={app.isLoved(t)}
+              title={app.isLoved(t) ? "Remove from Favorites" : "Add to Favorites"}
+            >
+              <Icon name={app.isLoved(t) ? "heartFill" : "heart"} size={20} />
+            </button>
             <button class="icon-btn light skip" onclick={(e) => app.trackMenu(e, [t])} aria-label="More options" title="More options">
               <Icon name="more" size={20} />
             </button>
@@ -159,6 +169,19 @@
           </button>
           <button class="icon-btn light big" onclick={() => api.player("next")} aria-label="Next"><Icon name="next" size={30} /></button>
           <div class="side end">
+            <button
+              class="icon-btn light"
+              class:on={app.sleepActive}
+              onclick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                app.menu = { x: r.left - 120, y: Math.max(8, r.top - 8 - app.sleepItems().length * 36), items: app.sleepItems() };
+              }}
+              aria-label="Sleep timer"
+              aria-pressed={app.sleepActive}
+              title="Sleep timer"
+            >
+              <Icon name="moon" size={20} />
+            </button>
             <button class="icon-btn light" class:on={app.lyricsOpen} onclick={() => (app.lyricsOpen = !app.lyricsOpen)} aria-label="Lyrics" title="Lyrics (Ctrl+L)">
               <Icon name="lyrics" size={20} />
             </button>

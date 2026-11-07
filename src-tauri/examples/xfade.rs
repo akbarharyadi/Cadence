@@ -9,11 +9,11 @@ fn main() {
     let b = std::env::args().nth(2).expect("folder B");
     let mut tracks = library::scan(&[a, b], Vec::new(), |_, _| {});
     let _ = library::build_albums(&mut tracks, &std::env::temp_dir().join("cadence-xf-art"));
-    let item = |t: &library::Track| QueueItem { id: t.title.clone(), path: t.path.clone().into(), duration: t.duration, album_id: t.album_id.clone(), gain: t.gain, tone: None };
+    let item = |t: &library::Track| QueueItem { id: t.title.clone(), path: t.path.clone().into(), duration: t.duration, album_id: t.album_id.clone(), gain: t.gain, tone: None, start: t.cue.map_or(0.0, |c| c.start), end: t.cue.and_then(|c| c.end) };
     let night: Vec<_> = tracks.iter().filter(|t| t.album.starts_with("The Night")).collect();
     let other = tracks.iter().find(|t| !t.album.starts_with("The Night")).unwrap();
     let dsp = DspSettings { crossfade: CrossfadeSettings { enabled: true, seconds: 4.0 }, ..Default::default() };
-    let engine = Engine::start(0.03, dsp, Repeat::Off, |_| {});
+    let engine = Engine::start(0.03, dsp, Repeat::Off, false, |_| {});
 
     let watch = |label: &str, engine: &Engine, secs: f64| {
         let t0 = Instant::now();

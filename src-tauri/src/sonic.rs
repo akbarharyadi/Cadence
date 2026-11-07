@@ -84,6 +84,11 @@ impl Store {
     }
 
     pub fn needs(&self, t: &Track) -> bool {
+        // A song inside a single-file album shares its file with the others: analysing the whole
+        // file for each one would be wrong (and slow), so these songs have no sound analysis yet.
+        if t.cue.is_some() {
+            return false;
+        }
         self.tracks
             .get(&t.id)
             .is_none_or(|e| e.stamp != stamp(t) || (e.t.is_empty() && !e.f.is_empty()))

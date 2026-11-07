@@ -13,6 +13,8 @@ use crate::voice::Voice;
 /// The front end: receives events ("library-changed", "player-status", …) as JSON.
 pub trait Host: Send + Sync + 'static {
     fn emit(&self, event: &str, payload: serde_json::Value);
+    /// Turns the global hotkeys on or off (desktop only).
+    fn set_hotkeys(&self, _on: bool) {}
     /// A folder for temporary downloads (Android update packages).
     fn cache_dir(&self) -> PathBuf {
         std::env::temp_dir()

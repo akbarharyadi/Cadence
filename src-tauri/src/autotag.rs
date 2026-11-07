@@ -33,6 +33,12 @@ pub struct Found {
     pub disc_no: Option<u32>,
     pub genre: String,
     pub cover_url: Option<String>,
+    /// Put the cover in place of the file's own (the user picked this match); otherwise it's
+    /// only added to a file without one.
+    pub replace_cover: bool,
+    /// The catalogue's title, kept as the subtitle when the song keeps its own (only into a file
+    /// without a subtitle).
+    pub subtitle: Option<String>,
 }
 
 #[derive(Default)]
@@ -59,7 +65,9 @@ fn runtime() -> &'static Mutex<Runtime> {
 
 /// Whether a song is missing the tags that matter.
 pub fn untagged(t: &Track) -> bool {
-    t.artist == "Unknown Artist"
+    // (Not a song of a single-file album: its info comes from the cue sheet, and writing tags
+    // would change the whole album's file.)
+    t.artist == "Unknown Artist" && t.cue.is_none()
 }
 
 /// Called when the playing song changes.
@@ -156,19 +164,26 @@ fn write(path: &Path, f: &Found, cover: Option<Vec<u8>>) -> Result<(), String> {
         disc_no: f.disc_no.map(|n| n.to_string()),
     };
     crate::tagedit::write(path, &changes)?;
-    let Some(cover) = cover else { return Ok(()) };
+    if let (true, Some(cover)) = (f.replace_cover, &cover) {
+        crate::covers::embed(path, cover)?;
+    }
     let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
     let Some(tag) = tagged.primary_tag_mut() else { return Ok(()) };
-    if tag.pictures().iter().any(|p| p.pic_type() == PictureType::CoverFront) {
-        return Ok(());
+    let mut changed = false;
+    if let Some(sub) = f.subtitle.as_deref().filter(|_| tag.get_string(ItemKey::TrackSubtitle).is_none_or(|s| s.trim().is_empty())) {
+        tag.insert_text(ItemKey::TrackSubtitle, sub.to_string());
+        changed = true;
     }
-    tag.push_picture(
-        Picture::unchecked(cover)
-            .pic_type(PictureType::CoverFront)
-            .mime_type(MimeType::Jpeg)
-            .build(),
-    );
-    tag.save_to_path(path, WriteOptions::default()).map_err(|e| e.to_string())
+    if let (false, Some(cover)) = (f.replace_cover, cover) {
+        if !tag.pictures().iter().any(|p| p.pic_type() == PictureType::CoverFront) {
+            tag.push_picture(Picture::unchecked(cover).pic_type(PictureType::CoverFront).mime_type(MimeType::Jpeg).build());
+            changed = true;
+        }
+    }
+    if changed {
+        tag.save_to_path(path, WriteOptions::default()).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn download(url: &str) -> Result<Vec<u8>, String> {
@@ -228,6 +243,8 @@ impl From<Candidate> for Found {
             disc_no: c.disc_no,
             genre: c.genre,
             cover_url: c.cover_url,
+            replace_cover: true,
+            subtitle: None,
         }
     }
 }
@@ -685,6 +702,9 @@ pub fn save_choice(ctx: &Ctx, id: &str, mut choice: Candidate, keep_title: bool,
     let (track, mates) = {
         let lib = state.library.lock();
         let t = lib.by_id.get(id).map(|&i| lib.snapshot.tracks[i].clone()).ok_or("Unknown song")?;
+        if t.cue.is_some() {
+            return Err("Songs from a single-file album (CUE sheet) take their info from the .cue file, which Cadence doesn't edit.".into());
+        }
         // Songs without tags share a made-up album (their folder): never theirs to change.
         let mates: Vec<Track> = if whole_album && !untagged(&t) {
             lib.snapshot.tracks.iter().filter(|m| m.album_id == t.album_id && m.id != t.id && !untagged(m)).cloned().collect()
@@ -708,15 +728,22 @@ pub fn save_choice(ctx: &Ctx, id: &str, mut choice: Candidate, keep_title: bool,
         disc_no,
         genre: choice.genre.clone(),
         cover_url: choice.cover_url.clone(),
+        replace_cover: true,
+        subtitle: None,
     };
+    // The catalogue's name for a song that keeps its own, so search finds it by either.
+    let other_name = |mine: &str, theirs: &str| (keep_title && norm(mine) != norm(theirs)).then(|| theirs.to_string());
     let mut plan: Vec<(Track, Found)> = vec![(
         track.clone(),
-        album(
-            if keep_title { track.title.clone() } else { choice.title.clone() },
-            choice.artist.clone(),
-            choice.track_no,
-            choice.disc_no,
-        ),
+        Found {
+            subtitle: other_name(&track.title, &choice.title),
+            ..album(
+                if keep_title { track.title.clone() } else { choice.title.clone() },
+                choice.artist.clone(),
+                choice.track_no,
+                choice.disc_no,
+            )
+        },
     )];
 
     let mut matched = 0;
@@ -750,7 +777,10 @@ pub fn save_choice(ctx: &Ctx, id: &str, mut choice: Candidate, keep_title: bool,
                     matched += 1;
                     let song = &songs[i];
                     let title = if keep_title { m.title.clone() } else { song.title.clone() };
-                    album(title, credit.unwrap_or_else(|| song.artist.clone()), song.track_no, song.disc_no)
+                    Found {
+                        subtitle: other_name(&m.title, &song.title),
+                        ..album(title, credit.unwrap_or_else(|| song.artist.clone()), song.track_no, song.disc_no)
+                    }
                 }
                 // Not on the catalogue's album (a bonus track, another length): only the album's info.
                 None => album(m.title.clone(), m.artist.clone(), m.track_no, m.disc_no),
@@ -813,7 +843,7 @@ fn show_now(state: &AppState, plan: &[(Track, Found)], cover: Option<&[u8]>) {
     let Some((_, first)) = plan.first() else { return };
     let art_dir = state.art_dir();
     let album_id = crate::library::album_id_for(&first.album_artist, &first.album);
-    if !art_dir.join(format!("{album_id}_s.jpg")).exists() {
+    if first.replace_cover || !art_dir.join(format!("{album_id}_s.jpg")).exists() {
         if let Some(bytes) = cover {
             crate::library::write_art(&album_id, bytes, &art_dir);
         }
@@ -829,6 +859,9 @@ fn show_now(state: &AppState, plan: &[(Track, Found)], cover: Option<&[u8]>) {
         x.album_artist = f.album_artist.clone();
         x.year = f.year;
         x.genre = f.genre.clone();
+        if let Some(sub) = f.subtitle.as_ref().filter(|_| x.subtitle.is_empty()) {
+            x.subtitle = sub.clone();
+        }
         x.track_no = f.track_no;
         x.disc_no = f.disc_no;
         x.album_id = album_id.clone();
@@ -1085,6 +1118,8 @@ fn best(hits: &[Hit], artist: Option<&str>, title: &str, duration: f64) -> Optio
                     genre: h.primary_genre_name.clone().unwrap_or_default(),
                     // The search gives a 100 px cover; the same address serves larger sizes.
                     cover_url: h.cover.clone().or_else(|| h.artwork_url100.as_ref().map(|u| u.replace("100x100bb", "600x600bb"))),
+                    replace_cover: false,
+                    subtitle: None,
                 },
                 h.deezer_id,
             )
@@ -1286,6 +1321,51 @@ mod tests {
         assert!(after.has_embedded_art);
         // The audio is untouched: same length.
         assert!((after.duration - t.duration).abs() < 0.05);
+    }
+
+    /// A picked match replaces the file's cover and keeps the catalogue's title as the subtitle,
+    /// without overwriting a subtitle the file has. On a copy of a tagged song with a cover:
+    /// `CADENCE_TAGGED_FILE=path cargo test --lib autotag::tests::picked_match_replaces_cover -- --ignored`.
+    #[test]
+    #[ignore]
+    fn picked_match_replaces_cover_and_keeps_other_title() {
+        let Ok(src) = std::env::var("CADENCE_TAGGED_FILE") else { return };
+        let dir = std::env::temp_dir().join("cadence-autotag-cover-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join(Path::new(&src).file_name().unwrap());
+        std::fs::copy(&src, &copy).unwrap();
+        let before = crate::library::read_track(&copy).expect("readable");
+        assert!(before.has_embedded_art, "test file should have a cover");
+        // A new 8×8 red cover.
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([255, 0, 0])))
+            .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .unwrap();
+        let found = |subtitle: &str| Found {
+            title: before.title.clone(),
+            artist: "Wuthering Waves, jixwang & Vision Sound".into(),
+            album: "Dancing Through Fantasies".into(),
+            album_artist: "Wuthering Waves".into(),
+            year: Some(2025),
+            track_no: Some(1),
+            disc_no: Some(1),
+            genre: "Pop".into(),
+            cover_url: None,
+            replace_cover: true,
+            subtitle: Some(subtitle.into()),
+        };
+        write(&copy, &found("Dancing Through Fantasies"), Some(jpeg.clone())).unwrap();
+        write(&copy, &found("Something Else"), Some(jpeg.clone())).unwrap();
+        let tagged = lofty::read_from_path(&copy).unwrap();
+        let tag = tagged.primary_tag().unwrap();
+        let fronts: Vec<_> = tag.pictures().iter().filter(|p| p.pic_type() == PictureType::CoverFront).collect();
+        assert_eq!(fronts.len(), 1, "one front cover");
+        assert_eq!(fronts[0].data(), jpeg.as_slice(), "the new cover replaced the old one");
+        let after = crate::library::read_track(&copy).unwrap();
+        assert_eq!(after.title, before.title);
+        assert_eq!(after.subtitle, "Dancing Through Fantasies", "a subtitle already there isn't overwritten");
+        assert!((after.duration - before.duration).abs() < 0.05);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Needs the internet: a download Apple doesn't list is tagged from Deezer.

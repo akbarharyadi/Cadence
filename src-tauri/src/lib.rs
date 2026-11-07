@@ -4,20 +4,26 @@ mod artists;
 mod autotag;
 mod catalog;
 mod covers;
+pub mod cue;
 mod ctx;
 pub mod audio;
 mod commands;
 pub mod history;
+mod health;
+#[cfg(desktop)]
+mod hotkeys;
 mod hub;
 mod jobs;
 pub mod library;
 pub mod lyrics;
+mod marks;
 mod media;
 mod net;
 mod romanize;
 pub mod playlists;
 mod scrobble;
 mod secrets;
+mod sleep;
 pub mod sonic;
 mod state;
 pub mod tagedit;
@@ -40,6 +46,13 @@ impl Host for TauriHost {
         let _ = self.0.emit(event, payload);
     }
 
+    fn set_hotkeys(&self, on: bool) {
+        #[cfg(desktop)]
+        hotkeys::set(&self.0, on);
+        #[cfg(mobile)]
+        let _ = on;
+    }
+
     fn cache_dir(&self) -> PathBuf {
         self.0.path().app_cache_dir().unwrap_or_else(|_| std::env::temp_dir())
     }
@@ -57,6 +70,7 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(hotkeys::plugin())
         .plugin(tauri_plugin_process::init());
     builder
         .plugin(
@@ -97,6 +111,8 @@ pub fn run() {
 
             #[cfg(desktop)]
             tray::create(app.handle())?;
+            #[cfg(desktop)]
+            hotkeys::set(app.handle(), ctx.state.settings.lock().global_hotkeys);
             // On a phone the music lives in the shared Music folder; start with it.
             #[cfg(target_os = "android")]
             if ctx.state.settings.lock().folders.is_empty() {
@@ -154,6 +170,12 @@ pub fn run() {
             commands::get_history,
             commands::get_app_settings,
             commands::set_close_to_tray,
+            commands::set_global_hotkeys,
+            commands::health_report,
+            commands::health_duplicates,
+            commands::health_start,
+            commands::health_stop,
+            commands::health_remove,
             commands::set_lyrics_online,
             commands::set_fix_tags_online,
             commands::get_skips,
@@ -168,6 +190,14 @@ pub fn run() {
             commands::save_song_info,
             commands::set_skipped,
             commands::set_skip_instrumentals,
+            commands::get_marks,
+            commands::set_sleep_timer,
+            commands::get_sleep_timer,
+            commands::clear_up_next,
+            commands::move_in_queue,
+            commands::insert_in_queue,
+            commands::set_rating,
+            commands::set_loved,
             commands::get_lyrics,
             commands::get_playlists,
             commands::connect_listenbrainz,

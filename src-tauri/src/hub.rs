@@ -42,6 +42,9 @@ pub fn open(data_dir: PathBuf, local_dir: &Path, host: Arc<dyn Host>) -> (Ctx, R
     let state = Arc::new(AppState {
         engine,
         history: Mutex::new(history),
+        marks: Mutex::new(read_json(&data_dir.join("marks.json"))),
+        sleep: Default::default(),
+        health: crate::health::Health::new(read_json(&data_dir.join("health.json"))),
         playlists: Mutex::new(playlists),
         library: Mutex::new(lib),
         sonic: Mutex::new(sonic),

@@ -593,7 +593,8 @@ pub fn stop_batch(ctx: &Ctx) {
 fn has_lyrics(cache: &Path, track: &Track) -> bool {
     crate::lyrics::picked(cache, &track.id)
         .or_else(|| crate::lyrics::saved(cache, &track.id, &track.title))
-        .or_else(|| crate::lyrics::local(Path::new(&track.path)))
+        // (Lyrics in the file or beside it belong to the whole album file, not to one of its songs.)
+        .or_else(|| if track.cue.is_some() { None } else { crate::lyrics::local(Path::new(&track.path)) })
         .is_some_and(|l| !l.instrumental && !l.is_empty())
 }
 
@@ -607,7 +608,7 @@ fn batch_songs(state: &AppState, voice: &Voice) -> Vec<String> {
     let cache = state.data_dir.join("lyrics");
     let mut found: Vec<(u32, u64, String)> = tracks
         .iter()
-        .filter(|t| t.duration >= 20.0 && t.duration <= listen::LONGEST_SECS && !skipped.contains(&t.id))
+        .filter(|t| t.cue.is_none() && t.duration >= 20.0 && t.duration <= listen::LONGEST_SECS && !skipped.contains(&t.id))
         .filter(|t| voice.needs_listening(t) && !crate::lyrics::is_hidden(&cache, &t.id))
         .filter(|t| has_lyrics(&cache, t))
         .map(|t| {
@@ -867,6 +868,9 @@ fn look_ahead(ctx: &Ctx, state: &AppState, voice: &Voice, just_done: &str) {
 #[cfg(desktop)]
 fn run(ctx: &Ctx, state: &AppState, voice: &Voice, track: &Track, resolve: Resolve) -> anyhow::Result<()> {
     use anyhow::bail;
+    if track.cue.is_some() {
+        bail!("Songs from a single-file album (CUE sheet) can't follow the singer yet.");
+    }
     let lyrics = resolve(state, track);
     let texts = text_of(&lyrics);
     if lyrics.instrumental || texts.iter().all(|t| t.trim().is_empty()) {

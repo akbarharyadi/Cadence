@@ -5,6 +5,7 @@
   import { app, shuffled, signalPath, type MenuItem } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import QualityBadge from "./QualityBadge.svelte";
+  import SleepLabel from "./SleepLabel.svelte";
 
   /** "top": the desktop window's top bar. "bottom": a bar along the bottom of the desktop window
    * (Settings > Appearance). "dock": the phone's player above the tab bar. */
@@ -79,7 +80,9 @@
 
   /** A menu dropping from (or, at the bottom, rising above) the button that opened it. */
   function menuFrom(e: MouseEvent, items: MenuItem[]) {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    menuAt((e.currentTarget as HTMLElement).getBoundingClientRect(), items);
+  }
+  function menuAt(r: DOMRect, items: MenuItem[]) {
     app.menu = { x: r.left, y: placement === "top" ? r.bottom + 6 : Math.max(8, r.top - 6 - items.length * 36), items };
   }
   /** The song's own menu (play next, add to playlist, fix info, skip from now on…). */
@@ -90,8 +93,10 @@
     if (app.menu && e.type === "click") app.menu = { ...app.menu, x: at.left, y: placement === "top" ? at.bottom + 6 : Math.max(8, at.top - 6 - app.menu.items.length * 36) };
   }
   function toolsMenu(e: MouseEvent) {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     menuFrom(e, [
       { label: "Mini Player", icon: "mini", action: () => api.toggleMini() },
+      { label: app.sleepActive ? "Sleep Timer (on)…" : "Sleep Timer…", icon: "moon", action: () => menuAt(r, app.sleepItems()) },
       { label: "Sound Settings", icon: "eq", action: () => app.go({ name: "sound" }) },
       app.playerPosition === "top"
         ? { label: "Move Player to the Bottom", icon: "down", action: () => app.setPlayerPosition("bottom") }
@@ -253,6 +258,16 @@
         <Icon name="sparkle" size={16} />
       </button>
     {/if}
+    <button
+      class="icon-btn act heart"
+      class:loved={app.isLoved(t)}
+      onclick={() => app.toggleLoved(t)}
+      aria-label={app.isLoved(t) ? "Remove from Favorites" : "Add to Favorites"}
+      aria-pressed={app.isLoved(t)}
+      title={app.isLoved(t) ? "Remove from Favorites" : "Add to Favorites"}
+    >
+      <Icon name={app.isLoved(t) ? "heartFill" : "heart"} size={17} />
+    </button>
     <button class="icon-btn act" onclick={() => (app.picker = t ? [t] : null)} aria-label="Add to a playlist" title="Add to a playlist">
       <Icon name="plus" size={17} />
     </button>
@@ -274,6 +289,11 @@
     </button>
   {/if}
   <div class="tools">
+    {#if app.sleepActive}
+      <button class="icon-btn on sleep" onclick={(e) => menuFrom(e, app.sleepItems())} aria-label="Sleep timer" title="Sleep timer: click to change or turn off">
+        <Icon name="moon" size={16} /><span><SleepLabel /></span>
+      </button>
+    {/if}
     <button
       class="icon-btn"
       class:on={app.nowPlayingOpen && app.lyricsOpen}
@@ -971,6 +991,18 @@
   }
   .act:hover {
     color: var(--text);
+  }
+  .act.heart.loved {
+    color: var(--accent);
+  }
+  .icon-btn.sleep {
+    width: auto;
+    gap: 5px;
+    padding: 0 9px;
+    border-radius: 14px;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
 
   /* ---------- nothing playing ---------- */

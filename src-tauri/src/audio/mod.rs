@@ -63,6 +63,16 @@ pub struct QueueItem {
     pub gain: SongGain,
     /// Smart EQ curve (dB per band) from the sound analysis, if measured.
     pub tone: Option<[f32; 10]>,
+    /// A song inside a longer file (CUE sheet): seconds into the file where it starts, and where it
+    /// ends (None: the end of the file). Positions and `duration` are the song's own.
+    pub start: f64,
+    pub end: Option<f64>,
+}
+
+impl QueueItem {
+    fn is_cue(&self) -> bool {
+        self.start > 0.0 || self.end.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +196,21 @@ pub enum Cmd {
         next: bool,
     },
     Remove(usize),
+    /// Puts songs into the queue at this place (never before the song that's playing): undoing a
+    /// removal.
+    Insert {
+        at: usize,
+        items: Vec<QueueItem>,
+    },
+    /// Takes everything after the playing song out of the queue.
+    ClearUpNext,
+    /// Moves a song that's waiting in the queue to another place among the waiting ones.
+    Move {
+        from: usize,
+        to: usize,
+    },
+    /// Pauses by itself at a song boundary (the sleep timer's "end of this song / album").
+    StopAfter(Option<StopAfter>),
     /// New gain measurements for songs (from the background loudness scan).
     UpdateGains(Vec<(String, SongGain)>),
     SetVolume(f32),
@@ -197,6 +222,16 @@ pub enum Cmd {
     /// Songs whose files moved (found again by a rescan): the queue entry with the old id gets
     /// the new one, in place.
     Replace(Vec<(String, QueueItem)>),
+}
+
+/// When playback should pause by itself.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum StopAfter {
+    /// After this many more songs have finished (1 = the end of the song that's playing).
+    Songs { left: u32 },
+    /// When the next song is from another album than the one playing.
+    Album,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -259,6 +294,8 @@ pub struct Status {
     pub source: Option<SourceInfo>,
     pub output: OutputInfo,
     pub error: Option<String>,
+    /// The sleep timer's song or album rule, while one is set.
+    pub stop_after: Option<StopAfter>,
 }
 
 pub struct Engine {
@@ -380,6 +417,8 @@ struct Worker {
     shuffle: bool,
     /// While shuffled: the order the songs after the current one had, to put back.
     unshuffled: Vec<String>,
+    /// Pause at the next song boundary that matches (sleep timer).
+    stop: Option<StopAfter>,
     volume: f32,
     error: Option<String>,
     last_emit: Instant,
@@ -445,6 +484,7 @@ impl Worker {
             repeat,
             shuffle,
             unshuffled: Vec::new(),
+            stop: None,
             volume,
             error: None,
             last_emit: Instant::now(),
@@ -784,10 +824,43 @@ impl Worker {
                 } else {
                     self.queue.len()
                 };
-                let n = items.len();
-                self.queue.splice(at..at, items);
-                self.shift_indices(at, n as isize);
+                self.insert_items(at, items);
             }
+            Cmd::Insert { at, items } => {
+                if self.play_index.is_none() {
+                    return;
+                }
+                self.insert_items(at, items);
+            }
+            Cmd::ClearUpNext => {
+                if let Some(pi) = self.play_index {
+                    if self.queue.len() > pi + 1 {
+                        let prepared = self.next_is_prepared(pi);
+                        self.queue.truncate(pi + 1);
+                        self.unshuffled.clear();
+                        if prepared {
+                            // The next song was already on its way to the device.
+                            self.restart_here(None);
+                        }
+                    }
+                }
+            }
+            Cmd::Move { from, to } => {
+                let Some(pi) = self.play_index else { return };
+                let n = self.queue.len();
+                if from == to || from <= pi || to <= pi || from >= n || to >= n {
+                    return;
+                }
+                let prepared = self.next_is_prepared(pi);
+                let item = self.queue.remove(from);
+                self.shift_indices(from + 1, -1);
+                self.queue.insert(to, item);
+                self.shift_indices(to, 1);
+                if prepared && (from == pi + 1 || to == pi + 1) {
+                    self.restart_here(None);
+                }
+            }
+            Cmd::StopAfter(rule) => self.stop = rule,
             Cmd::Remove(i) => {
                 if i >= self.queue.len() || Some(i) == self.play_index {
                     return;
@@ -894,6 +967,45 @@ impl Worker {
         // The next song may already be on its way to the device: prepare the new one instead.
         if self.dec_index > pi || self.boundaries.iter().any(|b| b.index > pi) {
             self.restart_here(None);
+        }
+    }
+
+    /// Whether the song after `pi` is already being decoded or buffered for the device.
+    fn next_is_prepared(&self, pi: usize) -> bool {
+        self.dec_index > pi || self.boundaries.iter().any(|b| b.index > pi)
+    }
+
+    /// Puts `items` into the queue at `at`, never before the song that's playing.
+    fn insert_items(&mut self, at: usize, items: Vec<QueueItem>) {
+        let pi = self.play_index.unwrap_or(0);
+        let at = at.clamp(pi + 1, self.queue.len());
+        let n = items.len();
+        let prepared = self.next_is_prepared(pi);
+        self.queue.splice(at..at, items);
+        self.shift_indices(at, n as isize);
+        if prepared && at == pi + 1 {
+            // What was about to play next is now second: prepare the new next song instead.
+            self.restart_here(None);
+        }
+    }
+
+    /// Crossing from song `old` into `new`: whether the sleep timer's rule says to stop here
+    /// (counting the song down when it doesn't).
+    fn stop_here(&mut self, old: Option<usize>, new: usize) -> bool {
+        match self.stop.clone() {
+            None => false,
+            Some(StopAfter::Songs { left }) => {
+                if left <= 1 {
+                    true
+                } else {
+                    self.stop = Some(StopAfter::Songs { left: left - 1 });
+                    false
+                }
+            }
+            Some(StopAfter::Album) => {
+                let album = |i: usize| self.queue.get(i).map(|q| q.album_id.as_str());
+                old.and_then(album) != album(new)
+            }
         }
     }
 
@@ -1077,8 +1189,11 @@ impl Worker {
             }
             self.open_output(Some(src.rate));
         }
-        let offset = if secs > 0.5 {
-            src.seek(secs).unwrap_or(0.0)
+        // Where the song starts in the file (a song of a CUE sheet starts partway in). `offset` is
+        // the position in the song itself.
+        let start = self.queue[index].start;
+        let offset = if secs > 0.5 || start > 0.0 {
+            (src.seek(start + secs).unwrap_or(start) - start).max(0.0)
         } else {
             0.0
         };
@@ -1164,8 +1279,18 @@ impl Worker {
             let Some(dec) = self.dec.as_mut() else {
                 return Step::Full;
             };
+            // A song of a CUE sheet ends where the next one starts, partway into the file.
+            let room = self.queue.get(self.dec_index).and_then(|q| q.end.map(|e| ((e - q.start) * f64::from(dec.rate)) as u64));
+            if room.is_some_and(|r| self.dec_frames >= r) {
+                return Step::EndOfSong;
+            }
             match dec.next_chunk() {
                 Ok(Some((samples, rate, src_ch))) => {
+                    let frames = samples.len() / src_ch.max(1);
+                    let samples = match room {
+                        Some(r) if self.dec_frames + frames as u64 > r => &samples[..(r - self.dec_frames) as usize * src_ch.max(1)],
+                        _ => samples,
+                    };
                     self.dec_frames += (samples.len() / src_ch.max(1)) as u64;
                     map_channels(samples, src_ch, ch, &mut self.mapped);
                     if self.gain != 1.0 {
@@ -1230,6 +1355,8 @@ impl Worker {
             || self.crossfade.is_some()
             || self.crossfade_checked == Some(self.dec_index)
             || self.repeat == Repeat::One
+            // The sleep timer ends playback at a boundary: don't blend the next song in first.
+            || self.stop.is_some()
         {
             return;
         }
@@ -1246,6 +1373,7 @@ impl Worker {
         };
         if next == self.dec_index
             || self.queue[next].album_id == current.album_id
+            || self.queue[next].is_cue()
             || remaining < 1.0
         {
             return;
@@ -1348,14 +1476,26 @@ impl Worker {
         let Some(out) = self.out.as_ref() else { return };
         let consumed = self.shared.consumed.load(Ordering::Acquire);
         if let Some(pos) = self.boundaries.iter().rposition(|b| b.start <= consumed) {
-            let b = &self.boundaries[pos];
-            if self.play_index != Some(b.index) {
-                self.play_index = Some(b.index);
+            let (index, offset, start) = {
+                let b = &self.boundaries[pos];
+                (b.index, b.offset, b.start)
+            };
+            let old = self.play_index;
+            if self.play_index != Some(index) {
+                self.play_index = Some(index);
                 self.dirty = true;
             }
-            self.position = b.offset + (consumed - b.start) as f64 / out.rate as f64;
+            self.position = offset + (consumed - start) as f64 / out.rate as f64;
             if pos > 0 {
                 self.boundaries.drain(..pos);
+                // Playback just crossed into the next song (same index when it repeats).
+                if self.stop_here(old, index) {
+                    self.stop = None;
+                    self.shared.playing.store(false, Ordering::Relaxed);
+                    self.start_at(index, 0.0, false);
+                    return;
+                }
+                self.dirty = true;
             }
         }
         let ended = !self.decoding && self.pending.is_empty() && consumed >= self.written;
@@ -1365,6 +1505,7 @@ impl Worker {
                 return;
             }
             // Queue finished: stop, ready to play again from the start of the last song.
+            self.stop = None;
             self.shared.playing.store(false, Ordering::Relaxed);
             if let Some(i) = self.play_index {
                 self.start_at(i, 0.0, false);
@@ -1464,6 +1605,7 @@ impl Worker {
             source: current.map(|b| b.info.clone()),
             output,
             error: self.error.clone(),
+            stop_after: self.stop.clone(),
         };
         (self.on_status)(&status);
         *self.status.lock() = status;
@@ -1539,6 +1681,95 @@ mod tests {
         let mut out = Vec::new();
         map_channels(&[0.5, -0.5], 1, 2, &mut out);
         assert_eq!(out, vec![0.5, 0.5, -0.5, -0.5]);
+    }
+
+    /// A worker with a queue of songs that don't exist (nothing here opens a file or a device),
+    /// playing song `playing`. Songs are "a1", "a2" of album "A" and "b1", "b2" of album "B".
+    fn worker(playing: usize) -> Worker {
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        let status = Arc::new(Mutex::new(Status::default()));
+        let mut w = Worker::new(rx, status, Box::new(|_| {}), Arc::new(Shared::new(1.0)), 1.0, DspSettings::default(), Repeat::Off, false);
+        w.queue = ["a1", "a2", "b1", "b2"].iter().map(|id| item(id)).collect();
+        w.play_index = Some(playing);
+        w.dec_index = playing;
+        w
+    }
+
+    fn item(id: &str) -> QueueItem {
+        QueueItem {
+            id: id.into(),
+            path: PathBuf::from(format!("{id}.flac")),
+            duration: 200.0,
+            album_id: id[..1].to_uppercase(),
+            gain: SongGain::default(),
+            tone: None,
+            start: 0.0,
+            end: None,
+        }
+    }
+
+    fn ids(w: &Worker) -> Vec<&str> {
+        w.queue.iter().map(|q| q.id.as_str()).collect()
+    }
+
+    #[test]
+    fn stops_after_the_song_or_the_count() {
+        let mut w = worker(0);
+        w.stop = Some(StopAfter::Songs { left: 1 });
+        assert!(w.stop_here(Some(0), 1), "end of the song");
+        w.stop = Some(StopAfter::Songs { left: 3 });
+        assert!(!w.stop_here(Some(0), 1));
+        assert!(!w.stop_here(Some(1), 2));
+        assert_eq!(w.stop, Some(StopAfter::Songs { left: 1 }));
+        assert!(w.stop_here(Some(2), 3));
+        w.stop = None;
+        assert!(!w.stop_here(Some(0), 1));
+    }
+
+    #[test]
+    fn stops_when_the_album_changes() {
+        let mut w = worker(0);
+        w.stop = Some(StopAfter::Album);
+        assert!(!w.stop_here(Some(0), 1), "a1 to a2: same album");
+        assert!(w.stop_here(Some(1), 2), "a2 to b1: album over");
+        // Repeating a song never ends the album.
+        assert!(!w.stop_here(Some(1), 1));
+    }
+
+    #[test]
+    fn clearing_keeps_the_playing_song() {
+        let mut w = worker(1);
+        w.handle(Cmd::ClearUpNext);
+        assert_eq!(ids(&w), ["a1", "a2"]);
+        assert_eq!(w.play_index, Some(1));
+    }
+
+    #[test]
+    fn songs_move_among_the_waiting_ones_only() {
+        let mut w = worker(0);
+        w.handle(Cmd::Move { from: 3, to: 1 });
+        assert_eq!(ids(&w), ["a1", "b2", "a2", "b1"]);
+        w.handle(Cmd::Move { from: 1, to: 3 });
+        assert_eq!(ids(&w), ["a1", "a2", "b1", "b2"]);
+        // The playing song and out-of-range places are left alone.
+        w.handle(Cmd::Move { from: 0, to: 2 });
+        w.handle(Cmd::Move { from: 2, to: 0 });
+        w.handle(Cmd::Move { from: 2, to: 9 });
+        assert_eq!(ids(&w), ["a1", "a2", "b1", "b2"]);
+        assert_eq!(w.play_index, Some(0));
+    }
+
+    #[test]
+    fn removed_songs_can_be_put_back() {
+        let mut w = worker(1);
+        w.handle(Cmd::Remove(2));
+        assert_eq!(ids(&w), ["a1", "a2", "b2"]);
+        w.handle(Cmd::Insert { at: 2, items: vec![item("b1")] });
+        assert_eq!(ids(&w), ["a1", "a2", "b1", "b2"]);
+        // Never before the playing song.
+        w.handle(Cmd::Insert { at: 0, items: vec![item("a3")] });
+        assert_eq!(ids(&w), ["a1", "a2", "a3", "b1", "b2"]);
+        assert_eq!(w.play_index, Some(1));
     }
 }
 

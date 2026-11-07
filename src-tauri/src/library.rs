@@ -33,6 +33,10 @@ pub struct Track {
     pub album_artist: String,
     pub album_id: String,
     pub genre: String,
+    /// The subtitle tag; Fix Song Info keeps the catalogue's title there when the song keeps its
+    /// own ("Dancing Through Fantasies" for 悠忽舞于梦中), so search finds it by either name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub subtitle: String,
     pub year: Option<u32>,
     pub track_no: Option<u32>,
     pub disc_no: Option<u32>,
@@ -53,6 +57,10 @@ pub struct Track {
     /// The gain came from Cadence's measurement (not tags), so it's never re-read from the file.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub gain_measured: bool,
+    /// A song of a single-file album (CUE sheet): where it sits inside `path`, which is the
+    /// whole album's file. Such songs can't be edited or analysed one by one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cue: Option<crate::cue::Span>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -106,6 +114,10 @@ pub fn is_audio(path: &Path) -> bool {
         .is_some_and(|e| AUDIO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+pub fn is_cue(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("cue"))
+}
+
 /// A folder that lists no music although it had some: is it just unreadable right now (no
 /// permission to read music on Android, a drive that isn't plugged in) rather than emptied?
 /// Then its songs are kept, instead of the library losing them (and their measurements).
@@ -129,17 +141,20 @@ pub fn scan(
 ) -> Vec<Track> {
     let started = std::time::Instant::now();
     let mut files: Vec<PathBuf> = Vec::new();
+    // CUE sheets, which split an audio file into songs (applied once the files are read).
+    let mut cues: Vec<PathBuf> = Vec::new();
     // Songs of folders that can't be read right now: kept as they were.
     let mut kept: Vec<Track> = Vec::new();
     let mut previous = previous;
     for folder in folders {
-        let found: Vec<PathBuf> = walkdir::WalkDir::new(folder)
+        let (found, found_cues): (Vec<PathBuf>, Vec<PathBuf>) = walkdir::WalkDir::new(folder)
             .follow_links(true)
             .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file() && is_audio(e.path()))
+            .filter(|e| e.file_type().is_file() && (is_audio(e.path()) || is_cue(e.path())))
             .map(|e| e.into_path())
-            .collect();
+            .partition(|p| is_audio(p));
+        cues.extend(found_cues);
         if found.is_empty() {
             let (mine, rest): (Vec<Track>, Vec<Track>) =
                 previous.into_iter().partition(|t| Path::new(&t.path).starts_with(folder));
@@ -183,7 +198,8 @@ pub fn scan(
                 progress(n, total);
             }
             match old {
-                Some(t) if t.size == size && t.modified == modified => Some(t),
+                // (A cached song of a single-file album isn't the file's own entry: read it again.)
+                Some(t) if t.cue.is_none() && t.size == size && t.modified == modified => Some(t),
                 old => {
                     reread.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let mut t = read_track(&path)?;
@@ -200,6 +216,7 @@ pub fn scan(
         started.elapsed() - walked,
         reread.into_inner()
     );
+    let mut tracks = crate::cue::apply(tracks, &cues);
     tracks.extend(kept);
     tracks.sort_by(|a, b| {
         (
@@ -251,6 +268,7 @@ pub fn read_track(path: &Path) -> Option<Track> {
     let album_artist = get(&|t| t.get_string(ItemKey::AlbumArtist).map(str::to_string))
         .unwrap_or_else(|| artist.clone());
     let genre = get(&|t| t.genre().map(|s| s.into_owned())).unwrap_or_default();
+    let subtitle = get(&|t| t.get_string(ItemKey::TrackSubtitle).map(str::to_string)).unwrap_or_default();
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -269,6 +287,7 @@ pub fn read_track(path: &Path) -> Option<Track> {
         album,
         album_artist,
         genre,
+        subtitle,
         year: tag.and_then(|t| t.date()).map(|d| d.year as u32),
         track_no: tag.and_then(|t| t.track()),
         disc_no: tag.and_then(|t| t.disk()),

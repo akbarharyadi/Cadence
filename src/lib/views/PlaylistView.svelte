@@ -9,7 +9,7 @@
   let { id }: { id: string } = $props();
   const p = $derived(app.playlists.find((x) => x.id === id));
   const tracks = $derived<Track[]>(
-    !p ? [] : p.smart ? evaluate(p.smart, app.tracks, app.listening, p.id) : p.trackIds.map((t) => app.trackById.get(t)).filter((t): t is Track => !!t),
+    !p ? [] : p.smart ? evaluate(p.smart, app.tracks, app.listening, app.marks, p.id) : p.trackIds.map((t) => app.trackById.get(t)).filter((t): t is Track => !!t),
   );
   const covers = $derived([...new Set(tracks.map((t) => app.albumById.get(t.albumId)?.artSmall).filter(Boolean))].slice(0, 4) as string[]);
   const time = $derived(tracks.reduce((s, t) => s + t.duration, 0));

@@ -196,6 +196,16 @@ pub fn set(ctx: &Ctx, album_id: &str, source: crate::artists::Source) -> Result<
         let s = state.engine.status();
         s.index.and_then(|i| s.queue.get(i).cloned())
     };
+    // The songs of a single-file album (CUE sheet) share one file: it gets the cover once, and
+    // waits for the song that's playing from it.
+    let songs: Vec<(String, PathBuf)> = {
+        let playing_path = songs.iter().find(|(id, _)| playing.as_deref() == Some(id.as_str())).map(|(_, p)| p.clone());
+        let mut seen = std::collections::HashSet::new();
+        songs
+            .into_iter()
+            .filter(|(id, p)| playing.as_deref() == Some(id.as_str()) || (playing_path.as_ref() != Some(p) && seen.insert(p.clone())))
+            .collect()
+    };
     let (mut later, mut failed, mut written) = (0, 0, 0);
     for (id, path) in songs {
         if playing.as_deref() == Some(id.as_str()) {
@@ -223,7 +233,7 @@ pub fn set(ctx: &Ctx, album_id: &str, source: crate::artists::Source) -> Result<
 }
 
 /// Replaces the front cover in a song's tags.
-fn embed(path: &Path, jpeg: &[u8]) -> Result<(), String> {
+pub(crate) fn embed(path: &Path, jpeg: &[u8]) -> Result<(), String> {
     let mut tagged = lofty::read_from_path(path).map_err(|e| e.to_string())?;
     if tagged.primary_tag().is_none() {
         let kind = tagged.primary_tag_type();

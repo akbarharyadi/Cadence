@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { FIELDS, OPS, QUALITIES, SORTS, evaluate, kindOf, type Field, type Rule } from "#lib/smart.js";
+  import { FIELDS, OPS, QUALITIES, SORTS, YES_NO, evaluate, kindOf, type Field, type Rule } from "#lib/smart.js";
   import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
@@ -9,14 +9,14 @@
   // Edits a copy; nothing is saved until "Save".
   const p = $derived(app.smartEditing!);
   const smart = $derived(p.smart!);
-  const preview = $derived(evaluate(smart, app.tracks, app.listening, p.id));
+  const preview = $derived(evaluate(smart, app.tracks, app.listening, app.marks, p.id));
   const isNew = $derived(!p.id);
 
   function setField(r: Rule, f: Field) {
     r.field = f;
     const kind = kindOf(f);
     r.op = OPS[kind][0].value;
-    r.value = kind === "quality" ? "lossless" : kind === "date" ? "30" : "";
+    r.value = kind === "quality" ? "lossless" : kind === "flag" ? "yes" : kind === "date" ? "30" : "";
   }
 
   async function save() {
@@ -43,6 +43,8 @@
         <Select label="Condition" options={OPS[kind]} value={r.op} onchange={(v) => (r.op = v)} width="190px" />
         {#if kind === "quality"}
           <Select label="Quality" options={QUALITIES} value={r.value} onchange={(v) => (r.value = v)} width="170px" />
+        {:else if kind === "flag"}
+          <Select label="Value" options={YES_NO} value={r.value} onchange={(v) => (r.value = v)} width="170px" />
         {:else}
           <input class="field value" bind:value={r.value} inputmode={kind === "text" ? "text" : "numeric"} placeholder={kind === "text" ? "text" : kind === "date" ? "days" : "number"} aria-label="Value" />
         {/if}

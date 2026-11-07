@@ -14,6 +14,7 @@
       <p class="secondary count">{songs.length} songs{#if skipped}, {skipped} skipped{/if}</p>
     </div>
     <div class="actions">
+      <button class="pill ghost" onclick={() => app.go({ name: "favorites" })}><Icon name="heart" size={15} />Favorites</button>
       <button class="pill" onclick={() => app.playTracks(songs)}><Icon name="play" size={15} />Play</button>
       <button class="pill ghost" onclick={() => app.playTracks(shuffled(songs))}><Icon name="shuffle" size={15} />Shuffle</button>
     </div>

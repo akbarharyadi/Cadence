@@ -9,6 +9,8 @@ export interface Track {
   albumArtist: string;
   albumId: string;
   genre: string;
+  /** The subtitle tag: Fix Song Info keeps the catalogue's title there when a song keeps its own. */
+  subtitle?: string;
   year: number | null;
   trackNo: number | null;
   discNo: number | null;
@@ -18,8 +20,64 @@ export interface Track {
   channels: number | null;
   bitrate: number | null;
   codec: string;
+  /** File size in bytes. */
+  size: number;
+  /** A song of a single-file album (CUE sheet): where it sits in `path`, the whole album's file. */
+  cue?: { start: number; end: number | null };
   added: number;
   gain: SongGain;
+}
+
+/** A song's favourite heart and star rating (0 = not rated). */
+export interface Mark {
+  rating: number;
+  loved: boolean;
+}
+
+export interface DupSong {
+  id: string;
+  /** The copy to keep. */
+  keep: boolean;
+}
+export interface DupGroup {
+  /** "same": the same song twice on one album. "lossy": a lossy copy of a song that's also lossless. */
+  kind: "same" | "lossy";
+  songs: DupSong[];
+  wasted: number;
+}
+export interface HealthQualityRow {
+  id: string;
+  verdict: "good" | "suspect" | "lossy" | "upsampled";
+  cutoffHz: number | null;
+  realBits: number | null;
+}
+export interface HealthIntegrityRow {
+  id: string;
+  verified: boolean | null;
+  errors: number;
+  truncated: boolean;
+  failed: string | null;
+}
+export type HealthKind = "quality" | "integrity";
+export interface HealthReport {
+  running: HealthKind | null;
+  songs: number;
+  lossless: number;
+  qualityChecked: number;
+  integrityChecked: number;
+  quality: HealthQualityRow[];
+  integrity: HealthIntegrityRow[];
+}
+export interface HealthProgress {
+  kind: HealthKind;
+  done: number;
+  total: number;
+  running: boolean;
+}
+export interface Removed {
+  deleted: number;
+  freed: number;
+  skipped: string[];
 }
 
 export interface GainInfo {
@@ -105,6 +163,8 @@ export interface Status {
   source: SourceInfo | null;
   output: OutputInfo;
   error: string | null;
+  /** The sleep timer's song or album rule, while one is set. */
+  stopAfter: { kind: "songs"; left: number } | { kind: "album" } | null;
 }
 
 export type FilterKind = "peak" | "lowshelf" | "highshelf" | "lowpass" | "highpass";
@@ -384,6 +444,11 @@ export const api = {
   seek: (position: number) => invoke<void>("seek", { position }),
   jump: (index: number) => invoke<void>("jump", { index }),
   removeFromQueue: (index: number) => invoke<void>("remove_from_queue", { index }),
+  clearUpNext: () => invoke<void>("clear_up_next"),
+  moveInQueue: (from: number, to: number) => invoke<void>("move_in_queue", { from, to }),
+  insertInQueue: (at: number, ids: string[]) => invoke<void>("insert_in_queue", { at, ids }),
+  setSleepTimer: (kind: "off" | "minutes" | "songs" | "album", amount?: number) => invoke<void>("set_sleep_timer", { kind, amount: amount ?? null }),
+  sleepTimer: () => invoke<number | null>("get_sleep_timer"),
   setVolume: (volume: number) => invoke<void>("set_volume", { volume }),
   setRepeat: (repeat: Repeat) => invoke<void>("set_repeat", { repeat }),
   /** Shuffle the songs coming up (and every list played from now on); off puts them back in order. */
@@ -395,7 +460,7 @@ export const api = {
   parseEqFile: (args: { text?: string; path?: string }) => invoke<{ preamp: number; filters: Filter[] }>("parse_eq_file", args),
   reanalyze: () => invoke<void>("reanalyze"),
   history: () => invoke<HistoryStats>("get_history"),
-  appSettings: () => invoke<{ closeToTray: boolean; lyricsOnline: boolean; fixTagsOnline: boolean; listenbrainzUser: string }>("get_app_settings"),
+  appSettings: () => invoke<{ closeToTray: boolean; globalHotkeys: boolean; lyricsOnline: boolean; fixTagsOnline: boolean; listenbrainzUser: string }>("get_app_settings"),
   connectListenBrainz: (token: string) => invoke<string>("connect_listenbrainz", { token }),
   disconnectListenBrainz: () => invoke<void>("disconnect_listenbrainz"),
   setLyricsOnline: (enabled: boolean) => invoke<void>("set_lyrics_online", { enabled }),
@@ -414,6 +479,9 @@ export const api = {
   skips: () => invoke<{ ids: string[]; instrumentals: boolean }>("get_skips"),
   setSkipped: (ids: string[], skip: boolean) => invoke<void>("set_skipped", { ids, skip }),
   setSkipInstrumentals: (enabled: boolean) => invoke<void>("set_skip_instrumentals", { enabled }),
+  marks: () => invoke<Record<string, Mark>>("get_marks"),
+  setRating: (ids: string[], rating: number) => invoke<void>("set_rating", { ids, rating }),
+  setLoved: (ids: string[], loved: boolean) => invoke<void>("set_loved", { ids, loved }),
   setFixTagsOnline: (enabled: boolean) => invoke<void>("set_fix_tags_online", { enabled }),
   lyrics: (trackId: string) => invoke<Lyrics>("get_lyrics", { trackId }),
   voiceStatus: () => invoke<VoiceStatus>("voice_status"),
@@ -433,6 +501,12 @@ export const api = {
   savePlaylist: (playlist: Playlist) => invoke<Playlist>("save_playlist", { playlist }),
   deletePlaylist: (id: string) => invoke<void>("delete_playlist", { id }),
   setCloseToTray: (enabled: boolean) => invoke<void>("set_close_to_tray", { enabled }),
+  setGlobalHotkeys: (enabled: boolean) => invoke<void>("set_global_hotkeys", { enabled }),
+  healthReport: () => invoke<HealthReport>("health_report"),
+  healthDuplicates: () => invoke<DupGroup[]>("health_duplicates"),
+  healthStart: (kind: HealthKind) => invoke<boolean>("health_start", { kind }),
+  healthStop: () => invoke<void>("health_stop"),
+  healthRemove: (ids: string[]) => invoke<Removed>("health_remove", { ids }),
   sonicStatus: () => invoke<SonicStatus>("sonic_status"),
   similarTracks: (id: string, limit?: number) => invoke<string[]>("similar_tracks", { id, limit }),
   soundRadio: (id: string, count?: number) => invoke<string[]>("sound_radio", { id, count }),
@@ -551,6 +625,18 @@ export interface SongInfo {
   likely: boolean;
   /** The catalogue it's from: "iTunes" or "Deezer". */
   source: string;
+  /** Its album in that catalogue, for the album's other songs and genre. */
+  albumRef: string | null;
+}
+
+/** What Fix Song Info saved. */
+export interface SongInfoSaved {
+  /** The song is playing: its file is written when it finishes. */
+  later: boolean;
+  /** Other songs of its album given the album's info. */
+  others: number;
+  /** Of those, the ones found on the catalogue's album (own title, artist and track number). */
+  matched: number;
 }
 
 /** A picture the user chose for an artist (large and small files). */
@@ -578,15 +664,3 @@ export interface CoverResult {
   /** Same album title and artist. */
   likely: boolean;
 }
-  /** Its album in that catalogue, for the album's other songs and genre. */
-  albumRef: string | null;
-}
-
-/** What Fix Song Info saved. */
-export interface SongInfoSaved {
-  /** The song is playing: its file is written when it finishes. */
-  later: boolean;
-  /** Other songs of its album given the album's info. */
-  others: number;
-  /** Of those, the ones found on the catalogue's album (own title, artist and track number). */
-  matched: number;

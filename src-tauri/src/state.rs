@@ -20,6 +20,8 @@ pub struct Settings {
     pub shuffle: bool,
     /// Closing the window keeps Cadence playing in the tray.
     pub close_to_tray: bool,
+    /// Ctrl+Alt hotkeys that work from any app (desktop).
+    pub global_hotkeys: bool,
     /// Look up lyrics on LRCLIB when a song has none (sends artist, title and album).
     pub lyrics_online: bool,
     /// ListenBrainz account name when scrobbling is connected (the token is in Credential Manager).
@@ -49,6 +51,7 @@ impl Default for Settings {
             repeat: Repeat::Off,
             shuffle: false,
             close_to_tray: true,
+            global_hotkeys: true,
             lyrics_online: true,
             listenbrainz_user: String::new(),
             ai: Default::default(),
@@ -116,6 +119,12 @@ impl Library {
 pub struct AppState {
     pub engine: Engine,
     pub history: Mutex<crate::history::History>,
+    /// Favourites and star ratings.
+    pub marks: Mutex<crate::marks::Marks>,
+    /// The sleep timer's minutes countdown.
+    pub sleep: crate::sleep::Sleep,
+    /// Library health checks (quality, integrity) and their saved results.
+    pub health: crate::health::Health,
     pub playlists: Mutex<crate::playlists::Playlists>,
     pub library: Mutex<Library>,
     /// What each song sounds like, for "sounds like" radio and mixes.
@@ -169,6 +178,14 @@ impl AppState {
 
     pub fn save_history(&self) {
         write_json(&self.data_dir.join("history.json"), &*self.history.lock());
+    }
+
+    pub fn save_marks(&self) {
+        write_json(&self.data_dir.join("marks.json"), &*self.marks.lock());
+    }
+
+    pub fn save_health(&self) {
+        write_json(&self.data_dir.join("health.json"), &*self.health.store.lock());
     }
 
     pub fn save_library(&self) {
@@ -248,6 +265,8 @@ impl AppState {
                 album_id: t.album_id.clone(),
                 gain: t.gain,
                 tone: sonic.tone(t),
+                start: t.cue.map_or(0.0, |c| c.start),
+                end: t.cue.and_then(|c| c.end),
             })
             .collect()
     }
@@ -319,7 +338,7 @@ mod tests {
 
 /// A name reduced to its letters and digits, lower-case: "コノヨ Loading..." and "コノヨLoading…"
 /// match, as do "REOL" and "Reol".
-fn match_key(s: &str) -> String {
+pub(crate) fn match_key(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(char::to_lowercase)

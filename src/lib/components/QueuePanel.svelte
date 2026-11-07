@@ -15,12 +15,29 @@
     if (!s || s.index == null) return [];
     return s.queue.slice(0, s.index).map((id, i) => ({ track: app.trackById.get(id), i })).filter((x) => x.track).slice(-20);
   });
+
+  // Dragging a waiting song to another place (queue positions).
+  let dragFrom = $state<number | null>(null);
+  let dropAt = $state<number | null>(null);
+  function drop(e: DragEvent, to: number) {
+    e.preventDefault();
+    if (dragFrom !== null && dragFrom !== to) api.moveInQueue(dragFrom, to);
+    dragFrom = dropAt = null;
+  }
 </script>
 
 <aside class="queue">
   <header>
     <h3>Up Next</h3>
-    <button class="icon-btn" onclick={() => (app.queueOpen = false)} aria-label="Close"><Icon name="close" size={16} /></button>
+    <div class="head-actions">
+      <button class="icon-btn" onclick={() => app.saveQueueAsPlaylist()} disabled={!s?.queue.length} aria-label="Save the queue as a playlist" title="Save the queue as a playlist">
+        <Icon name="playlist" size={16} />
+      </button>
+      <button class="icon-btn" onclick={() => app.clearUpNext()} disabled={!upNext.length} aria-label="Clear Up Next" title="Clear Up Next (the playing song stays)">
+        <Icon name="trash" size={16} />
+      </button>
+      <button class="icon-btn" onclick={() => (app.queueOpen = false)} aria-label="Close"><Icon name="close" size={16} /></button>
+    </div>
   </header>
   <div class="scroll">
     {#if app.current}
@@ -34,11 +51,24 @@
     {#if upNext.length}
       <div class="label">Next, {s?.repeat === "all" ? "then repeating" : `${upNext.length} ${upNext.length === 1 ? "song" : "songs"}`}</div>
       {#each upNext as { track, i } (i)}
-        <div class="item" role="button" tabindex="0" ondblclick={() => api.jump(i)} onkeydown={(e) => e.key === "Enter" && api.jump(i)}>
+        <div
+          class="item"
+          class:drop-before={dropAt === i && dragFrom !== null && dragFrom > i}
+          class:drop-after={dropAt === i && dragFrom !== null && dragFrom < i}
+          role="button"
+          tabindex="0"
+          draggable="true"
+          ondragstart={(e) => { dragFrom = i; e.dataTransfer?.setData("text/plain", String(i)); }}
+          ondragover={(e) => { if (dragFrom !== null) { e.preventDefault(); dropAt = i; } }}
+          ondragend={() => (dragFrom = dropAt = null)}
+          ondrop={(e) => drop(e, i)}
+          ondblclick={() => api.jump(i)}
+          onkeydown={(e) => e.key === "Enter" && api.jump(i)}
+        >
           <img src={artUrl(app.albumById.get(track!.albumId)?.artSmall)} alt="" loading="lazy" />
           <div class="meta"><div class="t">{track!.title}</div><div class="a">{track!.artist}</div></div>
           <span class="d">{formatTime(track!.duration)}</span>
-          <button class="rm" aria-label="Remove from queue" onclick={() => api.removeFromQueue(i)}><Icon name="close" size={14} /></button>
+          <button class="rm" aria-label="Remove from queue" onclick={() => app.removeFromQueue(i)}><Icon name="close" size={14} /></button>
         </div>
       {/each}
     {:else}
@@ -108,6 +138,20 @@
   }
   .item:hover {
     background: var(--hover);
+  }
+  .item.drop-before {
+    box-shadow: inset 0 2px 0 var(--accent);
+  }
+  .item.drop-after {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+  .head-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .head-actions .icon-btn:disabled {
+    opacity: 0.35;
   }
   .item.current .t {
     color: var(--accent);

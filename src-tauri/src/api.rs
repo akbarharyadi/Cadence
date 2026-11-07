@@ -84,8 +84,18 @@ pub fn open_file(ctx: &Ctx, path: String) -> Result<Opened, String> {
         return Err(format!("Cadence can't play {}", path.display()));
     }
     let key = path.to_string_lossy().into_owned();
-    // Songs are known by their path (see library::read_track).
-    let id = crate::library::short_hash(&key);
+    // Songs are known by their path (see library::read_track), except those of a single-file
+    // album (CUE sheet): the file's first song plays.
+    let id = {
+        let lib = state.library.lock();
+        lib.snapshot
+            .tracks
+            .iter()
+            .filter(|t| t.path == key && t.cue.is_some())
+            .min_by(|a, b| a.cue.map_or(0.0, |c| c.start).total_cmp(&b.cue.map_or(0.0, |c| c.start)))
+            .map(|t| t.id.clone())
+            .unwrap_or_else(|| crate::library::short_hash(&key))
+    };
     let mut added = false;
     if !state.library.lock().by_id.contains_key(&id) {
         {
@@ -641,6 +651,42 @@ pub fn remove_from_queue(ctx: &Ctx, index: usize) {
     state.engine.send(Cmd::Remove(index));
 }
 
+/// Takes everything after the playing song out of the queue.
+pub fn clear_up_next(ctx: &Ctx) {
+    ctx.state.engine.send(Cmd::ClearUpNext);
+}
+
+/// Moves a waiting song (queue positions, both after the playing song).
+pub fn move_in_queue(ctx: &Ctx, from: usize, to: usize) {
+    ctx.state.engine.send(Cmd::Move { from, to });
+}
+
+/// Puts songs back into the queue at a place (undoing a removal).
+pub fn insert_in_queue(ctx: &Ctx, at: usize, ids: Vec<String>) {
+    let items = ctx.state.queue_items(&ids);
+    ctx.state.engine.send(Cmd::Insert { at, items });
+}
+
+/// The sleep timer. `kind`: "off", "minutes" (`amount` minutes, the sound fades out), "songs"
+/// (pause after `amount` songs; 1 = the end of this one) or "album" (when the album ends).
+pub fn set_sleep_timer(ctx: &Ctx, kind: String, amount: Option<u32>) {
+    let state = &ctx.state;
+    state.sleep.cancel();
+    state.engine.send(Cmd::StopAfter(None));
+    match kind.as_str() {
+        "minutes" => state.sleep.start_minutes(ctx, amount.unwrap_or(30)),
+        "songs" => state.engine.send(Cmd::StopAfter(Some(crate::audio::StopAfter::Songs { left: amount.unwrap_or(1).max(1) }))),
+        "album" => state.engine.send(Cmd::StopAfter(Some(crate::audio::StopAfter::Album))),
+        _ => {}
+    }
+    ctx.emit("sleep-timer", state.sleep.ends_at());
+}
+
+/// When the minutes countdown ends (unix seconds), if one is running.
+pub fn get_sleep_timer(ctx: &Ctx) -> Option<u64> {
+    ctx.state.sleep.ends_at()
+}
+
 pub fn set_volume(ctx: &Ctx, volume: f32) {
     let state = &ctx.state;
     state.engine.send(Cmd::SetVolume(volume));
@@ -724,6 +770,7 @@ pub fn get_history(ctx: &Ctx) -> crate::history::HistoryStats {
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     close_to_tray: bool,
+    global_hotkeys: bool,
     lyrics_online: bool,
     fix_tags_online: bool,
     listenbrainz_user: String,
@@ -734,9 +781,70 @@ pub fn get_app_settings(ctx: &Ctx) -> AppSettings {
     let s = state.settings.lock();
     AppSettings {
         close_to_tray: s.close_to_tray,
+        global_hotkeys: s.global_hotkeys,
         lyrics_online: s.lyrics_online,
         fix_tags_online: s.fix_tags_online,
         listenbrainz_user: s.listenbrainz_user.clone(),
+    }
+}
+
+// ---------- library health ----------
+
+/// What the file checks have found so far.
+pub fn health_report(ctx: &Ctx) -> crate::health::Report {
+    crate::health::report(&ctx.state)
+}
+
+/// Songs that are in the library more than once.
+pub fn health_duplicates(ctx: &Ctx) -> Vec<crate::health::DupGroup> {
+    crate::health::duplicates(&ctx.state.library.lock().snapshot.tracks)
+}
+
+/// Starts a background check: "quality" (lossless files with lossy or CD-quality content) or
+/// "integrity" (decodes every file and verifies its checksum). False when one is already running.
+pub fn health_start(ctx: &Ctx, kind: String) -> bool {
+    let kind = match kind.as_str() {
+        "quality" => crate::health::Kind::Quality,
+        "integrity" => crate::health::Kind::Integrity,
+        _ => return false,
+    };
+    crate::health::start(ctx.clone(), kind)
+}
+
+pub fn health_stop(ctx: &Ctx) {
+    crate::health::stop(&ctx.state);
+}
+
+/// Deletes the files of songs (duplicates the user picked); see `health::remove` for the safety checks.
+pub fn health_remove(ctx: &Ctx, ids: Vec<String>) -> crate::health::Removed {
+    crate::health::remove(ctx, &ids)
+}
+
+pub fn set_global_hotkeys(ctx: &Ctx, enabled: bool) {
+    ctx.state.settings.lock().global_hotkeys = enabled;
+    ctx.state.save_settings();
+    ctx.host().set_hotkeys(enabled);
+}
+
+/// A global hotkey was pressed (see hotkeys.rs).
+pub fn hotkey(ctx: &Ctx, action: &str) {
+    let state = &ctx.state;
+    match action {
+        "toggle" | "next" | "prev" => player(ctx, action.to_string()),
+        // Steps on the volume slider (which is perceptual: the volume is its square).
+        "volume up" | "volume down" => {
+            let step = if action == "volume up" { 0.05 } else { -0.05 };
+            let slider = (state.engine.status().volume.sqrt() + step).clamp(0.0, 1.0);
+            set_volume(ctx, slider * slider);
+        }
+        "favorite" => {
+            let status = state.engine.status();
+            let Some(id) = status.index.and_then(|i| status.queue.get(i)).cloned() else { return };
+            let loved = state.marks.lock().view().get(&id).is_some_and(|m| m.loved);
+            set_loved(ctx, vec![id], !loved);
+            ctx.emit("marks-changed", ());
+        }
+        _ => {}
     }
 }
 
@@ -794,6 +902,36 @@ pub fn set_skipped(ctx: &Ctx, ids: Vec<String>, skip: bool) {
     }
 }
 
+/// Favourites and star ratings, by song id.
+pub fn get_marks(ctx: &Ctx) -> std::collections::HashMap<String, crate::marks::Mark> {
+    ctx.state.marks.lock().view()
+}
+
+/// Rates songs 1–5 stars (0 clears the rating).
+pub fn set_rating(ctx: &Ctx, ids: Vec<String>, rating: u8) {
+    let state = &ctx.state;
+    change_marks(state, &ids, |marks, t| marks.set_rating(t, rating));
+}
+
+/// Adds songs to the favourites, or takes them out.
+pub fn set_loved(ctx: &Ctx, ids: Vec<String>, loved: bool) {
+    let state = &ctx.state;
+    change_marks(state, &ids, |marks, t| marks.set_loved(t, loved));
+}
+
+fn change_marks(state: &crate::state::AppState, ids: &[String], change: impl Fn(&mut crate::marks::Marks, &crate::library::Track)) {
+    {
+        let lib = state.library.lock();
+        let mut marks = state.marks.lock();
+        for id in ids {
+            if let Some(&k) = lib.by_id.get(id) {
+                change(&mut marks, &lib.snapshot.tracks[k]);
+            }
+        }
+    }
+    state.save_marks();
+}
+
 pub fn set_skip_instrumentals(ctx: &Ctx, enabled: bool) {
     let state = &ctx.state;
     state.settings.lock().skip_instrumentals = enabled;
@@ -837,7 +975,8 @@ pub(crate) fn resolve_lyrics(state: &AppState, track: &crate::library::Track) ->
     }
     // Lyrics in the file win when they're timed. Untimed ones (common in tags) can't follow
     // the song, so timed lyrics from the saved store or LRCLIB are preferred when there are any.
-    let local = crate::lyrics::local(Path::new(&track.path));
+    // (Not for a song of a single-file album: lyrics in or beside the file are the whole album's.)
+    let local = if track.cue.is_some() { None } else { crate::lyrics::local(Path::new(&track.path)) };
     if let Some(l) = local.as_ref().filter(|l| !l.synced.is_empty()) {
         return l.clone();
     }
@@ -1016,6 +1155,12 @@ pub struct TagsSaved {
 pub fn write_tags(ctx: &Ctx, ids: Vec<String>, changes: crate::tagedit::TagChanges) -> Result<TagsSaved, String> {
     let state = &ctx.state;
     crate::tagedit::check(&changes)?;
+    {
+        let lib = state.library.lock();
+        if ids.iter().any(|id| lib.by_id.get(id).is_some_and(|&i| lib.snapshot.tracks[i].cue.is_some())) {
+            return Err("Songs from a single-file album (CUE sheet) take their info from the .cue file, which Cadence doesn't edit.".into());
+        }
+    }
     let playing = {
         let s = state.engine.status();
         s.index.and_then(|i| s.queue.get(i).cloned())
@@ -1614,6 +1759,11 @@ macro_rules! cadence_commands {
             plain seek(position: f64) -> ();
             plain jump(index: usize) -> ();
             plain remove_from_queue(index: usize) -> ();
+            plain clear_up_next() -> ();
+            plain move_in_queue(from: usize, to: usize) -> ();
+            plain insert_in_queue(at: usize, ids: Vec<String>) -> ();
+            plain set_sleep_timer(kind: String, amount: Option<u32>) -> ();
+            plain get_sleep_timer() -> Option<u64>;
             plain set_volume(volume: f32) -> ();
             plain set_repeat(repeat: $crate::audio::Repeat) -> ();
             plain set_shuffle(on: bool) -> ();
@@ -1625,11 +1775,20 @@ macro_rules! cadence_commands {
             plain get_history() -> $crate::history::HistoryStats;
             plain get_app_settings() -> $crate::api::AppSettings;
             plain set_close_to_tray(enabled: bool) -> ();
+            plain set_global_hotkeys(enabled: bool) -> ();
+            plain health_report() -> $crate::health::Report;
+            plain health_duplicates() -> Vec<$crate::health::DupGroup>;
+            plain health_start(kind: String) -> bool;
+            plain health_stop() -> ();
+            plain health_remove(ids: Vec<String>) -> $crate::health::Removed;
             plain set_lyrics_online(enabled: bool) -> ();
             plain set_fix_tags_online(enabled: bool) -> ();
             plain get_skips() -> $crate::api::Skips;
             plain set_skipped(ids: Vec<String>, skip: bool) -> ();
             plain set_skip_instrumentals(enabled: bool) -> ();
+            plain get_marks() -> std::collections::HashMap<String, $crate::marks::Mark>;
+            plain set_rating(ids: Vec<String>, rating: u8) -> ();
+            plain set_loved(ids: Vec<String>, loved: bool) -> ();
             blocking get_lyrics(track_id: String) -> $crate::lyrics::Lyrics;
             plain voice_status() -> $crate::voice::Status;
             plain voice_install() -> ();

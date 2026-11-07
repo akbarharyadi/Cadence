@@ -1,6 +1,7 @@
 <script lang="ts">
   import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
+  import Rating from "./Rating.svelte";
 
   let menuEl = $state<HTMLDivElement>();
   let pos = $state({ x: 0, y: 0 });
@@ -22,10 +23,16 @@
   <div class="backdrop" role="presentation" onmousedown={close} oncontextmenu={(e) => { e.preventDefault(); close(); }}></div>
   <div class="menu" bind:this={menuEl} style="left: {pos.x}px; top: {pos.y}px" role="menu">
     {#each app.menu.items as item}
+      {#if item.rating}
+        <div class="rate" role="group" aria-label="Rating">
+          <Rating value={item.rating.value} size={18} onrate={(n) => { close(); item.rating?.set(n); }} />
+        </div>
+      {:else}
       <button role="menuitem" onclick={() => { close(); item.action(); }}>
         {#if item.icon}<Icon name={item.icon} size={15} />{/if}
         {item.label}
       </button>
+      {/if}
     {/each}
   </div>
 {/if}
@@ -48,6 +55,12 @@
       0 0 0 1px var(--line-strong),
       0 16px 40px rgba(0, 0, 0, 0.5);
     animation: pop 0.12s ease-out;
+  }
+  .rate {
+    display: flex;
+    align-items: center;
+    height: 32px;
+    padding: 0 8px;
   }
   button {
     width: 100%;

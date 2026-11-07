@@ -103,7 +103,7 @@
   {#if canKeep && picked}
     <label class="keep">
       <input type="checkbox" checked={keeping} onchange={(e) => (keepTitle = e.currentTarget.checked)} />
-      <span>Keep my title <b>{track.title}</b> <span class="secondary">instead of “{picked.title}”</span></span>
+      <span>Keep my title <b>{track.title}</b> <span class="secondary">instead of “{picked.title}” (kept as its subtitle, so search finds both)</span></span>
     </label>
   {/if}
   {#if picked && mates.length}

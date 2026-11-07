@@ -3,6 +3,7 @@
   import { app, type MenuItem } from "#lib/store.svelte.js";
   import { untrack } from "svelte";
   import Icon from "./Icon.svelte";
+  import Rating from "./Rating.svelte";
   import { eqBars } from "#lib/eq.js";
 
   let {
@@ -128,6 +129,19 @@
       {#if showAlbum}
         <button class="album" onclick={(e) => { e.stopPropagation(); app.go({ name: "album", id: t.albumId }); }}>{t.album}</button>
       {/if}
+      <div class="marks" class:rated={app.ratingOf(t) > 0}>
+        <span class="stars"><Rating value={app.ratingOf(t)} size={13} onrate={(n) => app.setRating([t], n)} label="Rating for {t.title}" /></span>
+        <button
+          class="heart"
+          class:loved={app.isLoved(t)}
+          aria-label={app.isLoved(t) ? `Remove ${t.title} from Favorites` : `Add ${t.title} to Favorites`}
+          aria-pressed={app.isLoved(t)}
+          title={app.isLoved(t) ? "Remove from Favorites" : "Add to Favorites"}
+          onclick={(e) => { e.stopPropagation(); app.toggleLoved(t); }}
+        >
+          <Icon name={app.isLoved(t) ? "heartFill" : "heart"} size={16} />
+        </button>
+      </div>
       <div class="time">{formatTime(t.duration)}</div>
       <button class="more" aria-label="More options for {t.title}" title="More options" onclick={(e) => { e.stopPropagation(); menu(e, i); }}>
         <Icon name="more" size={16} />
@@ -286,6 +300,44 @@
     color: var(--text);
     text-decoration: underline;
   }
+  /* Stars show on hover (always when the song is rated); the heart shows when it's a favourite. */
+  .marks {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+  }
+  .stars {
+    opacity: 0;
+  }
+  .row:hover .stars,
+  .row.selected .stars,
+  .marks.rated .stars,
+  .stars:focus-within {
+    opacity: 1;
+  }
+  .heart {
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    color: var(--text-2);
+    opacity: 0;
+  }
+  .heart.loved {
+    opacity: 1;
+    color: var(--accent);
+  }
+  .row:hover .heart,
+  .row.selected .heart,
+  .heart:focus-visible {
+    opacity: 1;
+  }
+  .heart:hover {
+    background: var(--active);
+    color: var(--accent);
+  }
   .time {
     width: 48px;
     text-align: right;
@@ -340,8 +392,15 @@
   }
   /* Phones: the album column would squeeze the titles; it's still one tap away in the menu. */
   @media (max-width: 720px) {
-    .album {
+    .album,
+    .stars {
       display: none;
+    }
+    .heart {
+      opacity: 1;
+    }
+    .heart:not(.loved) {
+      opacity: 0.5;
     }
     .row {
       padding: 0 6px;

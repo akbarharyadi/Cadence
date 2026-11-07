@@ -10,6 +10,9 @@
     { label: "Albums", icon: "album", view: { name: "albums" } },
     { label: "Artists", icon: "artist", view: { name: "artists" } },
     { label: "Songs", icon: "song", view: { name: "songs" } },
+    { label: "Needs Attention", icon: "sparkle", view: { name: "attention" } },
+    { label: "Favorites", icon: "heart", view: { name: "favorites" } },
+    { label: "Library Health", icon: "shield", view: { name: "health" } },
   ];
 
   // What Cadence is doing in the background, one at a time (they run one after another).
@@ -44,6 +47,13 @@
             total: app.voice.job.total,
             unit: "%",
             about: `Listening to “${app.voice.job.title}” once, to place its lyrics on the singing.`,
+          }
+        : app.healthJob
+        ? {
+            label: app.healthJob.kind === "quality" ? "Checking file quality" : "Checking files",
+            done: app.healthJob.done,
+            total: app.healthJob.total,
+            about: app.healthJob.kind === "quality" ? "Looking for lossless files made from lossy ones." : "Decoding every file and checking it against its checksum.",
           }
         : app.scan
       ? { label: "Importing", ...app.scan, about: "" }

@@ -11,7 +11,8 @@
   // Nothing is listed until something is typed (an empty search would match the whole library).
   const albums = $derived(!q ? [] : app.albums.filter((a) => fold(a.title).includes(q) || fold(a.artist).includes(q)).slice(0, 24));
   const songs = $derived(
-    !q ? [] : app.tracks.filter((t) => fold(t.title).includes(q) || fold(t.artist).includes(q) || fold(t.album).includes(q)).slice(0, 200),
+    !q ? [] : app.tracks.filter((t) => fold(t.title).includes(q) || fold(t.subtitle ?? "").includes(q) || fold(t.artist).includes(q) || fold(t.album).includes(q))
+          .slice(0, 200),
   );
   const artists = $derived(!q ? [] : app.artists.filter((a) => fold(a.name).includes(q)).slice(0, 12));
 </script>

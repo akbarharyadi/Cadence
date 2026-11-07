@@ -22,24 +22,44 @@ pub struct Source {
     pub channels: usize,
     pub bits: Option<u32>,
     pub codec: String,
+    /// The length the file's header promises, in frames (when it says).
+    pub total_frames: Option<u64>,
+    /// Packets that couldn't be decoded and were skipped.
+    pub errors: u32,
     scratch: Vec<f32>,
 }
 
 impl Source {
     pub fn open(path: &Path) -> Result<Self> {
-        match Self::open_from(path, None) {
+        Self::open_with(path, false)
+    }
+
+    /// Opens a file to check it: the decoder verifies the audio against the checksum in the file
+    /// where it has one (FLAC), see `finalize`.
+    pub fn open_verified(path: &Path) -> Result<Self> {
+        Self::open_with(path, true)
+    }
+
+    fn open_with(path: &Path, verify: bool) -> Result<Self> {
+        match Self::open_from(path, None, verify) {
             Err(e) if format!("{e:#}").contains("more than one stream info") => {
                 // A FLAC with a repeated STREAMINFO block: read it with the extra copy left out.
                 let patched = super::flacfix::PatchedFlac::open(path)?
                     .ok_or_else(|| anyhow!("can't repair {}", path.display()))?;
                 log::debug!("reading {} without its duplicate STREAMINFO block", path.display());
-                Self::open_from(path, Some(Box::new(patched)))
+                Self::open_from(path, Some(Box::new(patched)), verify)
             }
             other => other,
         }
     }
 
-    fn open_from(path: &Path, source: Option<Box<dyn symphonia::core::io::MediaSource>>) -> Result<Self> {
+    /// After decoding everything: whether the audio matched the file's checksum (None: the
+    /// format has none, or it wasn't filled in).
+    pub fn finalize(&mut self) -> Option<bool> {
+        self.decoder.finalize().verify_ok
+    }
+
+    fn open_from(path: &Path, source: Option<Box<dyn symphonia::core::io::MediaSource>>, verify: bool) -> Result<Self> {
         let source = match source {
             Some(s) => s,
             None => Box::new(File::open(path).with_context(|| format!("can't open {}", path.display()))?),
@@ -67,7 +87,7 @@ impl Source {
             .ok_or_else(|| anyhow!("no audio codec parameters"))?
             .clone();
         let decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(&params, &AudioDecoderOptions::default())
+            .make_audio_decoder(&params, &AudioDecoderOptions::default().verify(verify))
             .context("unsupported codec")?;
         let codec = symphonia::default::get_codecs()
             .get_audio_decoder(params.codec)
@@ -79,6 +99,8 @@ impl Source {
             channels: params.channels.as_ref().map(|c| c.count()).unwrap_or(2),
             bits: params.bits_per_sample,
             codec,
+            total_frames: track.num_frames,
+            errors: 0,
             format,
             decoder,
             scratch: Vec::new(),
@@ -113,7 +135,10 @@ impl Source {
                     return Ok(Some((&self.scratch, rate, channels)));
                 }
                 // Corrupt packet: skip it rather than stopping the song.
-                Err(SymError::DecodeError(_)) | Err(SymError::IoError(_)) => continue,
+                Err(SymError::DecodeError(_)) | Err(SymError::IoError(_)) => {
+                    self.errors += 1;
+                    continue;
+                }
                 Err(e) => return Err(e.into()),
             }
         }

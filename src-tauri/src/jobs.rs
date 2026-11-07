@@ -18,7 +18,7 @@ use crate::library;
 /// fails or gives wrong results, so they wait (Windows sets a copy's time when it finishes).
 const SETTLE_SECS: u64 = 20;
 
-fn settling(t: &crate::library::Track) -> bool {
+pub(crate) fn settling(t: &crate::library::Track) -> bool {
     crate::history::now().saturating_sub(t.modified) < SETTLE_SECS
 }
 
@@ -39,7 +39,7 @@ pub struct Progress {
 /// Threads for the long background jobs (loudness and sound analysis): a quarter of the cores, at
 /// most 2, each in background mode. The music, the UI and other apps come first, and memory stays
 /// modest (every song being analysed holds its decoded audio).
-fn background_pool() -> rayon::ThreadPool {
+pub(crate) fn background_pool() -> rayon::ThreadPool {
     let threads = std::thread::available_parallelism()
         .map(|n| (n.get() / 4).clamp(1, 2))
         .unwrap_or(1);
@@ -151,6 +151,15 @@ pub fn start_scan(ctx: Ctx) {
         let found = state.remap_queue(&queued);
         if found > 0 {
             log::info!("{found} queued songs moved; the queue follows them");
+        }
+        // Favourites and ratings follow songs whose files moved.
+        let relinked = {
+            let lib = state.library.lock();
+            state.marks.lock().relink(&lib.snapshot.tracks)
+        };
+        if relinked > 0 {
+            log::info!("{relinked} rated or favourite songs moved; their marks follow them");
+            state.save_marks();
         }
         state.save_library();
         ctx.emit("library-changed", ());
@@ -372,7 +381,7 @@ fn make_watcher(ctx: &Ctx) -> Option<FolderWatcher> {
             }).any(|e| {
                 e.paths
                     .iter()
-                    .any(|p| p.is_dir() || crate::library::is_audio(p) || p.extension().is_none())
+                    .any(|p| p.is_dir() || crate::library::is_audio(p) || crate::library::is_cue(p) || p.extension().is_none())
             });
             if relevant {
                 log::info!("music folders changed; rescanning");

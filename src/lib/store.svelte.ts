@@ -4,7 +4,7 @@ import { flushSync } from "svelte";
 import { eqSync } from "./eq";
 
 /** Top-level places (tabs and sidebar): switching between them crossfades instead of sliding. */
-const TOP_LEVEL = new Set(["home", "discover", "stats", "albums", "artists", "songs", "recent", "search", "sound", "settings"]);
+const TOP_LEVEL = new Set(["home", "discover", "stats", "albums", "artists", "songs", "favorites", "health", "recent", "search", "sound", "settings"]);
 
 let transitions = 0;
 
@@ -70,7 +70,7 @@ function animate(kind: "forward" | "back" | "tab", change: () => void) {
     if (run === transitions) delete root.dataset.nav;
   });
 }
-import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type DspSettings, type HistoryStats, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track, type VoiceBatch, type VoiceJob, type VoiceStatus } from "./api";
+import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type DspSettings, type HealthProgress, type HealthReport, type HistoryStats, type Mark, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track, type VoiceBatch, type VoiceJob, type VoiceStatus } from "./api";
 
 export type View =
   | { name: "home" }
@@ -79,7 +79,10 @@ export type View =
   | { name: "artists" }
   | { name: "artist"; artist: string }
   | { name: "songs" }
+  | { name: "favorites" }
+  | { name: "health" }
   | { name: "recent" }
+  | { name: "attention" }
   | { name: "search"; query: string }
   | { name: "sound" }
   | { name: "playlist"; id: string }
@@ -92,6 +95,8 @@ export interface MenuItem {
   label: string;
   icon?: string;
   action: () => void;
+  /** A row of five stars instead of a label (the song's rating). */
+  rating?: { value: number; set: (stars: number) => void };
 }
 
 export interface Artist {
@@ -271,6 +276,61 @@ class AppState {
   /** Also skip instrumental, karaoke and off-vocal versions. */
   skipInstrumentals = $state(false);
 
+  /** Favourites and star ratings, by song id (songs with neither aren't listed). */
+  marks = $state<Record<string, Mark>>({});
+  ratingOf(t: Track): number {
+    return this.marks[t.id]?.rating ?? 0;
+  }
+  isLoved(t: Track): boolean {
+    return !!this.marks[t.id]?.loved;
+  }
+  /** Favourite songs, best rated first. */
+  favorites = $derived(
+    this.tracks
+      .filter((t) => this.marks[t.id]?.loved)
+      .sort((a, b) => this.ratingOf(b) - this.ratingOf(a) || a.title.localeCompare(b.title)),
+  );
+
+  private setMarks(tracks: Track[], change: Partial<Mark>) {
+    const next = { ...this.marks };
+    for (const t of tracks) {
+      const m = { ...(next[t.id] ?? { rating: 0, loved: false }), ...change };
+      if (m.rating === 0 && !m.loved) delete next[t.id];
+      else next[t.id] = m;
+    }
+    this.marks = next;
+  }
+
+  async loadMarks() {
+    this.marks = await api.marks();
+  }
+
+  /** Adds songs to the favourites, or takes them out. */
+  setLoved(tracks: Track[], loved: boolean) {
+    const ids = tracks.map((t) => t.id);
+    this.setMarks(tracks, { loved });
+    api.setLoved(ids, loved);
+    this.showToast(loved ? `Added ${label(tracks, true)} to Favorites` : `Removed ${label(tracks, true)} from Favorites`, {
+      label: "Undo",
+      run: () => {
+        this.setMarks(tracks, { loved: !loved });
+        api.setLoved(ids, !loved);
+        this.toast = this.toastAction = null;
+      },
+    });
+  }
+
+  toggleLoved(t: Track) {
+    this.setLoved([t], !this.isLoved(t));
+  }
+
+  /** Rates songs 1–5 stars; the rating they already have clears it (0 clears too). */
+  setRating(tracks: Track[], stars: number) {
+    const rating = tracks.length === 1 && this.ratingOf(tracks[0]) === stars ? 0 : stars;
+    this.setMarks(tracks, { rating });
+    api.setRating(tracks.map((t) => t.id), rating);
+  }
+
   /** An artist's picture: the one chosen for them, else their latest album's cover. */
   artistPicture(artist: Artist, size: "large" | "small"): string | null {
     const own = this.artistImages[artist.name.toLowerCase()];
@@ -301,7 +361,8 @@ class AppState {
 
   /** Songs with no real tags (e.g. downloads named "Artist - Title"). */
   needsInfo(t: Track): boolean {
-    return t.artist === "Unknown Artist";
+    // (Songs of a single-file album get their info from the cue sheet, and can't be tagged one by one.)
+    return t.artist === "Unknown Artist" && !t.cue;
   }
 
   /** Whether `t` is left out when a list plays (same rule as the engine's). */
@@ -318,6 +379,95 @@ class AppState {
       run: () => {
         this.skipped = skip ? this.skipped.filter((id) => !ids.includes(id)) : [...new Set([...this.skipped, ...ids])];
         api.setSkipped(ids, !skip);
+        this.toast = this.toastAction = null;
+      },
+    });
+  }
+
+  // ---------- library health ----------
+
+  health = $state<HealthReport | null>(null);
+  /** The file check that's running (quality or integrity), while one is. */
+  healthJob = $state<HealthProgress | null>(null);
+
+  async loadHealth() {
+    this.health = await api.healthReport();
+  }
+
+  // ---------- sleep timer ----------
+
+  /** When the sleep timer's minutes countdown ends (unix seconds), if one is running. */
+  sleepEndsAt = $state<number | null>(null);
+  /** A sleep timer is set: minutes, or "end of the song / album". */
+  sleepActive = $derived(this.sleepEndsAt != null || !!this.status?.stopAfter);
+
+  setSleep(kind: "off" | "minutes" | "songs" | "album", amount?: number) {
+    api.setSleepTimer(kind, amount);
+    this.sleepEndsAt = kind === "minutes" ? Math.floor(Date.now() / 1000) + (amount ?? 30) * 60 : null;
+    this.showToast(
+      kind === "off"
+        ? "Sleep timer off"
+        : kind === "minutes"
+          ? `Sleep timer: pausing in ${amount} minutes`
+          : kind === "album"
+            ? "Sleep timer: pausing when this album ends"
+            : "Sleep timer: pausing when this song ends",
+    );
+  }
+
+  /** The sleep timer's choices (for a menu). */
+  sleepItems(): MenuItem[] {
+    return [
+      ...(this.sleepActive ? [{ label: "Turn Off Sleep Timer", icon: "close", action: () => this.setSleep("off") }] : []),
+      ...[15, 30, 45, 60].map((m) => ({ label: `In ${m} minutes`, icon: "moon", action: () => this.setSleep("minutes", m) })),
+      { label: "At the end of this song", icon: "moon", action: () => this.setSleep("songs", 1) },
+      { label: "At the end of this album", icon: "moon", action: () => this.setSleep("album") },
+    ];
+  }
+
+  // ---------- the queue ----------
+
+  /** Empties Up Next (the song that's playing stays). */
+  clearUpNext() {
+    const s = this.status;
+    if (!s || s.index == null) return;
+    const ids = s.queue.slice(s.index + 1);
+    if (!ids.length) return;
+    api.clearUpNext();
+    this.showToast(`Cleared ${ids.length} ${ids.length === 1 ? "song" : "songs"} from Up Next`, {
+      label: "Undo",
+      run: () => {
+        api.enqueue(ids, false);
+        this.toast = this.toastAction = null;
+      },
+    });
+  }
+
+  /** Takes the song at queue position `index` out; Undo puts it back in the same place. */
+  removeFromQueue(index: number) {
+    const id = this.status?.queue[index];
+    if (!id) return;
+    const t = this.trackById.get(id);
+    api.removeFromQueue(index);
+    this.showToast(`Removed ${t ? `“${t.title}”` : "a song"} from Up Next`, {
+      label: "Undo",
+      run: () => {
+        api.insertInQueue(index, [id]);
+        this.toast = this.toastAction = null;
+      },
+    });
+  }
+
+  /** Saves the whole queue (played, playing and waiting songs) as a playlist. */
+  async saveQueueAsPlaylist() {
+    const tracks = (this.status?.queue ?? []).map((id) => this.trackById.get(id)).filter((t): t is Track => !!t);
+    if (!tracks.length) return;
+    const day = new Date().toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+    const p = await this.createPlaylist(`Queue, ${day}`, tracks);
+    this.showToast(`Saved the queue as “${p.name}” (${tracks.length} ${tracks.length === 1 ? "song" : "songs"})`, {
+      label: "Open",
+      run: () => {
+        this.go({ name: "playlist", id: p.id });
         this.toast = this.toastAction = null;
       },
     });
@@ -369,12 +519,16 @@ class AppState {
         if (queue) this.applyStatus({ ...e.payload, queue });
       }),
       listen("library-changed", async () => {
-        await this.loadLibrary();
+        await Promise.all([this.loadLibrary(), this.loadMarks()]);
         this.scan = null;
         await this.dropOwnedSuggestions();
       }),
       listen<{ done: number; total: number }>("library-progress", (e) => (this.scan = e.payload)),
       listen("history-changed", async () => (this.listening = await api.history())),
+      listen("marks-changed", () => this.loadMarks()),
+      listen<HealthProgress>("health-progress", (e) => (this.healthJob = e.payload.running ? e.payload : null)),
+      listen("health-done", () => this.loadHealth()),
+      listen<number | null>("sleep-timer", (e) => (this.sleepEndsAt = e.payload)),
       listen<{ done: number; total: number }>("analysis-progress", (e) => {
         this.analysis = e.payload.done >= e.payload.total ? null : e.payload;
       }),
@@ -411,6 +565,8 @@ class AppState {
     api.artistImages().then((m) => (this.artistImages = m));
     // The mini player is another window: follow a theme changed in the main one.
     window.addEventListener("storage", (e) => e.key === "cadence-theme" && (this.theme = savedTheme()));
+    this.loadMarks();
+    api.sleepTimer().then((t) => (this.sleepEndsAt = t));
     api.skips().then((s) => {
       this.skipped = s.ids;
       this.skipInstrumentals = s.instrumentals;
@@ -628,11 +784,19 @@ class AppState {
       { label: "Play Next", icon: "playNext", action: () => this.enqueue([t], true) },
       { label: "Add to Queue", icon: "queue", action: () => this.enqueue([t], false) },
       { label: "Add to Playlist…", icon: "playlist", action: () => (this.picker = [t]) },
+      this.isLoved(t)
+        ? { label: "Remove from Favorites", icon: "heartFill", action: () => this.setLoved([t], false) }
+        : { label: "Add to Favorites", icon: "heart", action: () => this.setLoved([t], true) },
+      { label: "Rating", rating: { value: this.ratingOf(t), set: (n) => this.setRating([t], n) }, action: () => {} },
       { label: "Start Sound Radio", icon: "radio", action: () => this.soundRadio(t) },
       { label: "Songs That Sound Like This", icon: "wave", action: () => this.go({ name: "similar", id: t.id }) },
       { label: "Go to Album", icon: "album", action: () => this.go({ name: "album", id: t.albumId }) },
-      { label: "Fix Song Info…", icon: "sparkle", action: () => (this.fixing = t) },
-      { label: "Edit Info…", icon: "edit", action: () => (this.tagEditing = [t]) },
+      ...(t.cue
+        ? []
+        : [
+            { label: "Fix Song Info…", icon: "sparkle", action: () => (this.fixing = t) },
+            { label: "Edit Info…", icon: "edit", action: () => (this.tagEditing = [t]) },
+          ]),
       { label: "Change Cover…", icon: "album", action: () => (this.coverEditing = t.albumId) },
       { label: "Go to Artist", icon: "artist", action: () => this.go({ name: "artist", artist: this.artistOf(t.albumArtist) }) },
       this.skippedSet.has(t.id)
@@ -648,7 +812,9 @@ class AppState {
       { label: "Play Next", icon: "playNext", action: () => this.enqueue(this.albumTracks(album), true) },
       { label: "Add to Queue", icon: "queue", action: () => this.enqueue(this.albumTracks(album), false) },
       { label: "Add to Playlist…", icon: "playlist", action: () => (this.picker = this.albumTracks(album)) },
-      { label: "Edit Album Info…", icon: "edit", action: () => (this.tagEditing = this.albumTracks(album)) },
+      ...(this.albumTracks(album).some((t) => t.cue)
+        ? []
+        : [{ label: "Edit Album Info…", icon: "edit", action: () => (this.tagEditing = this.albumTracks(album)) }]),
       { label: "Change Cover…", icon: "album", action: () => (this.coverEditing = album.id) },
       { label: "Go to Artist", icon: "artist", action: () => this.go({ name: "artist", artist: this.artistOf(album.artist) }) },
     ]);

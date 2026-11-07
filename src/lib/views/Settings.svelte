@@ -15,6 +15,7 @@
   let showLicenses = $state(false);
   getVersion().then((v) => (version = v));
   let closeToTray = $state(true);
+  let globalHotkeys = $state(true);
   const droid = android();
   let playOnBluetooth = $state(droid?.getPlayOnBluetooth?.() ?? true);
   let lyricsOnline = $state(true);
@@ -26,6 +27,7 @@
   onMount(async () => {
     const s = await api.appSettings();
     closeToTray = s.closeToTray;
+    globalHotkeys = s.globalHotkeys;
     lyricsOnline = s.lyricsOnline;
     fixTags = s.fixTagsOnline;
     lbUser = s.listenbrainzUser;
@@ -244,6 +246,20 @@
         <p class="desc">When you close the window, the music keeps playing and Cadence stays in the system tray. Click the tray icon to bring it back; quit from its menu.</p>
       </div>
       <Toggle checked={closeToTray} label="Keep playing in the tray" onchange={(v) => { closeToTray = v; api.setCloseToTray(v); }} />
+    </div>
+  </section>
+
+  <section>
+    <div class="title-row">
+      <div>
+        <h2 class="section-title">Hotkeys that work in any app</h2>
+        <p class="desc">
+          <kbd>Ctrl</kbd> <kbd>Alt</kbd> + <kbd>Space</kbd> play or pause, <kbd>←</kbd> <kbd>→</kbd> previous and next,
+          <kbd>↑</kbd> <kbd>↓</kbd> volume, <kbd>H</kbd> add the playing song to Favorites. They work while Cadence is in the tray.
+          Turn them off if another program needs these keys.
+        </p>
+      </div>
+      <Toggle checked={globalHotkeys} label="Hotkeys that work in any app" onchange={(v) => { globalHotkeys = v; api.setGlobalHotkeys(v); }} />
     </div>
   </section>
   {/if}

@@ -36,7 +36,7 @@ fn main() {
         );
     }
 
-    let engine = Engine::start(0.05, DspSettings::default(), Repeat::Off, |_| {});
+    let engine = Engine::start(0.05, DspSettings::default(), Repeat::Off, false, |_| {});
     let items: Vec<QueueItem> = tracks
         .iter()
         .map(|t| QueueItem {
@@ -46,6 +46,8 @@ fn main() {
             album_id: t.album_id.clone(),
             gain: t.gain,
             tone: None,
+            start: t.cue.map_or(0.0, |c| c.start),
+            end: t.cue.and_then(|c| c.end),
         })
         .collect();
     engine.send(Cmd::Load { items, index: 0 });

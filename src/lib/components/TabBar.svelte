@@ -6,7 +6,7 @@
   const tabs: { label: string; icon: string; view: View; match: string[] }[] = [
     { label: "Listen Now", icon: "home", view: { name: "home" }, match: ["home"] },
     { label: "Albums", icon: "album", view: { name: "albums" }, match: ["albums", "album", "recent"] },
-    { label: "Songs", icon: "song", view: { name: "songs" }, match: ["songs", "artists", "artist", "playlist", "similar"] },
+    { label: "Songs", icon: "song", view: { name: "songs" }, match: ["songs", "favorites", "artists", "artist", "playlist", "similar"] },
     { label: "Search", icon: "search", view: { name: "search", query: "" }, match: ["search"] },
     { label: "Settings", icon: "settings", view: { name: "settings" }, match: ["settings", "sound"] },
   ];

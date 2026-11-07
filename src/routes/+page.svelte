@@ -30,9 +30,12 @@
   import Artists from "#lib/views/Artists.svelte";
   import Home from "#lib/views/Home.svelte";
   import PlaylistView from "#lib/views/PlaylistView.svelte";
+  import NeedsAttention from "#lib/views/NeedsAttention.svelte";
   import Search from "#lib/views/Search.svelte";
   import Settings from "#lib/views/Settings.svelte";
   import Songs from "#lib/views/Songs.svelte";
+  import Favorites from "#lib/views/Favorites.svelte";
+  import Health from "#lib/views/Health.svelte";
   import SimilarView from "#lib/views/SimilarView.svelte";
   import Discover from "#lib/views/Discover.svelte";
   import Stats from "#lib/views/Stats.svelte";
@@ -262,6 +265,12 @@
   {#key app.view.artist}<ArtistView name={app.view.artist} />{/key}
 {:else if app.view.name === "songs"}
   <Songs />
+{:else if app.view.name === "favorites"}
+  <Favorites />
+{:else if app.view.name === "health"}
+  <Health />
+{:else if app.view.name === "attention"}
+  <NeedsAttention />
 {:else if app.view.name === "search"}
   <Search query={app.view.query} />
 {:else if app.view.name === "playlist"}
