@@ -2,6 +2,16 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.32 (2026-11-07)
+
+- **Singers: no more made-up second voice.** Since 0.2.30, songs with one singer could show their lines as a
+  "Lower voice" and a "Higher voice": a singer moving between low verses and a high chorus sounded like two people.
+  Now Cadence only tells voices apart in songs known to have several singers: the AI DJ found two or more credited
+  vocalists, or the title or artist says so ("feat.", "ft.", "with", "×"). Singers named in the lyrics are shown as
+  before. Songs followed before are only listened to again when they have several singers.
+- **Easier to read.** Lines not being sung are white again, with only a hint of their singer's colour; the full
+  colour is on the singer's name and the line being sung, so lyrics stay readable on every cover's colours.
+
 ## 0.2.31 (2026-11-07)
 
 - **The Android app is back.** 0.2.30 came out for Windows, macOS and Linux only; this release brings its changes to
