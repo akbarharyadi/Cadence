@@ -246,6 +246,53 @@ fn ranges(v: &Voices, span: (f64, f64), loud: u8, low: f32, high: f32) -> (usize
     (l, h, n)
 }
 
+/// How the last `split` saw the song (for measuring it on real libraries).
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // read by the library survey test
+pub struct Stats {
+    pub n0: usize,
+    pub n1: usize,
+    pub gap: f32,
+    pub silhouette: f32,
+    pub timbre: f32,
+}
+
+thread_local! {
+    pub static LAST: std::cell::RefCell<Option<Stats>> = const { std::cell::RefCell::new(None) };
+}
+
+/// How different the two groups sound once their difference in pitch is accounted for: one
+/// singer's tone changes smoothly with pitch (the same trend inside each group explains the gap
+/// between them), another singer's doesn't. For each tone number, the groups' difference beyond
+/// the within-group pitch trend, over the within-group spread (ANCOVA); the root mean square.
+fn timbre_gap(known: &[(usize, Vec<f32>)], group: &[u8]) -> f32 {
+    let mean = |g: u8, d: usize| {
+        let xs: Vec<f32> = known.iter().zip(group).filter(|(_, k)| **k == g).map(|((_, x), _)| x[d]).collect();
+        xs.iter().sum::<f32>() / xs.len().max(1) as f32
+    };
+    let (p0, p1) = (mean(0, 0), mean(1, 0));
+    let mut sum = 0f32;
+    for d in 1..=TONES {
+        let (t0, t1) = (mean(0, d), mean(1, d));
+        let (mut sxy, mut sxx) = (0f32, 0f32);
+        for ((_, x), &g) in known.iter().zip(group) {
+            let (pm, tm) = if g == 0 { (p0, t0) } else { (p1, t1) };
+            sxy += (x[0] - pm) * (x[d] - tm);
+            sxx += (x[0] - pm).powi(2);
+        }
+        let slope = if sxx > 1e-6 { sxy / sxx } else { 0.0 };
+        let mut resid = 0f32;
+        for ((_, x), &g) in known.iter().zip(group) {
+            let (pm, tm) = if g == 0 { (p0, t0) } else { (p1, t1) };
+            resid += (x[d] - tm - slope * (x[0] - pm)).powi(2);
+        }
+        let sd = (resid / (known.len().saturating_sub(3)).max(1) as f32).sqrt().max(1e-3);
+        let adjusted = (t1 - t0) - slope * (p1 - p0);
+        sum += (adjusted / sd).powi(2);
+    }
+    (sum / TONES as f32).sqrt()
+}
+
 /// Splits the lines between two voices, if the song has two clearly different ones.
 pub fn split(v: &Voices, lines: &[Line]) -> Option<Split> {
     if v.frames() == 0 {
@@ -355,12 +402,14 @@ pub fn split(v: &Voices, lines: &[Line]) -> Option<Split> {
         .sum::<f32>()
         / z.len() as f32;
     let gap = p1 - p0;
+    let timbre = timbre_gap(&known, &group);
     log::info!(
-        "singers: {} lines described, groups {n0}/{n1}, pitch {:.1}/{:.1} st (gap {gap:.1}), silhouette {silhouette:.2}",
+        "singers: {} lines described, groups {n0}/{n1}, pitch {:.1}/{:.1} st (gap {gap:.1}), silhouette {silhouette:.2}, timbre {timbre:.2}",
         z.len(),
         p0,
         p1
     );
+    LAST.with(|l| *l.borrow_mut() = Some(Stats { n0, n1, gap, silhouette, timbre }));
     // One voice (or one singer moving between registers): no split.
     if share < 0.15 || n0.min(n1) < 3 || gap < 3.0 || silhouette < 0.25 {
         return None;

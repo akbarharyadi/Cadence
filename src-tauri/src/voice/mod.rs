@@ -149,6 +149,29 @@ fn text_of(l: &Lyrics) -> Vec<String> {
     }
 }
 
+/// The title or artist names more than one performer: "Song (feat. X)", "A ft. B", "A with B",
+/// "A × B", "A x B". Not "&" or "and": band names ("Judy & Mary", "Bob Marley & The Wailers").
+pub fn credits_several(title: &str, artist: &str) -> bool {
+    let words = |s: &str| -> Vec<String> {
+        s.to_lowercase()
+            .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | ','))
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let t = words(title);
+    let a = words(artist);
+    let marks = |w: &[String], with: bool| {
+        w.iter().enumerate().any(|(i, x)| {
+            matches!(x.as_str(), "feat." | "feat" | "ft." | "featuring" | "×" | "duet")
+                || (x == "x" && i > 0 && i + 1 < w.len())
+                || (with && x == "with" && i > 0 && i + 1 < w.len())
+        })
+    };
+    // "with" in a title is usually just a word ("Dancing with Myself"); in a credit it's a guest.
+    marks(&t, false) || marks(&a, true) || artist.contains('×') || title.contains('×')
+}
+
 fn text_hash(texts: &[String]) -> String {
     blake3::hash(texts.join("\n").as_bytes()).to_hex()[..16].to_string()
 }
@@ -324,6 +347,18 @@ impl Voice {
         }
     }
 
+    /// Whether listening to the song would add something: never listened to, or a song with
+    /// several singers whose voices haven't been described yet.
+    pub fn needs_listening(&self, track: &Track) -> bool {
+        !self.has_listened(track) || (self.several_singers(track) && !self.has_voices(track))
+    }
+
+    /// Whether the song is known to have several singers: the AI found two or more credited
+    /// vocalists, or the title or artist says so ("feat.", "with", "×").
+    pub fn several_singers(&self, track: &Track) -> bool {
+        self.read_ai_singers(&track.id).is_some_and(|a| a.singers.iter().filter(|s| !s.credit.is_empty()).count() >= 2) || credits_several(&track.title, &track.artist)
+    }
+
     /// Who sings each line, when the lyrics don't say: the AI's parts (from published lyrics
     /// that mark them), else the voices told apart in the singing (`placed`: the lines placed on
     /// it), named by the AI when it found the singers.
@@ -342,6 +377,12 @@ impl Voice {
                 lyrics.singers_from = "ai".into();
                 return;
             }
+        }
+        // Pitch and tone can't tell one singer moving between registers from two singers (measured
+        // on a real library: nearly every one-singer song "split"), so voices are only told apart
+        // in songs known to have several singers.
+        if !self.several_singers(track) {
+            return;
         }
         let Some(placed) = placed.filter(|p| p.len() == lyrics.synced.len()) else { return };
         let Some(split) = self.split(track, placed) else { return };
@@ -567,7 +608,7 @@ fn batch_songs(state: &AppState, voice: &Voice) -> Vec<String> {
     let mut found: Vec<(u32, u64, String)> = tracks
         .iter()
         .filter(|t| t.duration >= 20.0 && t.duration <= listen::LONGEST_SECS && !skipped.contains(&t.id))
-        .filter(|t| !(voice.has_listened(t) && voice.has_voices(t)) && !crate::lyrics::is_hidden(&cache, &t.id))
+        .filter(|t| voice.needs_listening(t) && !crate::lyrics::is_hidden(&cache, &t.id))
         .filter(|t| has_lyrics(&cache, t))
         .map(|t| {
             (
@@ -812,7 +853,7 @@ fn look_ahead(ctx: &Ctx, state: &AppState, voice: &Voice, just_done: &str) {
         lib.by_id.get(&next).map(|&i| lib.snapshot.tracks[i].clone())
     };
     let Some(track) = track else { return };
-    if (voice.has_listened(&track) && voice.has_voices(&track)) || track.duration > listen::LONGEST_SECS {
+    if !voice.needs_listening(&track) || track.duration > listen::LONGEST_SECS {
         return;
     }
     if has_lyrics(&state.data_dir.join("lyrics"), &track) {
@@ -836,7 +877,7 @@ fn run(ctx: &Ctx, state: &AppState, voice: &Voice, track: &Track, resolve: Resol
     let voices_file = voice.voices_path(&track.id);
     let has_letters = listen::is_saved(&listened, &stamp);
     let has_voices = sing::is_saved(&voices_file, &stamp);
-    if !has_letters || !has_voices {
+    if !has_letters || (!has_voices && voice.several_singers(track)) {
         if track.duration > listen::LONGEST_SECS {
             bail!("This song is too long to listen to.");
         }
@@ -1124,6 +1165,68 @@ mod sing_tests {
         }
     }
 
+}
+
+#[cfg(test)]
+mod credit_tests {
+    #[test]
+    fn several_singers_in_the_credits() {
+        use super::credits_several as several;
+        assert!(several("Song (feat. Someone)", "A"));
+        assert!(several("Song", "A ft. B"));
+        assert!(several("Song", "A with B"));
+        assert!(several("Song", "A × B"));
+        assert!(several("Song", "A x B"));
+        assert!(several("Song (Duet ver.)", "A"));
+        // Band names and ordinary titles: one credit.
+        assert!(!several("Daydream", "Judy & Mary"));
+        assert!(!several("This Train", "Bob Marley & The Wailers"));
+        assert!(!several("Dancing with Myself", "Billy Idol"));
+        assert!(!several("Forget it", "Yorushika"));
+        assert!(!several("X", "X Japan"));
+        assert!(!several("Malcolm X", "A"));
+    }
+}
+
+#[cfg(all(test, desktop))]
+mod sing_survey {
+    use super::*;
+
+    /// How every song with saved voices is split (read-only): `CADENCE_DATA` = the roaming data
+    /// folder (library.json, lyrics/), `CADENCE_LOCAL` = the local one (voice/).
+    #[test]
+    #[ignore]
+    fn survey_library() {
+        let data = PathBuf::from(std::env::var("CADENCE_DATA").unwrap());
+        let local = PathBuf::from(std::env::var("CADENCE_LOCAL").unwrap());
+        #[derive(Deserialize)]
+        struct Lib {
+            tracks: Vec<Track>,
+        }
+        let lib: Lib = serde_json::from_slice(&std::fs::read(data.join("library.json")).unwrap()).unwrap();
+        for t in &lib.tracks {
+            let Some(v) = sing::load(&local.join("voice").join(format!("{}.sing", t.id)), &crate::sonic::stamp(t)) else { continue };
+            let Ok(bytes) = std::fs::read(data.join("lyrics").join(format!("{}.voice.json", t.id))) else { continue };
+            let Ok(placed) = serde_json::from_slice::<Placed>(&bytes) else { continue };
+            sing::LAST.with(|l| *l.borrow_mut() = None);
+            let split = sing::split(&v, &placed.lines);
+            let s = sing::LAST.with(|l| *l.borrow());
+            match s {
+                Some(s) => println!(
+                    "{:5} gap {:5.1} sil {:.2} timbre {:5.2} groups {:2}/{:2}  {} — {}",
+                    if split.is_some() { "SPLIT" } else { "one" },
+                    s.gap,
+                    s.silhouette,
+                    s.timbre,
+                    s.n0,
+                    s.n1,
+                    t.artist,
+                    t.title
+                ),
+                None => println!("  -   (too little to measure)  {} — {}", t.artist, t.title),
+            }
+        }
+    }
 }
 
 #[cfg(all(test, desktop))]

@@ -815,7 +815,7 @@ pub fn get_lyrics(ctx: &Ctx, track_id: String) -> Result<crate::lyrics::Lyrics, 
     let (state, voice) = (state.clone(), voice.clone());
     let lyrics = voice.apply(&track, resolve_lyrics(&state, &track));
     // Followed before Cadence told singers apart: their voices once more (separating only).
-    if !lyrics.voice.is_empty() && lyrics.singers.is_empty() && state.settings.lock().voice_auto && voice.installed() && !voice.has_voices(&track) {
+    if !lyrics.voice.is_empty() && lyrics.singers.is_empty() && state.settings.lock().voice_auto && voice.installed() && !voice.has_voices(&track) && voice.several_singers(&track) {
         crate::voice::request(ctx, track_id, resolve_lyrics);
     }
     Ok(lyrics)
@@ -874,11 +874,15 @@ pub fn find_singers(ctx: &Ctx, track_id: String) -> Result<crate::lyrics::Lyrics
     if shown.singers_from == "lyrics" {
         return Ok(shown);
     }
-    if voice.installed() && !voice.has_voices(&track) {
-        crate::voice::request(ctx, track_id.clone(), resolve_lyrics);
-    }
+    // Tells the voices apart, if the song is known to have several singers and that hasn't been done.
+    let listen = |voice: &crate::voice::Voice| {
+        if voice.installed() && voice.several_singers(&track) && !voice.has_voices(&track) {
+            crate::voice::request(ctx, track_id.clone(), resolve_lyrics);
+        }
+    };
     let settings = state.settings.lock().ai.clone();
     if settings.provider == crate::ai::Provider::Off {
+        listen(&voice);
         return Ok(shown);
     }
     // The lines as saved (before placing on the singing: the same text).
@@ -891,6 +895,7 @@ pub fn find_singers(ctx: &Ctx, track_id: String) -> Result<crate::lyrics::Lyrics
         found.parts.iter().filter(|p| !p.is_empty()).count()
     );
     voice.save_ai_singers(&track.id, &texts, found.singers, found.parts);
+    listen(&voice);
     Ok(voice.apply(&track, lyrics))
 }
 

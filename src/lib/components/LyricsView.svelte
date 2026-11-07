@@ -337,6 +337,17 @@
     if (!singersOn || !s.length) return SINGER_COLORS[0];
     return s.length > 1 ? TOGETHER : SINGER_COLORS[s[0] % SINGER_COLORS.length];
   }
+  /**
+   * Lines not being sung keep (almost) the usual white, so they stay readable on any cover's
+   * colours: only a quarter of the singer's colour. The full colour is for the name and the line
+   * being sung.
+   */
+  function tint(rgb: string) {
+    return rgb
+      .split(",")
+      .map((c) => Math.round(255 * 0.75 + +c * 0.25))
+      .join(", ");
+  }
   /** The name to show above a line: only where the singer changes. */
   const singerLabels = $derived.by(() => {
     const out: string[] = [];
@@ -375,7 +386,12 @@
       localStorage.setItem("cadence-singers", "on");
       if (l.singers?.length) app.showToast(`Singers: ${l.singers.map((_, i) => singerName(i)).join(", ")}`);
       else if (app.voice?.job) app.showToast("Listening to the voices; the singers show when that’s done.");
-      else app.showToast("Couldn’t tell the singers apart in this song.");
+      else
+        app.showToast(
+          app.aiReady
+            ? "No second credited singer was found for this song."
+            : "Cadence tells singers apart only in songs credited to several singers.",
+        );
     } catch (e) {
       app.showToast(String(e));
     } finally {
@@ -495,7 +511,7 @@
       {:else if lyrics?.synced.length}
         <div class="pad"></div>
         {#each lyrics.synced as line, i}
-          <button class="line" class:active={i === active} class:past={i < active} class:gap={!line.text} style="--c: {singerColor(line)}" onclick={() => app.seek(line.time)}>
+          <button class="line" class:active={i === active} class:past={i < active} class:gap={!line.text} style="--c: {singerColor(line)}; --ct: {tint(singerColor(line))}" onclick={() => app.seek(line.time)}>
             {#if singerLabels[i]}<span class="who"><i></i>{singerLabels[i]}</span>{/if}
             {#if i === active && line.text}
               {#each sweep as p}<span class="w" style="--p: {progress(p) * 100}%">{p.text}</span>{/each}
@@ -637,7 +653,7 @@
     font-weight: 700;
     line-height: 1.25;
     letter-spacing: -0.015em;
-    color: rgba(var(--c, 255, 255, 255), 0.32);
+    color: rgba(var(--ct, 255, 255, 255), 0.32);
     transition:
       color 0.35s,
       transform 0.35s,
@@ -646,12 +662,12 @@
     filter: blur(0.6px);
   }
   .line:hover {
-    color: rgba(var(--c, 255, 255, 255), 0.6);
+    color: rgba(var(--ct, 255, 255, 255), 0.6);
     background: rgba(255, 255, 255, 0.05);
     filter: none;
   }
   .line.past {
-    color: rgba(var(--c, 255, 255, 255), 0.45);
+    color: rgba(var(--ct, 255, 255, 255), 0.45);
   }
   .line.active {
     filter: none;
@@ -660,7 +676,7 @@
   /* Each word fills from left to right as it's sung. */
   .w {
     color: transparent;
-    background: linear-gradient(90deg, rgb(var(--c, 255, 255, 255)) var(--p), rgba(var(--c, 255, 255, 255), 0.38) var(--p));
+    background: linear-gradient(90deg, rgb(var(--c, 255, 255, 255)) var(--p), rgba(var(--ct, 255, 255, 255), 0.38) var(--p));
     -webkit-background-clip: text;
     background-clip: text;
     white-space: pre-wrap;

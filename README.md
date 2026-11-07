@@ -61,7 +61,7 @@
   of about 440 MB. You can do one song from the lyrics view, or every song with lyrics from Settings.
 - **Who sings each line**: in duets, each singer's lines get their own colour and a small name where the singer
   changes. Cadence uses names written in the lyrics ("Name: …", "[Name]", M/F/D), tells two voices apart by pitch and
-  tone while it follows the singer, and can ask the AI DJ for the singers' credited names (⋯ → Who sings?).
+  tone in songs credited to several singers, and can ask the AI DJ for the singers' credited names (⋯ → Who sings?).
 - **Sounds like**: every song is analysed once, locally ([bliss](https://github.com/Polochon-street/bliss-rs): tempo,
   timbre, loudness, harmony), for sound radio, similar songs and automatic mixes.
 - **AI DJ** (optional, with your own key; Z.ai GLM by default, or any OpenAI-compatible service): requests in your own
