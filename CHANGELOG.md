@@ -2,6 +2,13 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.29 (2026-11-07)
+
+- **Fix song info finds the right songs.** When the catalogue doesn't have the song, the list used to fill up with
+  unrelated songs that just happened to be about as long. It now only shows songs that share most of what you searched
+  for, the closest first, and says so when none of them is clearly your song (demos and unreleased songs often aren't
+  in the iTunes catalogue), pointing you to **Edit by hand**. Typing "Artist - Title" in the search box works too.
+
 ## 0.2.28 (2026-11-06)
 
 - **An easier player.** The song's time and time left now always show, either side of a thicker seek line that's
