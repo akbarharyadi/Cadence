@@ -2,9 +2,10 @@
 //! "Unknown Artist".
 //!
 //! When such a song starts playing, Cadence looks it up in the iTunes catalogue (Apple's public
-//! search, no account or key), checks that the match really is this song (title, artist and
-//! length), and writes the title, artist, album, year, track number, genre and cover into the
-//! file. The file is only written once it's no longer playing, then the library is rescanned.
+//! search, no account or key; then Deezer's, when iTunes has no exact match), checks that the
+//! match really is this song (title, artist and length), and writes the title, artist, album,
+//! year, track number, genre and cover into the file. The file is only written once it's no
+//! longer playing, then the library is rescanned.
 //! Each file is looked up once; misses aren't retried.
 
 use std::collections::{HashMap, HashSet};
@@ -286,6 +287,19 @@ pub fn candidates(t: &Track, term: &str) -> Result<Vec<Candidate>, String> {
         .map_err(|e| e.to_string())?;
     let mut seen = HashSet::new();
     let mut out: Vec<(Rank4, Candidate)> = Vec::new();
+    // Scores a result against the song; None when it's neither the song nor close to the search.
+    let rank = |c: &Candidate| -> Option<Rank4> {
+        let off = (c.duration - t.duration).abs();
+        let likely = similar(&c.title, &title) && artist.as_deref().is_none_or(|a| similar(&c.artist, a)) && off < 75.0;
+        let score = relevance(&words, &c.title, &c.artist, &c.album);
+        if !likely && score < MIN_RELEVANCE {
+            return None;
+        }
+        let label = format!("{} {}", c.title, c.album).to_lowercase();
+        let other_version = VERSIONS.iter().any(|v| label.contains(v) && !title.to_lowercase().contains(v));
+        // Not the song: the ones sharing most of the search first, then the closest length.
+        Some(Rank4(!likely as u8, if likely { 0.0 } else { -(score * 10.0).round() }, other_version as u8, off))
+    };
     let mut reached = false;
     for country in ["US", "ID", "JP", "KR", "GB"] {
         let url = format!(
@@ -301,44 +315,136 @@ pub fn candidates(t: &Track, term: &str) -> Result<Vec<Candidate>, String> {
             if !seen.insert(norm(&format!("{name}|{by}|{album}"))) {
                 continue;
             }
-            let length = h.track_time_millis.unwrap_or(0.0) / 1000.0;
-            let off = (length - t.duration).abs();
-            let likely = similar(&name, &title) && artist.as_deref().is_none_or(|a| similar(&by, a)) && off < 75.0;
-            let score = relevance(&words, &name, &by, &album);
-            if !likely && score < MIN_RELEVANCE {
-                continue;
+            let mut c = Candidate {
+                title: name,
+                album_artist: h.collection_artist_name.clone().unwrap_or_else(|| by.clone()),
+                artist: by,
+                album,
+                year: h.release_date.as_deref().and_then(|d| d.get(..4)?.parse().ok()),
+                track_no: h.track_number,
+                disc_no: h.disc_number,
+                genre: h.primary_genre_name.clone().unwrap_or_default(),
+                cover_url: h.artwork_url100.as_ref().map(|u| u.replace("100x100bb", "600x600bb")),
+                thumb: h.artwork_url100.clone(),
+                duration: h.track_time_millis.unwrap_or(0.0) / 1000.0,
+                likely: false,
+            };
+            if let Some(r) = rank(&c) {
+                c.likely = r.0 == 0;
+                out.push((r, c));
             }
-            let label = format!("{name} {album}").to_lowercase();
-            let other_version = VERSIONS.iter().any(|v| label.contains(v) && !title.to_lowercase().contains(v));
-            out.push((
-                // Not the song: the ones sharing most of the search first, then the closest length.
-                Rank4(!likely as u8, if likely { 0.0 } else { -(score * 10.0).round() }, other_version as u8, off),
-                Candidate {
-                    title: name,
-                    album_artist: h.collection_artist_name.clone().unwrap_or_else(|| by.clone()),
-                    artist: by,
-                    album,
-                    year: h.release_date.as_deref().and_then(|d| d.get(..4)?.parse().ok()),
-                    track_no: h.track_number,
-                    disc_no: h.disc_number,
-                    genre: h.primary_genre_name.clone().unwrap_or_default(),
-                    cover_url: h.artwork_url100.as_ref().map(|u| u.replace("100x100bb", "600x600bb")),
-                    thumb: h.artwork_url100.clone(),
-                    duration: length,
-                    likely,
-                },
-            ));
         }
         // Enough good matches: no need to ask other stores.
         if out.iter().filter(|(r, _)| r.0 == 0).count() >= 3 {
             break;
         }
     }
+    // Deezer has releases Apple doesn't list (many game soundtracks and Asian singles).
+    if let Some(found) = deezer_candidates(&client, term) {
+        reached = true;
+        let mut fresh: Vec<(Rank4, Candidate, u64)> = Vec::new();
+        for (c, id) in found {
+            // Already offered from iTunes: same title, artist and length (iTunes adds " - Single"
+            // to album names, so those can't be compared).
+            let dupe = out.iter().any(|(_, o)| {
+                norm(&o.title) == norm(&c.title) && norm(&o.artist) == norm(&c.artist) && (o.duration - c.duration).abs() < 2.0
+            });
+            if dupe || !seen.insert(norm(&format!("deezer|{id}"))) {
+                continue;
+            }
+            if let Some(r) = rank(&c) {
+                let mut c = c;
+                c.likely = r.0 == 0;
+                fresh.push((r, c, id));
+            }
+        }
+        // The search lists only the main artist and no date: ask for the best few in full.
+        fresh.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        fresh.truncate(6);
+        std::thread::scope(|s| {
+            for (_, c, id) in fresh.iter_mut() {
+                let client = &client;
+                s.spawn(move || {
+                    if let Some(more) = deezer_details(client, *id) {
+                        if let Some(a) = more.artist {
+                            c.artist = a;
+                        }
+                        c.year = more.year;
+                        c.track_no = more.track_no;
+                        c.disc_no = more.disc_no;
+                    }
+                });
+            }
+        });
+        out.extend(fresh.into_iter().map(|(r, c, _)| (r, c)));
+    }
     if !reached {
-        return Err("Couldn't reach the iTunes catalogue. Check your internet connection.".into());
+        return Err("Couldn't reach the iTunes or Deezer catalogue. Check your internet connection.".into());
     }
     out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     Ok(out.into_iter().take(12).map(|(_, c)| c).collect())
+}
+
+/// Songs for `term` in Deezer's public catalogue (no account or key), with their Deezer ids.
+/// None when Deezer can't be reached.
+fn deezer_candidates(client: &reqwest::blocking::Client, term: &str) -> Option<Vec<(Candidate, u64)>> {
+    let url = format!("https://api.deezer.com/search?q={}&limit=15", urlencoding::encode(term));
+    let v: serde_json::Value = client.get(&url).send().ok()?.json().ok()?;
+    let hits = v["data"].as_array()?;
+    Some(
+        hits.iter()
+            .filter_map(|h| {
+                let id = h["id"].as_u64()?;
+                let title = h["title"].as_str()?.to_string();
+                let by = h["artist"]["name"].as_str()?.to_string();
+                let album = h["album"]["title"].as_str().unwrap_or("").to_string();
+                let album = if matches!(album.to_lowercase().as_str(), "unknown" | "unknown album") { String::new() } else { album };
+                let cover = |size: &str| h["album"][size].as_str().filter(|u| !u.is_empty()).map(str::to_string);
+                Some((
+                    Candidate {
+                        title,
+                        album_artist: by.clone(),
+                        artist: by,
+                        album,
+                        year: None,
+                        track_no: None,
+                        disc_no: None,
+                        genre: String::new(),
+                        cover_url: cover("cover_xl").or_else(|| cover("cover_big")),
+                        thumb: cover("cover_medium"),
+                        duration: h["duration"].as_f64().unwrap_or(0.0),
+                        likely: false,
+                    },
+                    id,
+                ))
+            })
+            .collect(),
+    )
+}
+
+/// What Deezer's page for a song adds to its search result.
+struct DeezerMore {
+    /// Everyone credited ("Wuthering Waves, jixwang & Vision Sound"), when more than one.
+    artist: Option<String>,
+    year: Option<u32>,
+    track_no: Option<u32>,
+    disc_no: Option<u32>,
+}
+
+/// Deezer's page for song `id`: the search lists only the main artist and no date.
+fn deezer_details(client: &reqwest::blocking::Client, id: u64) -> Option<DeezerMore> {
+    let v: serde_json::Value = client.get(format!("https://api.deezer.com/track/{id}")).send().ok()?.json().ok()?;
+    if v.get("error").is_some() {
+        return None;
+    }
+    let names: Vec<&str> = v["contributors"].as_array().into_iter().flatten().filter_map(|a| a["name"].as_str()).collect();
+    let artist = names.split_last().filter(|(_, rest)| !rest.is_empty()).map(|(last, rest)| format!("{} & {last}", rest.join(", ")));
+    Some(DeezerMore {
+        artist,
+        year: v["release_date"].as_str().and_then(|d| d.get(..4)?.parse().ok()).filter(|&y| y > 0),
+        track_no: v["track_position"].as_u64().map(|n| n as u32).filter(|&n| n > 0),
+        disc_no: v["disk_number"].as_u64().map(|n| n as u32).filter(|&n| n > 0),
+    })
 }
 
 /// Saves the info the user picked. A playing song shows it at once and its file is written
@@ -489,6 +595,11 @@ struct Hit {
     disc_number: Option<u32>,
     primary_genre_name: Option<String>,
     artwork_url100: Option<String>,
+    /// Full-size cover, for a Deezer result.
+    #[serde(skip)]
+    cover: Option<String>,
+    #[serde(skip)]
+    deezer_id: Option<u64>,
 }
 
 /// Searches the catalogue for this song; several stores, since local music is often only
@@ -512,13 +623,47 @@ pub fn lookup(t: &Track) -> Option<Found> {
         );
         let Ok(r) = client.get(&url).send() else { continue };
         let Ok(s) = r.json::<Search>() else { continue };
-        if let Some((rank, found)) = best(&s.results, artist.as_deref(), &title, t.duration) {
+        if let Some((rank, found, _)) = best(&s.results, artist.as_deref(), &title, t.duration) {
             if best_so_far.as_ref().is_none_or(|(r, _)| rank < *r) {
                 best_so_far = Some((rank, found));
             }
             // The original recording with the exact title: no need to ask other stores.
             if best_so_far.as_ref().is_some_and(|(r, _)| r.0 == 0 && r.1 == 0) {
                 break;
+            }
+        }
+    }
+    // No exact original on iTunes: Deezer lists releases Apple doesn't (game soundtracks, Asian singles).
+    if !best_so_far.as_ref().is_some_and(|(r, _)| r.0 == 0 && r.1 == 0) {
+        let hits: Vec<Hit> = deezer_candidates(&client, &term)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(c, id)| Hit {
+                track_name: Some(c.title),
+                artist_name: Some(c.artist),
+                collection_name: Some(c.album),
+                collection_artist_name: None,
+                track_time_millis: Some(c.duration * 1000.0),
+                release_date: None,
+                track_number: None,
+                disc_number: None,
+                primary_genre_name: None,
+                artwork_url100: None,
+                cover: c.cover_url,
+                deezer_id: Some(id),
+            })
+            .collect();
+        if let Some((rank, mut found, id)) = best(&hits, artist.as_deref(), &title, t.duration) {
+            if best_so_far.as_ref().is_none_or(|(r, _)| rank < *r) {
+                if let Some(more) = id.and_then(|id| deezer_details(&client, id)) {
+                    if let Some(a) = more.artist {
+                        found.artist = a;
+                    }
+                    found.year = more.year;
+                    found.track_no = more.track_no;
+                    found.disc_no = more.disc_no;
+                }
+                best_so_far = Some((rank, found));
             }
         }
     }
@@ -539,7 +684,8 @@ struct Rank(u8, u8, f64);
 struct Rank4(u8, f64, u8, f64);
 
 /// The result that is really this song, if any, preferring the original recording.
-fn best(hits: &[Hit], artist: Option<&str>, title: &str, duration: f64) -> Option<(Rank, Found)> {
+/// Also its Deezer id, for a Deezer result.
+fn best(hits: &[Hit], artist: Option<&str>, title: &str, duration: f64) -> Option<(Rank, Found, Option<u64>)> {
     let wanted = title.to_lowercase();
     hits.iter()
         .filter_map(|h| {
@@ -578,8 +724,9 @@ fn best(hits: &[Hit], artist: Option<&str>, title: &str, duration: f64) -> Optio
                     disc_no: h.disc_number,
                     genre: h.primary_genre_name.clone().unwrap_or_default(),
                     // The search gives a 100 px cover; the same address serves larger sizes.
-                    cover_url: h.artwork_url100.as_ref().map(|u| u.replace("100x100bb", "600x600bb")),
+                    cover_url: h.cover.clone().or_else(|| h.artwork_url100.as_ref().map(|u| u.replace("100x100bb", "600x600bb"))),
                 },
+                h.deezer_id,
             )
         })
 }
@@ -587,6 +734,26 @@ fn best(hits: &[Hit], artist: Option<&str>, title: &str, duration: f64) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Needs the internet: `cargo test deezer_finds -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn deezer_finds_songs_apple_doesnt_list() {
+        let t = Track {
+            title: "悠忽舞于梦中".into(),
+            artist: "鸣潮先约电台/jixwang/VISION SOUND".into(),
+            duration: 200.0,
+            ..Default::default()
+        };
+        let found = candidates(&t, "wuthering waves Dancing through Fantasies").unwrap();
+        for c in &found {
+            println!("{} | {} | {} | {:?} | {}", c.title, c.artist, c.album, c.year, c.duration);
+        }
+        let top = &found[0];
+        assert_eq!(top.title, "Dancing Through Fantasies");
+        assert!(top.artist.contains("jixwang"), "{}", top.artist);
+        assert_eq!(top.year, Some(2025));
+    }
 
     #[test]
     fn guesses_artist_and_title_from_upload_names() {
@@ -651,6 +818,25 @@ mod tests {
         assert!((after.duration - t.duration).abs() < 0.05);
     }
 
+    /// Needs the internet: a download Apple doesn't list is tagged from Deezer.
+    #[test]
+    #[ignore]
+    fn lookup_falls_back_to_deezer() {
+        let t = Track {
+            title: "Wuthering Waves - Dancing Through Fantasies".into(),
+            artist: "Unknown Artist".into(),
+            duration: 200.0,
+            ..Default::default()
+        };
+        let f = lookup(&t).expect("found");
+        println!("{f:?}");
+        assert_eq!(f.title, "Dancing Through Fantasies");
+        assert_eq!(f.artist, "Wuthering Waves, jixwang & Vision Sound");
+        assert_eq!(f.album_artist, "Wuthering Waves");
+        assert_eq!(f.year, Some(2025));
+        assert!(f.cover_url.is_some_and(|u| u.contains("dzcdn")));
+    }
+
     #[test]
     fn only_accepts_real_matches() {
         let hit = |name: &str, by: &str, secs: f64| Hit {
@@ -664,6 +850,8 @@ mod tests {
             disc_number: Some(1),
             primary_genre_name: Some("Rock".into()),
             artwork_url100: Some("https://x/100x100bb.jpg".into()),
+            cover: None,
+            deezer_id: None,
         };
         let hits = [
             hit("Other Song", "ADA Band", 240.0),
@@ -717,7 +905,9 @@ mod fix_tests {
         assert!(found.first().is_some_and(|c| c.likely));
     }
 
-    /// Live: a song the catalogue doesn't have gets only related results, none marked as the song.
+    /// Live: a demo the iTunes search doesn't find gets only related results there. It came out on
+    /// The Black Parade's 20th anniversary edition (2026), which Deezer lists: that's the only
+    /// result marked as the song.
     #[test]
     #[ignore]
     fn unreleased_song_gets_related_results_only() {
@@ -733,7 +923,9 @@ mod fix_tests {
             for c in &found {
                 println!("{} | {} | {} | {:.0}s | likely {}", c.title, c.artist, c.album, c.duration, c.likely);
             }
-            assert!(found.iter().all(|c| c.artist == "My Chemical Romance" && !c.likely));
+            assert!(found.iter().all(|c| c.artist == "My Chemical Romance"));
+            assert!(found.iter().filter(|c| c.likely).all(|c| c.title.starts_with("My Way Home Is Through You")));
+            assert!(found[0].likely && (found[0].duration - 178.0).abs() < 2.0);
         }
     }
 }

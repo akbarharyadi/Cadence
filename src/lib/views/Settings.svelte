@@ -328,7 +328,7 @@
       <div>
         <h2 class="section-title">Fill in missing song info</h2>
         <p class="desc">
-          When a song with no tags plays (for example a file named “Artist - Title”), find it in the iTunes catalogue and save
+          When a song with no tags plays (for example a file named “Artist - Title”), find it in the iTunes or Deezer catalogue and save
           its title, artist, album, year and cover into the file. Only the file name is sent, and only matches with the same
           title and artist are used.
         </p>
