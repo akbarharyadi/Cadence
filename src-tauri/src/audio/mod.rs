@@ -833,8 +833,8 @@ impl Worker {
                 self.insert_items(at, items);
             }
             Cmd::ClearUpNext => {
-                if let Some(pi) = self.play_index {
-                    if self.queue.len() > pi + 1 {
+                if let Some(pi) = self.play_index
+                    && self.queue.len() > pi + 1 {
                         let prepared = self.next_is_prepared(pi);
                         self.queue.truncate(pi + 1);
                         self.unshuffled.clear();
@@ -843,7 +843,6 @@ impl Worker {
                             self.restart_here(None);
                         }
                     }
-                }
             }
             Cmd::Move { from, to } => {
                 let Some(pi) = self.play_index else { return };
@@ -1660,6 +1659,21 @@ fn map_channels(input: &[f32], from: usize, to: usize, out: &mut Vec<f32>) {
     }
 }
 
+/// Fisher–Yates with a small xorshift generator seeded from the clock (no crate needed for this).
+fn shuffle_in_place<T>(items: &mut [T]) {
+    let mut x = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+        | 1;
+    for i in (1..items.len()).rev() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        items.swap(i, (x % (i as u64 + 1)) as usize);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1770,20 +1784,5 @@ mod tests {
         w.handle(Cmd::Insert { at: 0, items: vec![item("a3")] });
         assert_eq!(ids(&w), ["a1", "a2", "a3", "b1", "b2"]);
         assert_eq!(w.play_index, Some(1));
-    }
-}
-
-/// Fisher–Yates with a small xorshift generator seeded from the clock (no crate needed for this).
-fn shuffle_in_place<T>(items: &mut [T]) {
-    let mut x = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9E37_79B9_7F4A_7C15)
-        | 1;
-    for i in (1..items.len()).rev() {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        items.swap(i, (x % (i as u64 + 1)) as usize);
     }
 }

@@ -103,7 +103,7 @@ impl Renderer {
             let lsb = 1.0 / 8_388_608.0;
             for (i, s) in out[music..].iter_mut().enumerate() {
                 if *s == 0.0 {
-                    *s = if (i / self.channels) % 2 == 0 { lsb } else { -lsb };
+                    *s = if (i / self.channels).is_multiple_of(2) { lsb } else { -lsb };
                 }
             }
         }

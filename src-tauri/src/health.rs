@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio::Source;
 use crate::ctx::Ctx;
-use crate::jobs::{Progress, background_pool, settling};
+use crate::jobs::{background_pool, settling};
 use crate::library::{Track, short_hash};
 use crate::state::match_key;
 

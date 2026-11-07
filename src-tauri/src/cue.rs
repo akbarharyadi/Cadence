@@ -55,11 +55,10 @@ pub fn decode(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.trim_start_matches('\u{feff}').to_string();
     }
-    if let Some(s) = encoding_rs::SHIFT_JIS.decode_without_bom_handling_and_without_replacement(bytes) {
-        if s.chars().any(|c| ('\u{3040}'..='\u{30ff}').contains(&c)) {
+    if let Some(s) = encoding_rs::SHIFT_JIS.decode_without_bom_handling_and_without_replacement(bytes)
+        && s.chars().any(|c| ('\u{3040}'..='\u{30ff}').contains(&c)) {
             return s.into_owned();
         }
-    }
     encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes).0.into_owned()
 }
 

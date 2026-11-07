@@ -144,8 +144,6 @@ fn tidy(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     fn r(lines: &[&str]) -> Vec<String> {
         super::lines(&lines.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     }

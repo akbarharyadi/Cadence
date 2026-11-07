@@ -408,12 +408,11 @@ pub fn shortlist(all: Vec<Candidate>, request: &str, h: &HistoryStats) -> Vec<Ca
     while out.len() < SHORTLIST {
         let mut any = false;
         for (_, v) in by_album.iter_mut() {
-            if out.len() < SHORTLIST {
-                if let Some(c) = v.pop_front() {
+            if out.len() < SHORTLIST
+                && let Some(c) = v.pop_front() {
                     out.push(c);
                     any = true;
                 }
-            }
         }
         if !any {
             break;

@@ -110,7 +110,7 @@ impl Crossfeed {
         if !self.settings.enabled || channels != 2 {
             return;
         }
-        for frame in samples.chunks_exact_mut(2) {
+        for frame in samples.as_chunks_mut::<2>().0 {
             let input = [frame[0] as f64, frame[1] as f64];
             for c in 0..2 {
                 self.lo[c] = self.a0_lo * input[c] + self.b1_lo * self.lo[c];

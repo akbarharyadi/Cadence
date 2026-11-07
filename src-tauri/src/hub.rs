@@ -144,11 +144,10 @@ fn status_hub(
                 .unwrap_or_default()
         };
         if let Some(event) = tracker.observe(&s, album_of) {
-            if scrobble::counts(event.listened, event.duration) {
-                if let Some(l) = listen_for(&event.track_id, event.at) {
+            if scrobble::counts(event.listened, event.duration)
+                && let Some(l) = listen_for(&event.track_id, event.at) {
                     let _ = scrobbler.send(scrobble::Job::Listened(l));
                 }
-            }
             history::push(&mut state.history.lock(), event);
             state.save_history();
             ctx.emit("history-changed", ());
@@ -175,11 +174,10 @@ fn status_hub(
             });
             on_song(now_playing.as_ref().map(|n| format!("{} — {}", n.title, n.artist)));
             let _ = media.send(media::Update::Track(now_playing));
-            if let Some(l) = current.as_deref().and_then(|id| listen_for(id, 0)) {
-                if s.playing {
+            if let Some(l) = current.as_deref().and_then(|id| listen_for(id, 0))
+                && s.playing {
                     let _ = scrobbler.send(scrobble::Job::NowPlaying(l));
                 }
-            }
             autotag::on_track_change(&ctx, shown_track.as_deref(), current.as_deref());
             shown_track = current;
             shown_at = std::time::Instant::now() - std::time::Duration::from_secs(60);

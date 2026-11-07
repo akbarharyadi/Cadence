@@ -137,11 +137,10 @@ pub fn parse_lrc(text: &str) -> Vec<Line> {
             continue;
         }
         let (mut text, words) = parse_words(rest);
-        if let Some(h) = header.take() {
-            if singer_prefix(&text).is_none() {
+        if let Some(h) = header.take()
+            && singer_prefix(&text).is_none() {
                 text = format!("{h} {text}");
             }
-        }
         for t in times {
             lines.push(Line {
                 time: t,
@@ -285,11 +284,10 @@ pub fn mark_singers(lines: &mut Vec<Line>) -> Vec<String> {
             let trimmed = line.text.trim();
             let prefix = trimmed[..trimmed.len() - rest.len()].trim().to_string();
             line.text = rest;
-            if let Some(w) = line.words.first_mut() {
-                if let Some(r) = w.text.trim_start().strip_prefix(&prefix) {
+            if let Some(w) = line.words.first_mut()
+                && let Some(r) = w.text.trim_start().strip_prefix(&prefix) {
                     w.text = r.trim_start_matches([':', '：', ' ']).to_string();
                 }
-            }
             line.words.retain(|w| !w.text.trim().is_empty());
         }
         line.singers = if line.text.trim().is_empty() { Vec::new() } else { current.clone() };
@@ -353,19 +351,17 @@ fn parse_timestamp(tag: &str) -> Option<f64> {
 /// Lyrics stored in the file or in a sidecar `.lrc` (no network).
 pub fn local(path: &Path) -> Option<Lyrics> {
     let lrc = path.with_extension("lrc");
-    if let Ok(text) = std::fs::read_to_string(&lrc) {
-        if let Some(l) = Lyrics::from_text(&text, "file") {
+    if let Ok(text) = std::fs::read_to_string(&lrc)
+        && let Some(l) = Lyrics::from_text(&text, "file") {
             return Some(l);
         }
-    }
     let tagged = lofty::read_from_path(path).ok()?;
     for tag in tagged.tags() {
         for key in [ItemKey::Lyrics, ItemKey::UnsyncLyrics] {
-            if let Some(text) = tag.get_string(key) {
-                if let Some(l) = Lyrics::from_text(text, "embedded") {
+            if let Some(text) = tag.get_string(key)
+                && let Some(l) = Lyrics::from_text(text, "embedded") {
                     return Some(l);
                 }
-            }
         }
     }
     None
@@ -750,15 +746,14 @@ pub fn online(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if let Ok(text) = std::fs::read_to_string(&cache_file) {
-        if let Ok(c) = serde_json::from_str::<Cached>(&text) {
+    if let Ok(text) = std::fs::read_to_string(&cache_file)
+        && let Ok(c) = serde_json::from_str::<Cached>(&text) {
             let fresh = c.v >= LOOKUP_VERSION && now.saturating_sub(c.checked) < RETRY_MISSING_DAYS * 86_400;
             let suitable = c.lyrics.as_ref().is_some_and(|l| c.picked || fits(title, &l.plain));
             if suitable || (c.lyrics.is_none() && fresh) {
                 return c.lyrics.ok_or("missing");
             }
         }
-    }
     let url = format!(
         "https://lrclib.net/api/get?artist_name={}&track_name={}&album_name={}&duration={}",
         urlencoding::encode(artist),

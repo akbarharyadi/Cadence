@@ -88,8 +88,8 @@ pub fn settings_for(t: &ToneSettings, gain_db: Option<f32>, smart: Option<&[f32;
             filters.push(shelf(FilterKind::HighShelf, TREBLE_SHELF_HZ, treble));
         }
     }
-    if t.smart {
-        if let Some(g) = smart {
+    if t.smart
+        && let Some(g) = smart {
             filters.extend(BANDS.iter().zip(g).filter(|(_, g)| g.abs() >= 0.1).map(|(f, g)| Filter {
                 kind: FilterKind::Peak,
                 freq: *f,
@@ -98,7 +98,6 @@ pub fn settings_for(t: &ToneSettings, gain_db: Option<f32>, smart: Option<&[f32;
                 enabled: true,
             }));
         }
-    }
     EqSettings {
         enabled: !filters.is_empty(),
         mode: EqMode::Parametric,

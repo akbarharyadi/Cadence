@@ -92,7 +92,7 @@ impl VocalCut {
             self.lp = Biquad::new(7_000.0, rate as f64, false);
         }
         let k = self.amount as f64;
-        for f in samples.chunks_exact_mut(2) {
+        for f in samples.as_chunks_mut::<2>().0 {
             let (l, r) = (f[0] as f64, f[1] as f64);
             let mid = 0.5 * (l + r);
             let side = 0.5 * (l - r);

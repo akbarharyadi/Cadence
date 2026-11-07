@@ -330,7 +330,7 @@ pub fn mixes(items: &[Item<'_>]) -> Vec<Mix> {
     let stats: Vec<(f32, f32)> = descriptors
         .iter()
         .map(|(f, _, _)| {
-            let m = (0..n).map(|i| f(i)).sum::<f32>() / n as f32;
+            let m = (0..n).map(f).sum::<f32>() / n as f32;
             let v = (0..n).map(|i| (f(i) - m).powi(2)).sum::<f32>() / n as f32;
             (m, v.sqrt().max(1e-6))
         })

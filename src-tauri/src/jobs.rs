@@ -137,12 +137,11 @@ pub fn start_scan(ctx: Ctx) {
             let mut lib = state.library.lock();
             // Loudness measured while this scan ran isn't in `previous`: keep it.
             for t in tracks.iter_mut().filter(|t| !t.gain_measured) {
-                if let Some(old) = lib.by_id.get(&t.id).map(|&i| &lib.snapshot.tracks[i]) {
-                    if old.gain_measured && old.size == t.size && old.modified == t.modified {
+                if let Some(old) = lib.by_id.get(&t.id).map(|&i| &lib.snapshot.tracks[i])
+                    && old.gain_measured && old.size == t.size && old.modified == t.modified {
                         t.gain = old.gain;
                         t.gain_measured = true;
                     }
-                }
             }
             lib.set_tracks(tracks, albums);
             lib.scanning = false;

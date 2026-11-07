@@ -182,7 +182,7 @@ pub fn scan(
         })
         .collect();
 
-    let mut tracks: Vec<Track> = jobs
+    let tracks: Vec<Track> = jobs
         .into_par_iter()
         .filter_map(|(path, old)| {
             let meta = std::fs::metadata(&path).ok()?;
@@ -194,7 +194,7 @@ pub fn scan(
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            if n % 25 == 0 || n == total {
+            if n.is_multiple_of(25) || n == total {
                 progress(n, total);
             }
             match old {
@@ -549,7 +549,7 @@ fn hsl_to_hex(h: f32, s: f32, l: f32) -> String {
 }
 
 pub fn khz(rate: u32) -> String {
-    if rate % 1000 == 0 {
+    if rate.is_multiple_of(1000) {
         format!("{} kHz", rate / 1000)
     } else {
         format!("{:.1} kHz", rate as f64 / 1000.0)

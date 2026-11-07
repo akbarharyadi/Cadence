@@ -291,11 +291,10 @@ pub fn read_json<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> T {
 /// Writes atomically (temp file + rename) so a crash never leaves a half-written file.
 pub fn write_json<T: Serialize>(path: &Path, value: &T) {
     let tmp = path.with_extension("tmp");
-    if let Ok(json) = serde_json::to_vec(value) {
-        if std::fs::write(&tmp, json).is_ok() {
+    if let Ok(json) = serde_json::to_vec(value)
+        && std::fs::write(&tmp, json).is_ok() {
             let _ = std::fs::rename(&tmp, path);
         }
-    }
 }
 
 #[cfg(test)]

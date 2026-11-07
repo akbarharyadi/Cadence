@@ -478,7 +478,7 @@ pub fn load(path: &Path, stamp: &str) -> Option<Voices> {
         return None;
     }
     let mut v = Voices::default();
-    for f in body.chunks_exact(2 + TONES) {
+    for f in body.as_chunks::<{ 2 + TONES }>().0 {
         v.pitch.push(f[0]);
         v.level.push(f[1]);
         let mut tone = [0i8; TONES];

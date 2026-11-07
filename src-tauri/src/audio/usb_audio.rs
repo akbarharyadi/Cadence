@@ -179,11 +179,11 @@ pub fn parse(desc: &[u8], high_speed: bool) -> Result<Parsed> {
 /// `rate` if the DAC has it (per the (min, max, step) ranges its clock gives), else the closest it has
 /// from the same family (44.1 or 48 kHz multiples), preferring the highest at or below `rate`.
 pub fn pick_rate(ranges: &[(u32, u32, u32)], rate: u32) -> u32 {
-    let has = |r: u32| ranges.iter().any(|&(min, max, step)| min <= r && r <= max && (step == 0 || (r - min) % step == 0));
+    let has = |r: u32| ranges.iter().any(|&(min, max, step)| min <= r && r <= max && (step == 0 || (r - min).is_multiple_of(step)));
     if ranges.is_empty() || has(rate) {
         return rate;
     }
-    let family = if rate % 11_025 == 0 { 44_100 } else { 48_000 };
+    let family = if rate.is_multiple_of(11_025) { 44_100 } else { 48_000 };
     let candidates: Vec<u32> = [1, 2, 4, 8, 16].iter().map(|m| family * m).filter(|&r| has(r)).collect();
     candidates
         .iter()

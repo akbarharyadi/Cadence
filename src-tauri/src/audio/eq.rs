@@ -101,7 +101,7 @@ impl EqSettings {
 
     pub fn is_transparent(&self) -> bool {
         !self.enabled
-            || (self.preamp == 0.0 && self.active_filters().iter().all(|f| is_identity(f)))
+            || (self.preamp == 0.0 && self.active_filters().iter().all(is_identity))
     }
 }
 
@@ -346,7 +346,7 @@ pub fn parse_parametric(text: &str) -> Result<(f64, Vec<Filter>), String> {
             continue;
         }
         let tokens: Vec<&str> = line.split_whitespace().collect();
-        let on = tokens.iter().any(|t| *t == "ON");
+        let on = tokens.contains(&"ON");
         let kind = tokens.iter().find_map(|t| match *t {
             "PK" | "PEQ" => Some(FilterKind::Peak),
             "LSC" | "LS" | "LSQ" => Some(FilterKind::LowShelf),
