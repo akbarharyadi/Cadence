@@ -20,8 +20,17 @@
   // Only a tagged song has a title of its own (an untagged one's is its file name).
   const canKeep = $derived(!!picked && !app.needsInfo(track) && plain(picked.title) !== plain(track.title));
   const keeping = $derived(canKeep && (keepTitle ?? (!!picked && cjk(track.title) !== cjk(picked.title))));
-  /** The other songs of its album (tagged ones: untagged songs share their folder's made-up album). */
-  const mates = $derived(app.needsInfo(track) ? [] : app.tracks.filter((t) => t.albumId === track.albumId && t.id !== track.id && !app.needsInfo(t)));
+  /** The folder an album's files are in: the song's, or the one above a disc folder (Album/CD2). */
+  const albumFolder = (path: string) => {
+    const dir = path.replace(/[\\/][^\\/]*$/, "");
+    return /[\\/](cd|disc|disk|dvd)[ ._-]*\d[^\\/]*$/i.test(dir) ? dir.replace(/[\\/][^\\/]*$/, "") : dir;
+  };
+  /** The other songs of its album in its folder (tagged ones: untagged songs share their folder's made-up album). */
+  const mates = $derived(
+    app.needsInfo(track)
+      ? []
+      : app.tracks.filter((t) => t.albumId === track.albumId && t.id !== track.id && !app.needsInfo(t) && albumFolder(t.path) === albumFolder(track.path)),
+  );
   let wholeAlbum = $state(true);
 
   async function search(q?: string) {

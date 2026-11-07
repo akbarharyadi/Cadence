@@ -705,9 +705,16 @@ pub fn save_choice(ctx: &Ctx, id: &str, mut choice: Candidate, keep_title: bool,
         if t.cue.is_some() {
             return Err("Songs from a single-file album (CUE sheet) take their info from the .cue file, which Cadence doesn't edit.".into());
         }
-        // Songs without tags share a made-up album (their folder): never theirs to change.
+        // Songs without tags share a made-up album (their folder): never theirs to change. And
+        // only songs in the album's own folder: a copy elsewhere is another file to leave alone.
         let mates: Vec<Track> = if whole_album && !untagged(&t) {
-            lib.snapshot.tracks.iter().filter(|m| m.album_id == t.album_id && m.id != t.id && !untagged(m)).cloned().collect()
+            let home = album_folder(&t.path);
+            lib.snapshot
+                .tracks
+                .iter()
+                .filter(|m| m.album_id == t.album_id && m.id != t.id && !untagged(m) && album_folder(&m.path) == home)
+                .cloned()
+                .collect()
         } else {
             Vec::new()
         };
@@ -835,6 +842,17 @@ pub fn save_choice(ctx: &Ctx, id: &str, mut choice: Candidate, keep_title: bool,
         crate::jobs::start_scan(ctx.clone());
     }
     Ok(Saved { later, others, matched })
+}
+
+/// The folder an album's files are in: the song's folder, or the one above a disc folder
+/// ("Album/CD2/04.flac" → "Album").
+fn album_folder(path: &str) -> PathBuf {
+    let dir = Path::new(path).parent().unwrap_or(Path::new(""));
+    let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_lowercase();
+    let disc = ["cd", "disc", "disk", "dvd"].iter().any(|p| {
+        name.strip_prefix(p).is_some_and(|rest| rest.trim_start_matches([' ', '-', '_', '.']).starts_with(|c: char| c.is_ascii_digit()))
+    });
+    if disc { dir.parent().unwrap_or(dir).to_path_buf() } else { dir.to_path_buf() }
 }
 
 /// Shows the new info in the library at once (the playing song's file isn't written yet), with
@@ -1219,6 +1237,15 @@ mod tests {
         // iTunes: an album's songs from the store it was found in.
         let songs = album_songs(&client, "itunes:US:1440833098");
         assert_eq!(songs.first().map(|s| (s.title.as_str(), s.track_no)), Some(("Love Me Do", Some(1))));
+    }
+
+    #[test]
+    fn album_folder_skips_disc_folders() {
+        assert_eq!(album_folder(r"D:\M\Album\01.flac"), Path::new(r"D:\M\Album"));
+        assert_eq!(album_folder(r"D:\M\Album\CD2\04.flac"), Path::new(r"D:\M\Album"));
+        assert_eq!(album_folder(r"D:\M\Album\Disc 1\04.flac"), Path::new(r"D:\M\Album"));
+        // Not a disc folder: a name that only starts like one.
+        assert_eq!(album_folder(r"D:\M\Album\Cdrama OST\04.flac"), Path::new(r"D:\M\Album\Cdrama OST"));
     }
 
     #[test]

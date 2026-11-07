@@ -10,7 +10,7 @@
     { label: "Albums", icon: "album", view: { name: "albums" } },
     { label: "Artists", icon: "artist", view: { name: "artists" } },
     { label: "Songs", icon: "song", view: { name: "songs" } },
-    { label: "Needs Attention", icon: "sparkle", view: { name: "attention" } },
+    { label: "Needs Attention", icon: "edit", view: { name: "attention" } },
     { label: "Favorites", icon: "heart", view: { name: "favorites" } },
     { label: "Library Health", icon: "shield", view: { name: "health" } },
   ];
