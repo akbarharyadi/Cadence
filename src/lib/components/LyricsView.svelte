@@ -274,6 +274,9 @@
   /** Songs this view has asked Cadence to listen to (once each, even if it failed). */
   const asked = new SvelteSet<string>();
   let voiceError = $state("");
+  /** Following failed because most lines aren't in the singing (voice/mod.rs: "Couldn’t find these
+   *  lyrics in the singing"): other lyrics are the fix, not another try. */
+  const lyricsMismatch = $derived(voiceError.includes("find these lyrics"));
   const listening = $derived(app.voice?.job?.trackId === songId ? app.voice.job : null);
   const waiting = $derived(asked.has(songId) && !listening && !lyrics?.voice && !voiceError && !!app.voice?.job);
 
@@ -622,6 +625,11 @@
             </span>
           {:else if waiting}
             <span class="chip busy" title="Cadence is listening to another song first"><Icon name="lyrics" size={14} />Waiting…</span>
+          {:else if voiceError && lyricsMismatch}
+            <!-- Trying again gives the same answer: the lyrics are the problem (often another version's). -->
+            <button class="chip warn" onclick={openSearch} title="Most of these lyrics aren’t in the singing: they may be another version’s (an acoustic or live one sings other lines). Search for this version’s lyrics.">
+              <Icon name="search" size={14} />Lyrics don’t match this version
+            </button>
           {:else if voiceError}
             <button class="chip warn" onclick={follow} title={voiceError}><Icon name="lyrics" size={14} />Couldn’t follow the singer: try again</button>
           {/if}

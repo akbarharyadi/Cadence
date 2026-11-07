@@ -97,6 +97,11 @@ pub struct Snapshot {
     pub albums: Vec<Album>,
 }
 
+/// A fingerprint of some bytes (to tell whether the library changed).
+pub fn short_hash_bytes(b: &[u8]) -> [u8; 32] {
+    *blake3::hash(b).as_bytes()
+}
+
 pub fn short_hash(s: &str) -> String {
     blake3::hash(s.as_bytes()).to_hex()[..16].to_string()
 }
@@ -116,6 +121,39 @@ pub fn is_audio(path: &Path) -> bool {
 
 pub fn is_cue(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("cue"))
+}
+
+/// aria2's control file, "<file or folder>.aria2", kept next to a download until it's complete.
+pub fn is_download_mark(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("aria2"))
+}
+
+/// A file still being downloaded: a partial-file name, or (`marks`: what aria2 control files are
+/// next to, see `is_download_mark`) inside or being a download aria2 hasn't finished. Such files
+/// change every minute while they download: reading them would rescan and re-measure them each time.
+pub fn is_downloading(path: &Path, marks: &std::collections::HashSet<PathBuf>) -> bool {
+    let partial = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        ["part", "partial", "crdownload", "download", "!qb", "aria2__temp"].contains(&e.to_ascii_lowercase().as_str())
+    });
+    partial || path.ancestors().any(|a| marks.contains(a))
+}
+
+/// What aria2 control files are next to: "D:\Music\Album.aria2" → "D:\Music\Album".
+pub fn download_marks(marks: impl IntoIterator<Item = PathBuf>) -> std::collections::HashSet<PathBuf> {
+    marks.into_iter().map(|m| m.with_extension("")).collect()
+}
+
+/// Is `path` part of a download in progress? For a single path (the folder watcher): looks for an
+/// aria2 control file next to it or next to one of its folders, up to `root`.
+pub fn downloading_now(path: &Path, root: &Path) -> bool {
+    if is_downloading(path, &Default::default()) {
+        return true;
+    }
+    path.ancestors().take_while(|a| a.starts_with(root) && *a != root).any(|a| {
+        let mut mark = a.as_os_str().to_owned();
+        mark.push(".aria2");
+        Path::new(&mark).exists()
+    })
 }
 
 /// A folder that lists no music although it had some: is it just unreadable right now (no
@@ -147,13 +185,18 @@ pub fn scan(
     let mut kept: Vec<Track> = Vec::new();
     let mut previous = previous;
     for folder in folders {
-        let (found, found_cues): (Vec<PathBuf>, Vec<PathBuf>) = walkdir::WalkDir::new(folder)
+        let listed: Vec<PathBuf> = walkdir::WalkDir::new(folder)
             .follow_links(true)
             .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file() && (is_audio(e.path()) || is_cue(e.path())))
+            .filter(|e| e.file_type().is_file() && (is_audio(e.path()) || is_cue(e.path()) || is_download_mark(e.path())))
             .map(|e| e.into_path())
-            .partition(|p| is_audio(p));
+            .collect();
+        // Songs still downloading are left out until they're complete (see `is_downloading`).
+        let (marks, listed): (Vec<PathBuf>, Vec<PathBuf>) = listed.into_iter().partition(|p| is_download_mark(p));
+        let marks = download_marks(marks);
+        let (found, found_cues): (Vec<PathBuf>, Vec<PathBuf>) =
+            listed.into_iter().filter(|p| !is_downloading(p, &marks)).partition(|p| is_audio(p));
         cues.extend(found_cues);
         if found.is_empty() {
             let (mine, rest): (Vec<Track>, Vec<Track>) =
@@ -216,24 +259,13 @@ pub fn scan(
         started.elapsed() - walked,
         reread.into_inner()
     );
+    let checked = started.elapsed();
     let mut tracks = crate::cue::apply(tracks, &cues);
+    let cued = started.elapsed();
     tracks.extend(kept);
-    tracks.sort_by(|a, b| {
-        (
-            a.album_artist.to_lowercase(),
-            a.album.to_lowercase(),
-            a.disc_no,
-            a.track_no,
-            a.title.to_lowercase(),
-        )
-            .cmp(&(
-                b.album_artist.to_lowercase(),
-                b.album.to_lowercase(),
-                b.disc_no,
-                b.track_no,
-                b.title.to_lowercase(),
-            ))
-    });
+    // Each song's key is made once (comparing with fresh lowercase copies made ~550,000 strings).
+    tracks.sort_by_cached_key(|t| (t.album_artist.to_lowercase(), t.album.to_lowercase(), t.disc_no, t.track_no, t.title.to_lowercase()));
+    log::info!("cue sheets applied in {:?}, sorted in {:?}", cued - checked, started.elapsed() - cued);
     tracks
 }
 
@@ -380,11 +412,16 @@ pub fn build_albums(tracks: &mut [Track], art_dir: &Path) -> Vec<Album> {
             let mut list = list.clone();
             list.sort_by_key(|t| (t.disc_no.unwrap_or(1), t.track_no.unwrap_or(u32::MAX)));
             let first = list[0];
+            let cover_started = std::time::Instant::now();
             let (art, art_small) = ensure_art(id, &list, art_dir);
             let (accent, tint) = art_small
                 .as_deref()
                 .and_then(|p| saved_colors(id, Path::new(p), art_dir))
                 .unzip();
+            let cover_time = cover_started.elapsed();
+            if cover_time > std::time::Duration::from_millis(100) {
+                log::info!("album {id} ({}) took {cover_time:?} for its cover", first.album);
+            }
             let max_rate = list.iter().filter_map(|t| t.sample_rate).max();
             let max_bits = list.iter().filter_map(|t| t.bit_depth).max();
             let codec = first.codec.clone();
@@ -579,7 +616,13 @@ fn ensure_art(
         let _ = std::fs::write(&none, key);
         return (None, None);
     };
-    write_art(album_id, &bytes, art_dir)
+    let art = write_art(album_id, &bytes, art_dir);
+    // A cover that can't be decoded counts as none: otherwise every scan read the album's files
+    // again for it (MISIA's "Life is going on and on" took 6 s, once a minute while a download ran).
+    if art.0.is_none() {
+        let _ = std::fs::write(&none, key);
+    }
+    art
 }
 
 /// What a cover search depends on: the album's songs and its folder (where a cover image may be added).
@@ -646,8 +689,45 @@ pub fn write_art(album_id: &str, bytes: &[u8], art_dir: &Path) -> (Option<String
     }
 }
 
+/// Whether a FLAC file's metadata blocks end as they should (the last one is marked). Read from the
+/// block headers alone. An unfinished download can be zeros from some point on: its chain never
+/// ends, and a tag reader walks millions of empty "blocks" through the file (8 s for 40 MB).
+/// Other files: true.
+fn flac_metadata_ok(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    if !path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("flac")) {
+        return true;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let mut head = [0u8; 4];
+    if f.read_exact(&mut head).is_err() || &head != b"fLaC" {
+        return true; // Not plain FLAC (an ID3 tag in front, …): the tag reader's business.
+    }
+    for i in 0..256 {
+        if f.read_exact(&mut head).is_err() {
+            return false;
+        }
+        let (last, kind, size) = (head[0] & 0x80 != 0, head[0] & 0x7F, u32::from_be_bytes([0, head[1], head[2], head[3]]));
+        // Exactly one STREAMINFO, and it comes first.
+        if (kind == 0) != (i == 0) {
+            return false;
+        }
+        if last {
+            return true;
+        }
+        if f.seek(SeekFrom::Current(size as i64)).is_err() {
+            return false;
+        }
+    }
+    false
+}
+
 fn embedded_cover(tracks: &[&Track]) -> Option<Vec<u8>> {
     for t in tracks.iter().filter(|t| t.has_embedded_art).take(3) {
+        if !flac_metadata_ok(Path::new(&t.path)) {
+            log::warn!("{} looks unfinished (its FLAC metadata doesn't end): not reading its cover", t.path);
+            continue;
+        }
         let Ok(tagged) = lofty::read_from_path(&t.path) else {
             continue;
         };
@@ -725,6 +805,88 @@ mod scan_tests {
 
     fn song(path: &Path) -> Track {
         Track { id: "x".into(), path: path.to_string_lossy().into_owned(), gain_measured: true, ..Default::default() }
+    }
+
+    /// Every FLAC under a folder passes the metadata check unless a tag reader can't read it either
+    /// (no good file is taken for unfinished). Read-only:
+    /// `CADENCE_FLAC_DIR=dir cargo test --release --lib flac_check -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn flac_check_passes_good_files() {
+        let Ok(dir) = std::env::var("CADENCE_FLAC_DIR") else { return };
+        let (mut good, mut flagged) = (0, Vec::new());
+        let started = std::time::Instant::now();
+        for e in walkdir::WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()) {
+            let p = e.path();
+            if !p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("flac")) {
+                continue;
+            }
+            if flac_metadata_ok(p) {
+                good += 1;
+            } else {
+                flagged.push(p.display().to_string());
+            }
+        }
+        println!("{good} pass, {} flagged, in {:?}", flagged.len(), started.elapsed());
+        for f in &flagged {
+            println!("  flagged: {f}");
+        }
+    }
+
+    /// A song whose embedded cover can't be decoded: the second scan doesn't look for it again.
+    /// `CADENCE_BAD_COVER_FILE=path cargo test --lib bad_cover -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bad_cover_is_searched_once() {
+        let Ok(src) = std::env::var("CADENCE_BAD_COVER_FILE") else { return };
+        let root = std::env::temp_dir().join("cadence-bad-cover-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let music = root.join("album");
+        let art = root.join("art");
+        std::fs::create_dir_all(&music).unwrap();
+        let copy = music.join("song.flac");
+        std::fs::copy(&src, &copy).unwrap();
+        let mut t = read_track(&copy).expect("readable");
+        println!("has_embedded_art={} album_id={}", t.has_embedded_art, t.album_id);
+        let started = std::time::Instant::now();
+        println!("flac_metadata_ok: {} in {:?}", flac_metadata_ok(&copy), started.elapsed());
+        // The folder's cover is used instead.
+        std::fs::copy(Path::new(&src).with_file_name("cover.jpg"), music.join("cover.jpg")).ok();
+        for round in 1..=2 {
+            let started = std::time::Instant::now();
+            let albums = build_albums(std::slice::from_mut(&mut t), &art);
+            let names: Vec<String> = std::fs::read_dir(&art).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            println!("round {round}: {:?}, art={:?}, files {names:?}", started.elapsed(), albums[0].art);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn leaves_out_downloads_in_progress() {
+        let root = std::env::temp_dir().join("cadence-download-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let album = root.join("Album [FLAC]");
+        std::fs::create_dir_all(&album).unwrap();
+        std::fs::write(album.join("01.flac"), b"x").unwrap();
+        std::fs::write(root.join("single.flac"), b"x").unwrap();
+        std::fs::write(root.join("done.flac"), b"x").unwrap();
+        // aria2 is downloading the album folder and one file.
+        std::fs::write(root.join("Album [FLAC].aria2"), b"x").unwrap();
+        std::fs::write(root.join("single.flac.aria2"), b"x").unwrap();
+        let marks = download_marks([root.join("Album [FLAC].aria2"), root.join("single.flac.aria2")]);
+        assert!(is_downloading(&album.join("01.flac"), &marks));
+        assert!(is_downloading(&root.join("single.flac"), &marks));
+        assert!(!is_downloading(&root.join("done.flac"), &marks));
+        assert!(is_downloading(&root.join("other.flac.part"), &marks));
+        // The watcher's single-path check finds the same, up to the music folder.
+        assert!(downloading_now(&album.join("01.flac"), &root));
+        assert!(downloading_now(&album, &root));
+        assert!(downloading_now(&root.join("single.flac"), &root));
+        assert!(!downloading_now(&root.join("done.flac"), &root));
+        // Done: aria2 deletes its control file.
+        std::fs::remove_file(root.join("Album [FLAC].aria2")).unwrap();
+        assert!(!downloading_now(&album.join("01.flac"), &root));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

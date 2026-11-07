@@ -122,17 +122,27 @@ pub fn start_scan(ctx: Ctx) {
             previous.iter().filter(|t| ids.contains(&t.id)).cloned().collect()
         };
         let started = std::time::Instant::now();
+        // Progress at most 5 times a second (it came every 25 files: ~280 sidebar updates a scan).
+        let last_progress = std::sync::atomic::AtomicU64::new(0);
         let mut tracks = library::scan(&folders, previous, |done, total| {
-            ctx.emit("library-progress", Progress { done, total });
+            let now = started.elapsed().as_millis() as u64;
+            let last = last_progress.load(Ordering::Relaxed);
+            if done == total || now >= last + 200 && last_progress.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                ctx.emit("library-progress", Progress { done, total });
+            }
         });
+        let read = started.elapsed();
         crate::tagedit::show_held(&state.data_dir, &mut tracks);
         let albums = library::build_albums(&mut tracks, &state.art_dir());
         log::info!(
-            "scanned {} tracks, {} albums in {:?}",
+            "scanned {} tracks, {} albums in {:?} (files {:?}, albums {:?})",
             tracks.len(),
             albums.len(),
-            started.elapsed()
+            started.elapsed(),
+            read,
+            started.elapsed() - read
         );
+        let unchanged;
         let again = {
             let mut lib = state.library.lock();
             // Loudness measured while this scan ran isn't in `previous`: keep it.
@@ -143,7 +153,12 @@ pub fn start_scan(ctx: Ctx) {
                         t.gain_measured = true;
                     }
             }
-            lib.set_tracks(tracks, albums);
+            // Nothing changed (a rescan found the same songs): the window keeps what it has instead
+            // of reloading the whole library (4 MB for 7,000 songs) and redrawing every list.
+            let fingerprint = |s: &library::Snapshot| serde_json::to_vec(s).map(|b| crate::library::short_hash_bytes(&b)).ok();
+            let new = library::Snapshot { tracks, albums };
+            unchanged = fingerprint(&new).is_some_and(|f| fingerprint(&lib.snapshot) == Some(f));
+            lib.set_tracks(new.tracks, new.albums);
             lib.scanning = false;
             std::mem::take(&mut lib.rescan_pending)
         };
@@ -160,8 +175,13 @@ pub fn start_scan(ctx: Ctx) {
             log::info!("{relinked} rated or favourite songs moved; their marks follow them");
             state.save_marks();
         }
-        state.save_library();
-        ctx.emit("library-changed", ());
+        if unchanged && found == 0 && relinked == 0 {
+            log::info!("rescan found no changes");
+            ctx.emit("library-scanned", ());
+        } else {
+            state.save_library();
+            ctx.emit("library-changed", ());
+        }
         if WATCH_AFTER_SCAN.swap(false, Ordering::SeqCst) {
             watch_folders(ctx.clone());
         }
@@ -355,6 +375,35 @@ pub fn watch_folders(ctx: Ctx) {
     });
 }
 
+/// Watched rescans come at most this often: a download finishing a song every few seconds would
+/// otherwise rescan (and reload the window's library) every few seconds.
+const WATCH_RESCAN_GAP: Duration = Duration::from_secs(15);
+static WATCH_RESCAN_WAITING: AtomicBool = AtomicBool::new(false);
+static LAST_WATCH_RESCAN: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// The music folders changed: rescan now, or once the gap since the last watched rescan is over
+/// (one rescan then covers every change in between).
+fn scan_for_changes(ctx: Ctx) {
+    if WATCH_RESCAN_WAITING.swap(true, Ordering::SeqCst) {
+        return; // A rescan is already waiting; it will see this change too.
+    }
+    std::thread::spawn(move || {
+        let wait = LAST_WATCH_RESCAN
+            .lock()
+            .unwrap()
+            .map_or(Duration::ZERO, |t| WATCH_RESCAN_GAP.saturating_sub(t.elapsed()));
+        if !wait.is_zero() {
+            log::info!("music folders changed; rescanning in {:.0} s", wait.as_secs_f32());
+            std::thread::sleep(wait);
+        } else {
+            log::info!("music folders changed; rescanning");
+        }
+        *LAST_WATCH_RESCAN.lock().unwrap() = Some(std::time::Instant::now());
+        WATCH_RESCAN_WAITING.store(false, Ordering::SeqCst);
+        start_scan(ctx);
+    });
+}
+
 /// A watcher on every music folder (None without folders), rescanning when they change.
 fn make_watcher(ctx: &Ctx) -> Option<FolderWatcher> {
     let state = ctx.state.clone();
@@ -365,6 +414,7 @@ fn make_watcher(ctx: &Ctx) -> Option<FolderWatcher> {
         return None;
     }
     let handle = ctx.clone();
+    let roots: Vec<std::path::PathBuf> = folders.iter().map(std::path::PathBuf::from).collect();
     let debouncer = new_debouncer(
         Duration::from_secs(3),
         None,
@@ -378,13 +428,21 @@ fn make_watcher(ctx: &Ctx) -> Option<FolderWatcher> {
                     notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Remove(_)
                 ) && !matches!(e.kind, notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_)))
             }).any(|e| {
-                e.paths
-                    .iter()
-                    .any(|p| p.is_dir() || crate::library::is_audio(p) || crate::library::is_cue(p) || p.extension().is_none())
+                e.paths.iter().any(|p| {
+                    // A download finished (aria2 deletes its control file): its songs are complete now.
+                    // (Saving its progress, aria2 also deletes it and renames a new one into place,
+                    // so it only counts when it's still gone once the events have settled.)
+                    if crate::library::is_download_mark(p) {
+                        return matches!(e.kind, notify::EventKind::Remove(_)) && !p.exists();
+                    }
+                    let music = p.is_dir() || crate::library::is_audio(p) || crate::library::is_cue(p) || p.extension().is_none();
+                    // A download in progress writes its files every minute: not a change to rescan for.
+                    let root = roots.iter().find(|r| p.starts_with(r));
+                    music && !root.is_some_and(|r| crate::library::downloading_now(p, r))
+                })
             });
             if relevant {
-                log::info!("music folders changed; rescanning");
-                start_scan(handle.clone());
+                scan_for_changes(handle.clone());
             }
         },
     );

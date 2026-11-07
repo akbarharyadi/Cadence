@@ -582,6 +582,8 @@ class AppState {
         await this.dropOwnedSuggestions();
       }),
       listen<{ done: number; total: number }>("library-progress", (e) => (this.scan = e.payload)),
+      // A rescan that found nothing new: nothing to reload.
+      listen("library-scanned", () => (this.scan = null)),
       listen("history-changed", async () => (this.listening = await api.history())),
       listen("marks-changed", () => this.loadMarks()),
       listen<HealthProgress>("health-progress", (e) => (this.healthJob = e.payload.running ? e.payload : null)),

@@ -23,6 +23,28 @@
   };
   const sorted = $derived([...app.albums].sort(cmp[recent ? "added" : sort]));
 
+  // A thousand album cards take ~100 ms to lay out: the first screens appear at once and the rest
+  // are added a few hundred at a time while the browser is idle (no change to how it looks).
+  const FIRST = 120;
+  const STEP = 240;
+  // WebKit (macOS, Linux) has no requestIdleCallback.
+  const idle = (f: () => void) =>
+    typeof requestIdleCallback === "function" ? requestIdleCallback(f, { timeout: 200 }) : (setTimeout(f, 30) as unknown as number);
+  const cancelIdle = (h: number) => (typeof cancelIdleCallback === "function" ? cancelIdleCallback(h) : clearTimeout(h));
+  let limit = $state(FIRST);
+  $effect(() => {
+    const total = sorted.length;
+    limit = FIRST;
+    let handle = 0;
+    const more = () => {
+      limit = Math.min(total, limit + STEP);
+      if (limit < total) handle = idle(more);
+    };
+    if (total > FIRST) handle = idle(more);
+    return () => cancelIdle(handle);
+  });
+  const shown = $derived(sorted.length > limit ? sorted.slice(0, limit) : sorted);
+
   /** Recently Added is grouped by when the albums arrived. */
   const groups = $derived.by(() => {
     if (!recent) return [];
@@ -36,7 +58,7 @@
       return new Date(t * 1000).toLocaleDateString(undefined, { month: "long", year: "numeric" });
     };
     const out: { label: string; albums: Album[] }[] = [];
-    for (const a of sorted) {
+    for (const a of shown) {
       const l = label(a.added);
       if (out.at(-1)?.label === l) out.at(-1)!.albums.push(a);
       else out.push({ label: l, albums: [a] });
@@ -65,7 +87,7 @@
     {/each}
   {:else}
     <div class="grid">
-      {#each sorted as album (album.id)}<AlbumCard {album} />{/each}
+      {#each shown as album (album.id)}<AlbumCard {album} />{/each}
     </div>
   {/if}
 </div>
