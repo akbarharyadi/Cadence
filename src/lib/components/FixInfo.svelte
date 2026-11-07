@@ -1,6 +1,6 @@
 <script lang="ts">
   // Fix Song Info: find the song in the iTunes and Deezer catalogues and pick the right match; its title,
-  // artist, album, year and cover are written into the file.
+  // artist, album, year and cover are written into the file (and the album's into its other songs).
   import { api, formatTime, type SongInfo } from "#lib/api.js";
   import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
@@ -20,6 +20,9 @@
   // Only a tagged song has a title of its own (an untagged one's is its file name).
   const canKeep = $derived(!!picked && !app.needsInfo(track) && plain(picked.title) !== plain(track.title));
   const keeping = $derived(canKeep && (keepTitle ?? (!!picked && cjk(track.title) !== cjk(picked.title))));
+  /** The other songs of its album (tagged ones: untagged songs share their folder's made-up album). */
+  const mates = $derived(app.needsInfo(track) ? [] : app.tracks.filter((t) => t.albumId === track.albumId && t.id !== track.id && !app.needsInfo(t)));
+  let wholeAlbum = $state(true);
 
   async function search(q?: string) {
     busy = "search";
@@ -44,9 +47,11 @@
     busy = "save";
     error = "";
     try {
-      const info = { ...($state.snapshot(picked) as SongInfo), ...(keeping ? { title: track.title } : {}) };
-      const later = await api.saveSongInfo(track.id, info);
-      app.showToast(later ? `Saved. The file and cover are updated when “${info.title}” finishes.` : `Saved “${info.title}”`);
+      const title = keeping ? track.title : picked.title;
+      const r = await api.saveSongInfo(track.id, $state.snapshot(picked) as SongInfo, keeping, wholeAlbum && mates.length > 0);
+      const songs = (n: number) => `${n} ${n === 1 ? "song" : "songs"}`;
+      const album = r.others ? ` and ${songs(r.others)} of its album${r.matched < r.others ? ` (${songs(r.others - r.matched)} not on the catalogue's album got only the album's info)` : ""}` : "";
+      app.showToast(r.later ? `Saved “${title}”${album}. Its file is updated when it finishes.` : `Saved “${title}”${album}`);
       close();
     } catch (e) {
       error = String(e);
@@ -99,6 +104,12 @@
     <label class="keep">
       <input type="checkbox" checked={keeping} onchange={(e) => (keepTitle = e.currentTarget.checked)} />
       <span>Keep my title <b>{track.title}</b> <span class="secondary">instead of “{picked.title}”</span></span>
+    </label>
+  {/if}
+  {#if picked && mates.length}
+    <label class="keep">
+      <input type="checkbox" bind:checked={wholeAlbum} />
+      <span>Also update the other {mates.length === 1 ? "song" : `${mates.length} songs`} on the album <b>{track.album}</b> <span class="secondary">with this album, year and cover</span></span>
     </label>
   {/if}
 

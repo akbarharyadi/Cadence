@@ -400,8 +400,9 @@ export const api = {
   disconnectListenBrainz: () => invoke<void>("disconnect_listenbrainz"),
   setLyricsOnline: (enabled: boolean) => invoke<void>("set_lyrics_online", { enabled }),
   findSongInfo: (id: string, query?: string) => invoke<{ term: string; results: SongInfo[] }>("find_song_info", { id, query: query ?? null }),
-  /** True when the song is playing: its file is written when it finishes. */
-  saveSongInfo: (id: string, info: SongInfo) => invoke<boolean>("save_song_info", { id, info }),
+  /** keepTitle: the song's own title instead of the match's; wholeAlbum: the album's info for its other songs too. */
+  saveSongInfo: (id: string, info: SongInfo, keepTitle: boolean, wholeAlbum: boolean) =>
+    invoke<SongInfoSaved>("save_song_info", { id, info, keepTitle, wholeAlbum }),
   findCovers: (albumId: string, query?: string) => invoke<{ term: string; results: CoverResult[] }>("find_covers", { albumId, query: query ?? null }),
   setAlbumCover: (albumId: string, source: { kind: "url"; url: string } | { kind: "file"; path: string }) =>
     invoke<{ art: string; artSmall: string; later: number; failed: number }>("set_album_cover", { albumId, source }),
@@ -577,3 +578,15 @@ export interface CoverResult {
   /** Same album title and artist. */
   likely: boolean;
 }
+  /** Its album in that catalogue, for the album's other songs and genre. */
+  albumRef: string | null;
+}
+
+/** What Fix Song Info saved. */
+export interface SongInfoSaved {
+  /** The song is playing: its file is written when it finishes. */
+  later: boolean;
+  /** Other songs of its album given the album's info. */
+  others: number;
+  /** Of those, the ones found on the catalogue's album (own title, artist and track number). */
+  matched: number;

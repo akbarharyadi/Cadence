@@ -1099,9 +1099,16 @@ pub fn find_song_info(ctx: &Ctx, id: String, query: Option<String>) -> Result<So
     })()
 }
 
-/// Saves the match picked in Fix Song Info; true when the file is written after the song ends.
-pub fn save_song_info(ctx: &Ctx, id: String, info: crate::autotag::Candidate) -> Result<bool, String> {
-    (move || crate::autotag::save_choice(ctx, &id, info))()
+/// Saves the match picked in Fix Song Info (keeping the song's own title, and for the other songs
+/// of its album too, when asked).
+pub fn save_song_info(
+    ctx: &Ctx,
+    id: String,
+    info: crate::autotag::Candidate,
+    keep_title: bool,
+    whole_album: bool,
+) -> Result<crate::autotag::Saved, String> {
+    (move || crate::autotag::save_choice(ctx, &id, info, keep_title, whole_album))()
 }
 
 /// Lyrics lines in Latin letters (Japanese romaji, Chinese pinyin, Korean); empty for lines
@@ -1639,7 +1646,7 @@ macro_rules! cadence_commands {
             fallible disconnect_listenbrainz() -> ();
             blocking write_tags(ids: Vec<String>, changes: $crate::tagedit::TagChanges) -> $crate::api::TagsSaved;
             blocking find_song_info(id: String, query: Option<String>) -> $crate::api::SongInfoResults;
-            blocking save_song_info(id: String, info: $crate::autotag::Candidate) -> bool;
+            blocking save_song_info(id: String, info: $crate::autotag::Candidate, keep_title: bool, whole_album: bool) -> $crate::autotag::Saved;
             blocking romanize_lyrics(lines: Vec<String>) -> Vec<String>;
             blocking find_covers(album_id: String, query: Option<String>) -> $crate::api::CoverResults;
             blocking set_album_cover(album_id: String, source: $crate::artists::Source) -> $crate::covers::Changed;

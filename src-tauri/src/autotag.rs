@@ -210,6 +210,10 @@ pub struct Candidate {
     /// The catalogue it's from: "iTunes" or "Deezer".
     #[serde(default)]
     pub source: String,
+    /// Its album in that catalogue ("deezer:696220481", "itunes:US:1440833098"), for the other
+    /// songs of the album and its genre.
+    #[serde(default)]
+    pub album_ref: Option<String>,
 }
 
 impl From<Candidate> for Found {
@@ -382,9 +386,7 @@ struct Want {
 impl Want {
     /// A live, instrumental, remix… recording, unless the song's own title says so.
     fn other_version(&self, c: &Candidate) -> bool {
-        let label = format!("{} {}", c.title, c.album).to_lowercase();
-        let title = self.title.to_lowercase();
-        VERSIONS.iter().any(|v| label.contains(v) && !title.contains(v))
+        other_version(&format!("{} {}", c.title, c.album), &self.title)
     }
 
     /// The song under another name: titles in different scripts (悠忽舞于梦中 is listed as
@@ -495,6 +497,7 @@ fn itunes_candidates(client: &reqwest::blocking::Client, term: &str, country: &s
                     duration: h.track_time_millis.unwrap_or(0.0) / 1000.0,
                     likely: false,
                     source: "iTunes".into(),
+                    album_ref: h.collection_id.map(|id| format!("itunes:{country}:{id}")),
                 })
             })
             .collect(),
@@ -549,6 +552,7 @@ fn deezer_candidates(client: &reqwest::blocking::Client, term: &str, limit: u32)
                         duration: h["duration"].as_f64().unwrap_or(0.0),
                         likely: false,
                         source: "Deezer".into(),
+                        album_ref: h["album"]["id"].as_u64().map(|id| format!("deezer:{id}")),
                     },
                     id,
                 ))
@@ -564,6 +568,7 @@ struct DeezerMore {
     year: Option<u32>,
     track_no: Option<u32>,
     disc_no: Option<u32>,
+    album_id: Option<u64>,
 }
 
 /// Deezer's page for song `id`: the search lists only the main artist and no date.
@@ -579,64 +584,255 @@ fn deezer_details(client: &reqwest::blocking::Client, id: u64) -> Option<DeezerM
         year: v["release_date"].as_str().and_then(|d| d.get(..4)?.parse().ok()).filter(|&y| y > 0),
         track_no: v["track_position"].as_u64().map(|n| n as u32).filter(|&n| n > 0),
         disc_no: v["disk_number"].as_u64().map(|n| n as u32).filter(|&n| n > 0),
+        album_id: v["album"]["id"].as_u64(),
     })
 }
 
-/// Saves the info the user picked. A playing song shows it at once and its file is written
-/// when it stops (returns true then).
-pub fn save_choice(ctx: &Ctx, id: &str, choice: Candidate) -> Result<bool, String> {
+/// The album's genre: Deezer's song search and pages don't give one, its album page does.
+fn album_genre(client: &reqwest::blocking::Client, album_ref: &str) -> Option<String> {
+    let id = album_ref.strip_prefix("deezer:")?;
+    let v: serde_json::Value = client.get(format!("https://api.deezer.com/album/{id}")).send().ok()?.json().ok()?;
+    v["genres"]["data"][0]["name"].as_str().filter(|g| !g.is_empty()).map(str::to_string)
+}
+
+/// A song in an album's track list.
+struct AlbumSong {
+    title: String,
+    artist: String,
+    duration: f64,
+    track_no: Option<u32>,
+    disc_no: Option<u32>,
+    deezer_id: Option<u64>,
+}
+
+/// The songs of the album `album_ref` names, in order.
+fn album_songs(client: &reqwest::blocking::Client, album_ref: &str) -> Vec<AlbumSong> {
+    if let Some(id) = album_ref.strip_prefix("deezer:") {
+        let url = format!("https://api.deezer.com/album/{id}/tracks?limit=300");
+        let Some(v) = client.get(url).send().ok().and_then(|r| r.json::<serde_json::Value>().ok()) else { return Vec::new() };
+        return v["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| {
+                Some(AlbumSong {
+                    title: t["title"].as_str()?.to_string(),
+                    artist: t["artist"]["name"].as_str().unwrap_or("").to_string(),
+                    duration: t["duration"].as_f64().unwrap_or(0.0),
+                    track_no: t["track_position"].as_u64().map(|n| n as u32).filter(|&n| n > 0),
+                    disc_no: t["disk_number"].as_u64().map(|n| n as u32).filter(|&n| n > 0),
+                    deezer_id: t["id"].as_u64(),
+                })
+            })
+            .collect();
+    }
+    let Some((country, id)) = album_ref.strip_prefix("itunes:").and_then(|r| r.split_once(':')) else { return Vec::new() };
+    let url = format!("https://itunes.apple.com/lookup?id={id}&entity=song&limit=300&country={country}");
+    let Some(s) = client.get(url).send().ok().and_then(|r| r.json::<Search>().ok()) else { return Vec::new() };
+    s.results
+        .into_iter()
+        .filter_map(|h| {
+            Some(AlbumSong {
+                title: h.track_name?,
+                artist: h.artist_name.unwrap_or_default(),
+                duration: h.track_time_millis.unwrap_or(0.0) / 1000.0,
+                track_no: h.track_number,
+                disc_no: h.disc_number,
+                deezer_id: None,
+            })
+        })
+        .collect()
+}
+
+/// Which of the album's songs (not yet `used`) is `t`: the same length (within 3 s) and the same
+/// kind of recording (the instrumental for 伴奏), then the same track number, then the closest.
+fn match_song(t: &Track, songs: &[AlbumSong], used: &HashSet<usize>) -> Option<usize> {
+    let kinds = version_kinds(&t.title);
+    songs
+        .iter()
+        .enumerate()
+        .filter(|(i, s)| !used.contains(i) && (s.duration - t.duration).abs() < 3.0 && version_kinds(&s.title) == kinds)
+        .min_by(|(_, a), (_, b)| {
+            let key = |s: &AlbumSong| ((t.track_no.is_some() && s.track_no != t.track_no) as u8, (s.duration - t.duration).abs());
+            key(a).partial_cmp(&key(b)).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i)
+}
+
+/// What Fix Song Info saved.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Saved {
+    /// The song is playing: its file is written when it ends.
+    pub later: bool,
+    /// Other songs of its album given the album's info.
+    pub others: usize,
+    /// Of those, the ones found on the album, which got their own title, artist and track number.
+    pub matched: usize,
+}
+
+/// Saves the info the user picked: its title too, or the song's own (`keep_title`); and with
+/// `whole_album`, the album, year, genre and cover for the other songs of its album, each matched
+/// to its place on the catalogue's album where it can be. Files are written at once, except the
+/// playing song's, which is written when it ends (its new info shows at once).
+pub fn save_choice(ctx: &Ctx, id: &str, mut choice: Candidate, keep_title: bool, whole_album: bool) -> Result<Saved, String> {
     let state = ctx.state.clone();
-    let path = {
-        let mut lib = state.library.lock();
-        let i = *lib.by_id.get(id).ok_or("Unknown song")?;
-        let t = &mut lib.snapshot.tracks[i];
-        t.title = choice.title.clone();
-        t.artist = choice.artist.clone();
-        t.album = choice.album.clone();
-        t.album_artist = choice.album_artist.clone();
-        t.year = choice.year;
-        PathBuf::from(&t.path)
+    let client = crate::net::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .user_agent(concat!("Cadence/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let (track, mates) = {
+        let lib = state.library.lock();
+        let t = lib.by_id.get(id).map(|&i| lib.snapshot.tracks[i].clone()).ok_or("Unknown song")?;
+        // Songs without tags share a made-up album (their folder): never theirs to change.
+        let mates: Vec<Track> = if whole_album && !untagged(&t) {
+            lib.snapshot.tracks.iter().filter(|m| m.album_id == t.album_id && m.id != t.id && !untagged(m)).cloned().collect()
+        } else {
+            Vec::new()
+        };
+        (t, mates)
     };
+    if choice.genre.is_empty() {
+        if let Some(g) = choice.album_ref.as_deref().and_then(|r| album_genre(&client, r)) {
+            choice.genre = g;
+        }
+    }
+    let album = |title: String, artist: String, track_no: Option<u32>, disc_no: Option<u32>| Found {
+        title,
+        artist,
+        album: choice.album.clone(),
+        album_artist: choice.album_artist.clone(),
+        year: choice.year,
+        track_no,
+        disc_no,
+        genre: choice.genre.clone(),
+        cover_url: choice.cover_url.clone(),
+    };
+    let mut plan: Vec<(Track, Found)> = vec![(
+        track.clone(),
+        album(
+            if keep_title { track.title.clone() } else { choice.title.clone() },
+            choice.artist.clone(),
+            choice.track_no,
+            choice.disc_no,
+        ),
+    )];
+
+    let mut matched = 0;
+    if !mates.is_empty() {
+        let songs = choice.album_ref.as_deref().map(|r| album_songs(&client, r)).unwrap_or_default();
+        let mut used = HashSet::new();
+        // The picked song's own place on the album.
+        if let Some(i) = songs.iter().position(|s| norm(&s.title) == norm(&choice.title) && (s.duration - choice.duration).abs() < 2.0) {
+            used.insert(i);
+        }
+        let places: Vec<Option<usize>> = mates
+            .iter()
+            .map(|m| {
+                let i = match_song(m, &songs, &used);
+                used.extend(i);
+                i
+            })
+            .collect();
+        // Deezer's track list names only the main artist; each song's page has all the credits.
+        let mut credits: Vec<Option<String>> = vec![None; mates.len()];
+        std::thread::scope(|s| {
+            for (slot, place) in credits.iter_mut().zip(&places) {
+                let Some(deezer_id) = place.and_then(|i| songs[i].deezer_id) else { continue };
+                let client = &client;
+                s.spawn(move || *slot = deezer_details(client, deezer_id).and_then(|d| d.artist));
+            }
+        });
+        for ((m, place), credit) in mates.into_iter().zip(places).zip(credits) {
+            let f = match place {
+                Some(i) => {
+                    matched += 1;
+                    let song = &songs[i];
+                    let title = if keep_title { m.title.clone() } else { song.title.clone() };
+                    album(title, credit.unwrap_or_else(|| song.artist.clone()), song.track_no, song.disc_no)
+                }
+                // Not on the catalogue's album (a bonus track, another length): only the album's info.
+                None => album(m.title.clone(), m.artist.clone(), m.track_no, m.disc_no),
+            };
+            plan.push((m, f));
+        }
+    }
+    let others = plan.len() - 1;
+
     let playing = {
         let s = state.engine.status();
         s.index.and_then(|i| s.queue.get(i).cloned())
     };
-    let found: Found = choice.into();
-    let mut rt = runtime().lock().unwrap();
-    let tried = rt.tried.get_or_insert_with(|| load_tried(&state.data_dir));
-    if tried.insert(path.to_string_lossy().into_owned()) {
-        save_tried(&state.data_dir, tried);
+    let cover = choice.cover_url.as_deref().and_then(|u| download(u).ok());
+    let mut later = false;
+    let mut written = 0;
+    {
+        let mut rt = runtime().lock().unwrap();
+        let tried = rt.tried.get_or_insert_with(|| load_tried(&state.data_dir));
+        let mut new = false;
+        for (t, _) in &plan {
+            new |= tried.insert(t.path.clone());
+        }
+        if new {
+            save_tried(&state.data_dir, tried);
+        }
+        for (t, f) in &plan {
+            if playing.as_deref() == Some(t.id.as_str()) {
+                rt.playing = Some(t.id.clone());
+                rt.waiting.insert(t.id.clone(), (PathBuf::from(&t.path), f.clone()));
+                later |= t.id == track.id;
+            } else {
+                rt.waiting.remove(&t.id);
+            }
+        }
     }
-    if playing.as_deref() == Some(id) {
-        rt.playing = Some(id.to_string());
-        rt.waiting.insert(id.to_string(), (path, found.clone()));
-        drop(rt);
-        show_now(&state, id, &found);
-        ctx.emit("library-changed", ());
-        return Ok(true);
+    for (i, (t, f)) in plan.iter().enumerate() {
+        if playing.as_deref() == Some(t.id.as_str()) {
+            continue;
+        }
+        match write(Path::new(&t.path), f, cover.clone()) {
+            Ok(()) => written += 1,
+            // The picked song failing is an error; another of the album is only logged.
+            Err(e) if i == 0 => return Err(e),
+            Err(e) => log::warn!("couldn't tag {}: {e}", t.path),
+        }
     }
-    rt.waiting.remove(id);
-    drop(rt);
-    let cover = found.cover_url.as_deref().and_then(|u| download(u).ok());
-    write(&path, &found, cover)?;
-    crate::jobs::start_scan(ctx.clone());
-    Ok(false)
+    show_now(&state, &plan, cover.as_deref());
+    ctx.emit("library-changed", ());
+    // A rescan would read the playing song's old tags back: it runs when that song ends.
+    if written > 0 && playing.as_deref().is_none_or(|p| !plan.iter().any(|(t, _)| t.id == p)) {
+        crate::jobs::start_scan(ctx.clone());
+    }
+    Ok(Saved { later, others, matched })
 }
 
-/// A playing song's file can't be written yet: show its new album and cover in the library now.
-fn show_now(state: &AppState, id: &str, found: &Found) {
+/// Shows the new info in the library at once (the playing song's file isn't written yet), with
+/// the album's cover.
+fn show_now(state: &AppState, plan: &[(Track, Found)], cover: Option<&[u8]>) {
+    let Some((_, first)) = plan.first() else { return };
     let art_dir = state.art_dir();
-    let album_id = crate::library::album_id_for(&found.album_artist, &found.album);
-    let has_art = art_dir.join(format!("{album_id}_s.jpg")).exists();
-    if !has_art {
-        if let Some(bytes) = found.cover_url.as_deref().and_then(|u| download(u).ok()) {
-            crate::library::write_art(&album_id, &bytes, &art_dir);
+    let album_id = crate::library::album_id_for(&first.album_artist, &first.album);
+    if !art_dir.join(format!("{album_id}_s.jpg")).exists() {
+        if let Some(bytes) = cover {
+            crate::library::write_art(&album_id, bytes, &art_dir);
         }
     }
     let mut lib = state.library.lock();
-    let Some(&i) = lib.by_id.get(id) else { return };
-    lib.snapshot.tracks[i].album_id = album_id;
     let mut tracks = lib.snapshot.tracks.clone();
+    for (t, f) in plan {
+        let Some(&i) = lib.by_id.get(&t.id) else { continue };
+        let x = &mut tracks[i];
+        x.title = f.title.clone();
+        x.artist = f.artist.clone();
+        x.album = f.album.clone();
+        x.album_artist = f.album_artist.clone();
+        x.year = f.year;
+        x.genre = f.genre.clone();
+        x.track_no = f.track_no;
+        x.disc_no = f.disc_no;
+        x.album_id = album_id.clone();
+    }
     let albums = crate::library::build_albums(&mut tracks, &art_dir);
     lib.set_tracks(tracks, albums);
 }
@@ -730,6 +926,7 @@ struct Hit {
     disc_number: Option<u32>,
     primary_genre_name: Option<String>,
     artwork_url100: Option<String>,
+    collection_id: Option<u64>,
     /// Full-size cover, for a Deezer result.
     #[serde(skip)]
     cover: Option<String>,
@@ -784,6 +981,7 @@ pub fn lookup(t: &Track) -> Option<Found> {
                 disc_number: None,
                 primary_genre_name: None,
                 artwork_url100: None,
+                collection_id: None,
                 cover: c.cover_url,
                 deezer_id: Some(id),
             })
@@ -797,6 +995,9 @@ pub fn lookup(t: &Track) -> Option<Found> {
                     found.year = more.year;
                     found.track_no = more.track_no;
                     found.disc_no = more.disc_no;
+                    if let Some(g) = more.album_id.and_then(|a| album_genre(&client, &format!("deezer:{a}"))) {
+                        found.genre = g;
+                    }
                 }
                 best_so_far = Some((rank, found));
             }
@@ -805,10 +1006,35 @@ pub fn lookup(t: &Track) -> Option<Found> {
     best_so_far.map(|(_, f)| f)
 }
 
-/// Words that mark another recording of a song (unless the file name has them too).
-const VERSIONS: [&str; 12] = [
-    "live", "acoustic", "piano", "remix", "instrumental", "karaoke", "version", "cover", "remaster", "mix)", "edit", "orchestra",
+/// Words that mark another recording of a song, by kind, in the languages of the library
+/// (伴奏 and カラオケ are instrumentals, like "Instrumental" and "Off Vocal").
+const VERSION_KINDS: [&[&str]; 9] = [
+    &["instrumental", "karaoke", "off vocal", "inst.", "inst)", "伴奏", "纯音乐", "純音樂", "純音楽", "カラオケ", "インスト", "반주"],
+    &["live", "现场", "現場", "ライブ", "라이브"],
+    &["acoustic", "不插电", "アコースティック", "어쿠스틱"],
+    &["piano", "钢琴", "鋼琴", "ピアノ", "피아노"],
+    &["remix", "mix)", "edit"],
+    &["cover", "翻唱", "カバー", "커버"],
+    &["version"],
+    &["remaster"],
+    &["orchestra", "管弦"],
 ];
+
+/// The kinds of other recording `s` names (one bit per entry of VERSION_KINDS).
+fn version_kinds(s: &str) -> u16 {
+    let s = s.to_lowercase();
+    VERSION_KINDS
+        .iter()
+        .enumerate()
+        .filter(|(_, words)| words.iter().any(|w| s.contains(w)))
+        .fold(0, |bits, (i, _)| bits | 1 << i)
+}
+
+/// `label` (a result's title and album) is another recording than `wanted` names: a live,
+/// instrumental, remix… version that the song's own title doesn't mention.
+fn other_version(label: &str, wanted: &str) -> bool {
+    version_kinds(label) & !version_kinds(wanted) != 0
+}
 
 /// Lower is better: (another version?, title not exact?, seconds off).
 #[derive(PartialEq, PartialOrd)]
@@ -821,7 +1047,7 @@ struct Rank4(u8, f64, u8, f64);
 /// The result that is really this song, if any, preferring the original recording.
 /// Also its Deezer id, for a Deezer result.
 fn best(hits: &[Hit], artist: Option<&str>, title: &str, duration: f64) -> Option<(Rank, Found, Option<u64>)> {
-    let wanted = title.to_lowercase();
+    let wanted = title;
     hits.iter()
         .filter_map(|h| {
             let name = h.track_name.as_deref()?;
@@ -837,9 +1063,8 @@ fn best(hits: &[Hit], artist: Option<&str>, title: &str, duration: f64) -> Optio
             if !ok {
                 return None;
             }
-            let label = format!("{} {}", name, h.collection_name.as_deref().unwrap_or("")).to_lowercase();
-            let other_version = VERSIONS.iter().any(|v| label.contains(v) && !wanted.contains(v));
-            Some((Rank(other_version as u8, (!exact) as u8, off), h))
+            let label = format!("{} {}", name, h.collection_name.as_deref().unwrap_or(""));
+            Some((Rank(other_version(&label, &wanted) as u8, (!exact) as u8, off), h))
         })
         .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(rank, h)| {
@@ -913,6 +1138,55 @@ mod tests {
     }
 
     #[test]
+    fn knows_versions_in_other_languages() {
+        // 伴奏 (Chinese), カラオケ (Japanese), 반주 (Korean): all instrumentals.
+        assert!(version_kinds("悠忽舞于梦中 (伴奏)") == version_kinds("Dancing Through Fantasies (Instrumental)"));
+        assert!(version_kinds("夜に駆ける (カラオケ)") == version_kinds("Into the Night (Instrumental)"));
+        assert!(version_kinds("봄날 (반주)") == version_kinds("Spring Day (Inst.)"));
+        assert!(other_version("Dancing Through Fantasies (Instrumental)", "悠忽舞于梦中"));
+        assert!(!other_version("Dancing Through Fantasies (Instrumental)", "悠忽舞于梦中 (伴奏)"));
+        assert!(other_version("Lemon (ライブ)", "Lemon"));
+        assert!(!other_version("Lemon", "Lemon"));
+    }
+
+    #[test]
+    fn matches_album_songs_by_length_and_kind() {
+        let song = |title: &str, secs: f64, n: u32| AlbumSong {
+            title: title.into(),
+            artist: "Wuthering Waves".into(),
+            duration: secs,
+            track_no: Some(n),
+            disc_no: Some(1),
+            deezer_id: None,
+        };
+        let songs = [song("Dancing Through Fantasies", 200.0, 1), song("Dancing Through Fantasies (Instrumental)", 200.0, 2)];
+        let mine = |title: &str, secs: f64, n: u32| Track { title: title.into(), duration: secs, track_no: Some(n), ..Default::default() };
+        let used: HashSet<usize> = [0].into();
+        // Same length as both: the instrumental is the one for 伴奏.
+        assert_eq!(match_song(&mine("悠忽舞于梦中 (伴奏)", 200.1, 2), &songs, &HashSet::new()), Some(1));
+        assert_eq!(match_song(&mine("悠忽舞于梦中", 200.1, 1), &songs, &HashSet::new()), Some(0));
+        // The original is taken already and the song isn't an instrumental: no place on the album.
+        assert_eq!(match_song(&mine("悠忽舞于梦中 (Remastered)", 200.1, 3), &songs, &used), None);
+        // Another length: not on the album.
+        assert_eq!(match_song(&mine("Bonus", 250.0, 3), &songs, &HashSet::new()), None);
+    }
+
+    /// Needs the internet: an album's songs and genre from Deezer.
+    #[test]
+    #[ignore]
+    fn reads_deezer_albums() {
+        let client = reqwest::blocking::Client::new();
+        let songs = album_songs(&client, "deezer:696220481");
+        let titles: Vec<&str> = songs.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Dancing Through Fantasies", "Dancing Through Fantasies (Instrumental)"]);
+        assert_eq!((songs[1].track_no, songs[1].disc_no), (Some(2), Some(1)));
+        assert_eq!(album_genre(&client, "deezer:696220481").as_deref(), Some("Pop"));
+        // iTunes: an album's songs from the store it was found in.
+        let songs = album_songs(&client, "itunes:US:1440833098");
+        assert_eq!(songs.first().map(|s| (s.title.as_str(), s.track_no)), Some(("Love Me Do", Some(1))));
+    }
+
+    #[test]
     fn splits_artist_credits() {
         assert_eq!(artist_names("鸣潮先约电台/jixwang/VISION SOUND"), ["鸣潮先约电台", "jixwang", "visionsound"]);
         assert_eq!(artist_names("Wuthering Waves, jixwang & Vision Sound"), ["wutheringwaves", "jixwang", "visionsound"]);
@@ -936,6 +1210,7 @@ mod tests {
             duration: secs,
             likely: false,
             source: String::new(),
+            album_ref: None,
         };
         assert!(want.same_song_by_credits(&c("Dancing Through Fantasies", "Wuthering Waves, jixwang & Vision Sound", 200.0)));
         // Only one artist in common, another length, or another recording: not enough.
@@ -1029,6 +1304,7 @@ mod tests {
         assert_eq!(f.artist, "Wuthering Waves, jixwang & Vision Sound");
         assert_eq!(f.album_artist, "Wuthering Waves");
         assert_eq!(f.year, Some(2025));
+        assert_eq!(f.genre, "Pop");
         assert!(f.cover_url.is_some_and(|u| u.contains("dzcdn")));
     }
 
@@ -1045,6 +1321,7 @@ mod tests {
             disc_number: Some(1),
             primary_genre_name: Some("Rock".into()),
             artwork_url100: Some("https://x/100x100bb.jpg".into()),
+            collection_id: None,
             cover: None,
             deezer_id: None,
         };
