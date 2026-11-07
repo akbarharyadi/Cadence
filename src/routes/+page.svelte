@@ -8,6 +8,8 @@
   import UpdateBanner from "#lib/components/UpdateBanner.svelte";
   import { updates } from "#lib/updates.svelte.js";
   import Icon from "#lib/components/Icon.svelte";
+  import Guard from "#lib/components/Guard.svelte";
+  import { forgetCrash, note, recentCrash, reportCrash } from "#lib/diag.js";
   import NowPlaying from "#lib/components/NowPlaying.svelte";
   import PlaylistPicker from "#lib/components/PlaylistPicker.svelte";
   import SmartEditor from "#lib/components/SmartEditor.svelte";
@@ -66,6 +68,13 @@
     barTitle = h1.textContent?.trim() ?? "";
     showBarTitle = h1.getBoundingClientRect().bottom < el.getBoundingClientRect().top + 56;
   }
+  // For bug reports: which screens were opened before an error.
+  $effect(() => {
+    const v = app.view as { name: string; id?: unknown };
+    note("view", `${v.name}${v.id != null ? ` #${v.id}` : ""}`);
+  });
+  $effect(() => note("view", app.nowPlayingOpen ? "Now Playing opened" : "Now Playing closed"));
+
   // A new page starts with its own title hidden.
   $effect(() => {
     void app.view;
@@ -104,6 +113,12 @@
 
   onMount(() => {
     app.init();
+    // Cadence just reloaded itself after an error (see +error.svelte): say so, and offer to report it.
+    const crash = recentCrash(2 * 60_000);
+    if (crash) {
+      forgetCrash();
+      app.showToast("Cadence recovered from an error.", { label: "Report", run: () => reportCrash(crash) }, 12_000);
+    }
     updates.start();
     (window as unknown as { __cadenceBack: () => boolean }).__cadenceBack = () => app.handleBack();
     (window as unknown as { __cadenceMedia: (c: string) => void }).__cadenceMedia = (c: string) => {
@@ -224,6 +239,7 @@
 />
 
 {#snippet pageView()}
+<Guard label="This page">
 {#if !app.loaded}
   <div></div>
 {:else if app.view.name === "sound"}
@@ -257,6 +273,7 @@
 {:else if app.view.name === "stats"}
   <Stats />
 {/if}
+</Guard>
 {/snippet}
 
 <!-- Ambient colour field from the current cover, behind everything. -->
@@ -293,14 +310,14 @@
     </main>
     {#if gutter > 0}<div class="bar-cap" class:on={scrolled} style="width: {gutter}px" aria-hidden="true" data-tauri-drag-region></div>{/if}
     </div>
-    {#if app.queueOpen}<QueuePanel />{/if}
+    {#if app.queueOpen}<Guard label="Up Next"><QueuePanel /></Guard>{/if}
   </div>
   {#if playerAt === "bottom"}<PlayerBar placement="bottom" />{/if}
   {#if phone}<PlayerBar placement="dock" />{/if}
   {#if phone && showSidebar}<TabBar />{/if}
 </div>
 
-{#if app.nowPlayingOpen}<NowPlaying />{/if}
+{#if app.nowPlayingOpen}<Guard label="Now Playing" overlay onclose={() => (app.nowPlayingOpen = false)}><NowPlaying /></Guard>{/if}
 <ContextMenu />
 {#if app.picker}<PlaylistPicker />{/if}
 {#if app.smartEditing}<SmartEditor />{/if}

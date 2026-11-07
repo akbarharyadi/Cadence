@@ -586,11 +586,11 @@ class AppState {
       });
   }
 
-  showToast(message: string, action: { label: string; run: () => void } | null = null) {
+  showToast(message: string, action: { label: string; run: () => void } | null = null, ms?: number) {
     this.toast = message;
     this.toastAction = action;
     clearTimeout(this.toastTimer);
-    this.toastTimer = setTimeout(() => (this.toast = this.toastAction = null), action ? 6000 : 4000);
+    this.toastTimer = setTimeout(() => (this.toast = this.toastAction = null), ms ?? (action ? 6000 : 4000));
   }
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
 
