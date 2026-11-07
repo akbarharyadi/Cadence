@@ -231,6 +231,27 @@ pub struct Candidate {
     /// songs of the album and its genre.
     #[serde(default)]
     pub album_ref: Option<String>,
+    /// Its id in the iTunes catalogue (the same in every country's store).
+    #[serde(default)]
+    pub itunes_id: Option<u64>,
+    /// Its names in Latin letters, when they're in Japanese, Chinese or Korean ones: the US store's
+    /// ("Antanante." by "Riria.", album "Kiseki"), else romanised by Cadence.
+    #[serde(default)]
+    pub latin: Option<LatinNames>,
+}
+
+/// A catalogue result's names in Latin letters (see `Candidate::latin`).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatinNames {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    /// The album in a store that lists it in Latin letters (its other songs' names follow).
+    pub album_ref: Option<String>,
+    /// "Apple" (the US store's names) or "Cadence" (romanised here).
+    pub from: String,
 }
 
 impl From<Candidate> for Found {
@@ -389,7 +410,46 @@ pub fn candidates(t: &Track, term: &str) -> Result<Vec<Candidate>, String> {
         }
     }
     out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(out.into_iter().take(12).map(|(_, c)| c).collect())
+    let mut shown: Vec<Candidate> = out.into_iter().take(12).map(|(_, c)| c).collect();
+    add_latin_names(&client, &mut shown);
+    Ok(shown)
+}
+
+/// Names in Latin letters for results named in Japanese, Chinese or Korean ones: the same songs
+/// in the US store (one lookup for all of them; Apple lists 「あんたなんて。」 by りりあ。 there as
+/// "Antanante." by "Riria."), else romanised here.
+fn add_latin_names(client: &reqwest::blocking::Client, results: &mut [Candidate]) {
+    let foreign = |c: &Candidate| cjk(&c.title) || cjk(&c.artist) || cjk(&c.album);
+    let ids: Vec<String> = results.iter().filter(|c| foreign(c)).filter_map(|c| c.itunes_id).map(|i| i.to_string()).collect();
+    let mut us: HashMap<u64, Hit> = HashMap::new();
+    if !ids.is_empty() {
+        let url = format!("https://itunes.apple.com/lookup?id={}&country=US", ids.join(","));
+        if let Some(s) = client.get(url).send().ok().and_then(|r| r.json::<Search>().ok()) {
+            us.extend(s.results.into_iter().filter_map(|h| Some((h.track_id?, h))));
+        }
+    }
+    for c in results.iter_mut().filter(|c| foreign(c)) {
+        let apple = c.itunes_id.and_then(|i| us.get(&i)).filter(|h| {
+            [&h.track_name, &h.artist_name, &h.collection_name].iter().all(|n| n.as_deref().is_some_and(|n| !cjk(n)))
+        });
+        c.latin = Some(match apple {
+            Some(h) => LatinNames {
+                title: h.track_name.clone().unwrap_or_default(),
+                artist: h.artist_name.clone().unwrap_or_default(),
+                album: h.collection_name.clone().unwrap_or_default(),
+                album_artist: h.collection_artist_name.clone().or_else(|| h.artist_name.clone()).unwrap_or_default(),
+                album_ref: h.collection_id.map(|id| format!("itunes:US:{id}")),
+                from: "Apple".into(),
+            },
+            None => {
+                // Together, so a kana in any of them tells Japanese from Chinese.
+                let names = [c.title.clone(), c.artist.clone(), c.album.clone(), c.album_artist.clone()];
+                let roman = crate::romanize::lines(&names);
+                let pick = |i: usize| if roman[i].is_empty() { names[i].clone() } else { roman[i].clone() };
+                LatinNames { title: pick(0), artist: pick(1), album: pick(2), album_artist: pick(3), album_ref: None, from: "Cadence".into() }
+            }
+        });
+    }
 }
 
 /// What Fix Song Info looks for, to tell the song from other songs by its artists.
@@ -517,6 +577,8 @@ fn itunes_candidates(client: &reqwest::blocking::Client, term: &str, country: &s
                     likely: false,
                     source: "iTunes".into(),
                     album_ref: h.collection_id.map(|id| format!("itunes:{country}:{id}")),
+                    itunes_id: h.track_id,
+                    latin: None,
                 })
             })
             .collect(),
@@ -572,6 +634,8 @@ fn deezer_candidates(client: &reqwest::blocking::Client, term: &str, limit: u32)
                         likely: false,
                         source: "Deezer".into(),
                         album_ref: h["album"]["id"].as_u64().map(|id| format!("deezer:{id}")),
+                        itunes_id: None,
+                        latin: None,
                     },
                     id,
                 ))
@@ -743,8 +807,16 @@ pub fn save_choice(ctx: &Ctx, id: &str, mut choice: Candidate, keep_title: bool,
         replace_cover: true,
         subtitle: None,
     };
-    // The catalogue's name for a song that keeps its own, so search finds it by either.
-    let other_name = |mine: &str, theirs: &str| (keep_title && norm(mine) != norm(theirs)).then(|| theirs.to_string());
+    // The name not used is kept as the subtitle, so search finds the song by either: the
+    // catalogue's for a song that keeps its own, or its own (in another script) for one that takes
+    // the catalogue's (「あんたなんて。」 saved as "Antanante.").
+    let other_name = |mine: &str, theirs: &str| {
+        if keep_title {
+            (norm(mine) != norm(theirs)).then(|| theirs.to_string())
+        } else {
+            (cjk(mine) != cjk(theirs) && !mine.trim().is_empty()).then(|| mine.to_string())
+        }
+    };
     let mut plan: Vec<(Track, Found)> = vec![(
         track.clone(),
         Found {
@@ -1002,6 +1074,7 @@ struct Hit {
     primary_genre_name: Option<String>,
     artwork_url100: Option<String>,
     collection_id: Option<u64>,
+    track_id: Option<u64>,
     /// Full-size cover, for a Deezer result.
     #[serde(skip)]
     cover: Option<String>,
@@ -1084,6 +1157,7 @@ pub fn lookup(t: &Track) -> Option<Found> {
                 primary_genre_name: None,
                 artwork_url100: None,
                 collection_id: None,
+                track_id: None,
                 cover: c.cover_url,
                 deezer_id: Some(id),
             })
@@ -1221,6 +1295,21 @@ mod tests {
         assert!(top.likely);
     }
 
+    /// Needs the internet: results named in Japanese come with Apple's names in Latin letters.
+    #[test]
+    #[ignore]
+    fn japanese_results_have_latin_names() {
+        let t = Track { title: "あんたなんて。".into(), artist: "りりあ。".into(), duration: 241.0, ..Default::default() };
+        let found = candidates(&t, &search_term(&t)).unwrap();
+        for c in found.iter().take(4) {
+            let l = c.latin.as_ref();
+            println!("{} | {} | {} → {:?}", c.title, c.artist, c.album, l.map(|l| (&l.title, &l.artist, &l.album, &l.album_ref, &l.from)));
+        }
+        let first = found[0].latin.as_ref().expect("Latin names");
+        assert_eq!((first.title.as_str(), first.artist.as_str(), first.from.as_str()), ("Antanante.", "Riria.", "Apple"));
+        assert!(first.album_ref.as_deref().is_some_and(|r| r.starts_with("itunes:US:")));
+    }
+
     /// Needs the internet: the song is found from its Chinese tags alone, with no typing.
     #[test]
     #[ignore]
@@ -1323,6 +1412,8 @@ mod tests {
             likely: false,
             source: String::new(),
             album_ref: None,
+            itunes_id: None,
+            latin: None,
         };
         assert!(want.same_song_by_credits(&c("Dancing Through Fantasies", "Wuthering Waves, jixwang & Vision Sound", 200.0)));
         // Only one artist in common, another length, or another recording: not enough.
@@ -1479,6 +1570,7 @@ mod tests {
             primary_genre_name: Some("Rock".into()),
             artwork_url100: Some("https://x/100x100bb.jpg".into()),
             collection_id: None,
+            track_id: None,
             cover: None,
             deezer_id: None,
         };

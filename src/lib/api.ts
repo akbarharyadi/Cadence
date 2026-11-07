@@ -648,6 +648,11 @@ export interface SongInfo {
   source: string;
   /** Its album in that catalogue, for the album's other songs and genre. */
   albumRef: string | null;
+  /** Its iTunes id (the same in every country's store). */
+  itunesId?: number | null;
+  /** Its names in Latin letters when they're in Japanese, Chinese or Korean ones: Apple's (the US
+   *  store's, e.g. "Antanante." by "Riria.") or romanised by Cadence. */
+  latin?: { title: string; artist: string; album: string; albumArtist: string; albumRef: string | null; from: string } | null;
 }
 
 /** Info Fix all found for a song without tags, to check before saving. */

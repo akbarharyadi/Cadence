@@ -17,9 +17,28 @@
 
   const cjk = (s: string) => /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(s);
   const plain = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+
+  // Names in Latin letters for results in Japanese, Chinese or Korean ones (Apple's own where it has
+  // them: 「あんたなんて。」 by りりあ。 is "Antanante." by "Riria."). The choice is remembered.
+  const LATIN = "cadence-fix-latin";
+  let latin = $state(typeof localStorage !== "undefined" && localStorage.getItem(LATIN) === "1");
+  const hasLatin = $derived(results.some((c) => c.latin));
+  const toggleLatin = () => {
+    latin = !latin;
+    localStorage.setItem(LATIN, latin ? "1" : "0");
+    keepTitle = null;
+  };
+  /** A result as shown and saved: in Latin letters when that's chosen and it has them. */
+  const view = (c: SongInfo): SongInfo =>
+    latin && c.latin
+      ? { ...c, title: c.latin.title, artist: c.latin.artist, album: c.latin.album, albumArtist: c.latin.albumArtist, albumRef: c.latin.albumRef ?? c.albumRef }
+      : c;
+  const chosen = $derived(picked ? view(picked) : null);
+
   // Only a tagged song has a title of its own (an untagged one's is its file name).
-  const canKeep = $derived(!!picked && !app.needsInfo(track) && plain(picked.title) !== plain(track.title));
-  const keeping = $derived(canKeep && (keepTitle ?? (!!picked && cjk(track.title) !== cjk(picked.title))));
+  const canKeep = $derived(!!chosen && !app.needsInfo(track) && plain(chosen.title) !== plain(track.title));
+  // By default a title in another script is kept, unless Latin letters were asked for.
+  const keeping = $derived(canKeep && (keepTitle ?? (!latin && !!chosen && cjk(track.title) !== cjk(chosen.title))));
   /** The folder an album's files are in: the song's, or the one above a disc folder (Album/CD2). */
   const albumFolder = (path: string) => {
     const dir = path.replace(/[\\/][^\\/]*$/, "");
@@ -52,12 +71,12 @@
   search();
 
   async function save() {
-    if (!picked) return;
+    if (!picked || !chosen) return;
     busy = "save";
     error = "";
     try {
-      const title = keeping ? track.title : picked.title;
-      const r = await api.saveSongInfo(track.id, $state.snapshot(picked) as SongInfo, keeping, wholeAlbum && mates.length > 0);
+      const title = keeping ? track.title : chosen.title;
+      const r = await api.saveSongInfo(track.id, $state.snapshot(chosen) as SongInfo, keeping, wholeAlbum && mates.length > 0);
       const songs = (n: number) => `${n} ${n === 1 ? "song" : "songs"}`;
       const album = r.others ? ` and ${songs(r.others)} of its album${r.matched < r.others ? ` (${songs(r.others - r.matched)} not on the catalogue's album got only the album's info)` : ""}` : "";
       app.showToast(r.later ? `Saved “${title}”${album}. Its file is updated when it finishes.` : `Saved “${title}”${album}`, app.undoAction(r.change));
@@ -88,6 +107,12 @@
     <Icon name="search" size={16} />
     <input class="field" bind:value={query} placeholder="Artist and song title" aria-label="Search the catalogue" />
     <button class="pill ghost" type="submit" disabled={busy === "search"}>Search</button>
+    {#if hasLatin}
+      <button type="button" class="chip" class:on={latin} aria-pressed={latin} onclick={toggleLatin}
+        title="Show and save the names in Latin letters (Apple's own where it has them). The original title is kept as the subtitle, so search finds both.">
+        <span class="aa">Aa</span>Latin
+      </button>
+    {/if}
   </form>
 
   <div class="results" role="listbox" aria-label="Matches" aria-busy={busy === "search"}>
@@ -95,11 +120,12 @@
       {#each [0, 1, 2] as i (i)}<div class="hit ghost-row"><span class="art"></span><span class="lines"><i></i><i></i></span></div>{/each}
     {:else}
       {#each results as c, i (i)}
+        {@const v = view(c)}
         <button class="hit" class:on={picked === c} role="option" aria-selected={picked === c} onclick={() => (picked = c)} ondblclick={save}>
           <span class="art">{#if c.thumb}<img src={c.thumb} alt="" loading="lazy" />{/if}</span>
           <span class="lines">
-            <span class="title">{c.title}</span>
-            <span class="sub">{c.artist}, {c.album}{c.year ? ` (${c.year})` : ""}</span>
+            <span class="title" title={latin && c.latin ? c.title : undefined}>{v.title}</span>
+            <span class="sub">{v.artist}, {v.album}{c.year ? ` (${c.year})` : ""}</span>
           </span>
           {#if c.likely}<span class="match">Match</span>{/if}
           {#if c.source}<span class="src" title="From the {c.source} catalogue">{c.source}</span>{/if}
@@ -109,10 +135,10 @@
     {/if}
   </div>
   {#if error}<p class="error">{error}</p>{/if}
-  {#if canKeep && picked}
+  {#if canKeep && chosen}
     <label class="keep">
       <input type="checkbox" checked={keeping} onchange={(e) => (keepTitle = e.currentTarget.checked)} />
-      <span>Keep my title <b>{track.title}</b> <span class="secondary">instead of “{picked.title}” (kept as its subtitle, so search finds both)</span></span>
+      <span>Keep my title <b>{track.title}</b> <span class="secondary">instead of “{chosen.title}” (the other is kept as its subtitle, so search finds both)</span></span>
     </label>
   {/if}
   {#if picked && mates.length}
@@ -162,6 +188,34 @@
     flex: 1;
     font-size: 14px;
     padding: 8px 11px;
+  }
+  /* Names in Latin letters (on / off). */
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 34px;
+    padding: 0 12px 0 9px;
+    border-radius: 99px;
+    font-size: 13px;
+    white-space: nowrap;
+    color: var(--text-2);
+    box-shadow: inset 0 0 0 1px var(--line-strong);
+  }
+  .chip:hover {
+    background: var(--hover);
+  }
+  .chip.on {
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  .aa {
+    font-weight: 700;
+    font-size: 11px;
+    padding: 1px 4px;
+    border-radius: 5px;
+    background: var(--hover);
   }
   .results {
     margin-top: 12px;
