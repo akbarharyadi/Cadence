@@ -75,6 +75,9 @@
   $effect(() => {
     offset = readOffsets()[offsetKey] ?? 0;
   });
+  /** The timing nudge shows when asked for (⋯ → Adjust timing) or while this song has one. */
+  let timingOpen = $state(false);
+  const reducedMotion = () => typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
   function nudge(by: number) {
     offset = by === 0 ? 0 : Math.round((offset + by) * 100) / 100;
     const all = readOffsets();
@@ -101,7 +104,25 @@
     void roman; // pronunciation lines change the layout: centre again
     if (i < 0 || !box || Date.now() - userScrolledAt < 4000) return;
     const el = box.querySelectorAll<HTMLElement>(".line")[i];
-    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    el?.scrollIntoView({ behavior: reducedMotion() ? "instant" : "smooth", block: "center" });
+  });
+
+  // The window (or the lyrics' column) changed size: the lines wrap differently, so the current
+  // one goes back to the middle at once.
+  $effect(() => {
+    const el = box;
+    if (!el) return;
+    let last = el.clientWidth + el.clientHeight * 10000;
+    const ro = new ResizeObserver(() => {
+      const now = el.clientWidth + el.clientHeight * 10000;
+      if (now === last) return;
+      last = now;
+      if (Date.now() - userScrolledAt < 4000) return;
+      const line = el.querySelectorAll<HTMLElement>(".line")[untrack(() => active)];
+      line?.scrollIntoView({ behavior: "instant", block: "center" });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
   });
 
   // ---------- karaoke sweep ----------
@@ -309,15 +330,6 @@
     app.voice = await api.voiceStatus();
   }
 
-  /** The lyrics' source, short enough for the toolbar (the full wording is its tooltip). */
-  const sourceShort: Record<string, string> = {
-    embedded: "In the file",
-    file: ".lrc file",
-    lrclib: "LRCLIB",
-    pasted: "Pasted",
-    ai: "AI DJ",
-  };
-
   // ---------- singers ----------
 
   /** Each singer's colour (r, g, b): the first stays white; lines sung together are lavender. */
@@ -402,7 +414,20 @@
   function moreMenu(e: MouseEvent) {
     const timed = !!lyrics?.synced.length;
     const canFind = timed && lyrics?.singersFrom !== "lyrics" && (app.aiReady || !!app.voice?.installed);
+    // Following the singer: start it, or switch between the placed words and the lyrics' own timing.
+    const followItem =
+      !app.voice?.supported || !placeable || listening || waiting
+        ? []
+        : lyrics?.voice
+          ? [
+              lyrics.voice === "on"
+                ? { label: "Use the Lyrics’ Own Timing", icon: "lyrics", action: toggleVoice }
+                : { label: "Follow the Singer Again", icon: "lyrics", action: toggleVoice },
+            ]
+          : [{ label: "Follow the Singer", icon: "lyrics", action: follow }];
     app.openMenu(e, [
+      ...followItem,
+      ...(timed ? [{ label: "Adjust Timing…", icon: "clock", action: () => (timingOpen = true) }] : []),
       ...(hasSingers ? [{ label: showSingers ? "Hide singers" : "Show singers", icon: "artist", action: toggleSingers }] : []),
       ...(canFind
         ? [{ label: findingSingers ? "Finding who sings…" : app.aiReady ? "Who sings? (AI)" : "Tell the singers apart", icon: "sparkle", action: findSingers }]
@@ -413,16 +438,23 @@
     ]);
   }
 
-  const sourceLabel: Record<string, string> = {
-    embedded: "From the file",
-    file: "From a .lrc file",
-    lrclib: "From LRCLIB",
-    pasted: "Pasted by you",
-    ai: "Found by the AI DJ",
-  };
   /** An instrumental version: any lyrics are the sung version's, for singing along. */
   const instrumentalTrack = $derived(/\b(instrumental|inst\.?|off[ -]?vocal|karaoke)\b/i.test(track?.title ?? ""));
   const vocals = $derived(1 - (app.dsp?.vocalCut ?? 0));
+  /** Sing along: the singer turned down (the level can be fine-tuned while it's on). */
+  const singing = $derived((app.dsp?.vocalCut ?? 0) > 0);
+  const toggleSinging = () => app.updateDsp((d) => (d.vocalCut = singing ? 0 : 0.85));
+  /** Where the lyrics come from, in words, under the last line. */
+  const creditLabel: Record<string, string> = {
+    embedded: "Lyrics from the song’s file",
+    file: "Lyrics from a .lrc file",
+    lrclib: "Lyrics from LRCLIB",
+    pasted: "Lyrics you pasted",
+    ai: "Lyrics found by the AI DJ",
+  };
+  const credit = $derived(
+    [instrumentalTrack ? "An instrumental: the sung version’s lyrics, to sing along" : "", creditLabel[lyrics?.source ?? ""] ?? ""].filter(Boolean).join(" · "),
+  );
 </script>
 
 <div class="wrap">
@@ -529,6 +561,7 @@
             {/if}
           </button>
         {/each}
+        {#if credit}<p class="credit">{credit}</p>{/if}
         <div class="pad"></div>
       {:else if lyrics?.plain}
         {#if roman.length}
@@ -538,6 +571,7 @@
         {:else}
           <p class="plain">{lyrics.plain}</p>
         {/if}
+        {#if credit}<p class="credit">{credit}</p>{/if}
       {:else}
         <div class="status">
           {#if lyrics?.lookup === "hidden"}
@@ -561,12 +595,20 @@
         </div>
       {/if}
     </div>
+    <!-- What's used often stays here: sing along, Latin letters, and anything going on (listening
+         to the song, a timing nudge). The rest is in ⋯. -->
     <div class="foot">
       <div class="tools">
-        {#if instrumentalTrack && (lyrics?.synced.length || lyrics?.plain)}
-          <span class="source" title="This is an instrumental version: the lyrics are the sung version’s, to sing along"><Icon name="song" size={13} />Sing along</span>
-        {:else if lyrics?.source}
-          <span class="source" title={sourceLabel[lyrics.source] ?? ""}>{sourceShort[lyrics.source] ?? ""}</span>
+        {#if lyrics?.synced.length && app.dsp && !instrumentalTrack}
+          <button class="chip" class:on={singing} aria-pressed={singing} onclick={toggleSinging} title="Turn the singer down to sing along yourself">
+            <Icon name="song" size={14} />Sing along
+          </button>
+          {#if singing}
+            <input type="range" class="slider level" min="0" max="0.9" step="0.05" value={vocals}
+              style="--pct: {(vocals / 0.9) * 100}%; --fill: white"
+              oninput={(e) => app.updateDsp((d) => (d.vocalCut = Math.max(0.1, 1 - +e.currentTarget.value)))}
+              aria-label="How much of the singer is left" title="How much of the singer is left: {Math.round(vocals * 100)}%" />
+          {/if}
         {/if}
         {#if romanName && lyrics && (lyrics.synced.length || lyrics.plain)}
           <button class="chip" class:on={pronounce} aria-pressed={pronounce} onclick={togglePronounce} title="Show the lyrics in Latin letters">
@@ -574,47 +616,33 @@
           </button>
         {/if}
         {#if app.voice?.supported && placeable}
-          {#if lyrics?.voice}
-            <button class="chip" class:on={lyrics.voice === "on"} aria-pressed={lyrics.voice === "on"} onclick={toggleVoice}
-              title={lyrics.voice === "on" ? "The words follow the singer. Click for the lyrics’ own timing." : "Click to let the words follow the singer again."}>
-              <Icon name="lyrics" size={14} />Follow singer
-            </button>
-          {:else if listening}
+          {#if listening}
             <span class="chip busy" title="Cadence is listening to this song once, to place its lyrics on the singing">
-              <Icon name="lyrics" size={14} />Listening <span class="pct">{Math.round((listening.done / Math.max(listening.total, 1)) * 100)}%</span>
+              <Icon name="lyrics" size={14} />Following the singer <span class="pct">{Math.round((listening.done / Math.max(listening.total, 1)) * 100)}%</span>
             </span>
           {:else if waiting}
             <span class="chip busy" title="Cadence is listening to another song first"><Icon name="lyrics" size={14} />Waiting…</span>
-          {:else}
-            <button class="chip" class:warn={!!voiceError} onclick={follow} title={voiceError || "Place every word on the singing (Cadence listens to the song once)"}>
-              <Icon name="lyrics" size={14} />Follow singer
-            </button>
+          {:else if voiceError}
+            <button class="chip warn" onclick={follow} title={voiceError}><Icon name="lyrics" size={14} />Couldn’t follow the singer: try again</button>
           {/if}
         {/if}
-        {#if lyrics?.synced.length}
+        {#if lyrics?.synced.length && (timingOpen || offset !== 0)}
           <span class="timing" title="Lyrics early or late for this song? Nudge them.">
-            <button class="nudge" onclick={() => nudge(-0.25)} aria-label="Lyrics earlier">−</button>
+            <button class="nudge" onclick={() => nudge(-0.25)} aria-label="Lyrics earlier" title="Earlier">−</button>
             <button class="value" onclick={() => nudge(0)} title="Back to the lyrics' own timing">
               {offset === 0 ? "Timing" : `${offset > 0 ? "+" : ""}${offset.toFixed(2)} s`}
             </button>
-            <button class="nudge" onclick={() => nudge(0.25)} aria-label="Lyrics later">+</button>
+            <button class="nudge" onclick={() => nudge(0.25)} aria-label="Lyrics later" title="Later">+</button>
+            {#if offset === 0}
+              <button class="nudge" onclick={() => (timingOpen = false)} aria-label="Close timing" title="Done"><Icon name="close" size={12} /></button>
+            {/if}
           </span>
         {/if}
-        {#if lyrics && !lyrics.instrumental && (lyrics.synced.length || lyrics.plain)}
-          <button class="chip round" onclick={moreMenu} aria-label="More lyrics options" title="More: other lyrics, paste, hide">
-            <Icon name="more" size={16} />
-          </button>
-        {/if}
       </div>
-      {#if lyrics?.synced.length && app.dsp && !instrumentalTrack}
-        <label class="sing" title="Turn the singer down to sing along yourself">
-          <Icon name="song" size={15} />
-          <span>Vocals</span>
-          <input type="range" class="slider" min="0" max="1" step="0.05" value={vocals}
-            style="--pct: {vocals * 100}%; --fill: white; width: 88px"
-            oninput={(e) => app.updateDsp((d) => (d.vocalCut = 1 - +e.currentTarget.value))} aria-label="Vocal level" />
-          <span class="num">{Math.round(vocals * 100)}%</span>
-        </label>
+      {#if lyrics && !lyrics.instrumental && (lyrics.synced.length || lyrics.plain)}
+        <button class="chip round more" onclick={moreMenu} aria-label="Lyrics options" title="Lyrics options: follow the singer, timing, other lyrics, paste, hide">
+          <Icon name="more" size={16} />
+        </button>
       {/if}
     </div>
   {/if}
@@ -653,30 +681,35 @@
     font-weight: 700;
     line-height: 1.25;
     letter-spacing: -0.015em;
-    color: rgba(var(--ct, 255, 255, 255), 0.32);
+    /* Upcoming lines are readable (about 5:1 on the darkened backdrop) so the eye can read ahead;
+       sung lines step back further. */
+    color: rgba(var(--ct, 255, 255, 255), 0.6);
     transition:
       color 0.35s,
-      transform 0.35s,
-      filter 0.35s;
+      transform 0.35s;
     transform-origin: left center;
-    filter: blur(0.6px);
   }
   .line:hover {
-    color: rgba(var(--ct, 255, 255, 255), 0.6);
-    background: rgba(255, 255, 255, 0.05);
-    filter: none;
+    color: rgba(var(--ct, 255, 255, 255), 0.85);
+    background: rgba(255, 255, 255, 0.06);
   }
   .line.past {
-    color: rgba(var(--ct, 255, 255, 255), 0.45);
+    color: rgba(var(--ct, 255, 255, 255), 0.38);
   }
   .line.active {
-    filter: none;
     transform: scale(1.02);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .line,
+    .line.active {
+      transition: none;
+      transform: none;
+    }
   }
   /* Each word fills from left to right as it's sung. */
   .w {
     color: transparent;
-    background: linear-gradient(90deg, rgb(var(--c, 255, 255, 255)) var(--p), rgba(var(--ct, 255, 255, 255), 0.38) var(--p));
+    background: linear-gradient(90deg, rgb(var(--c, 255, 255, 255)) var(--p), rgba(var(--ct, 255, 255, 255), 0.6) var(--p));
     -webkit-background-clip: text;
     background-clip: text;
     white-space: pre-wrap;
@@ -752,14 +785,6 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-  }
-  .source {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    margin-right: 4px;
-    white-space: nowrap;
-    color: rgba(255, 255, 255, 0.5);
   }
   /* The pronunciation under each line: smaller and lighter, but following the line's state. */
   .roman {
@@ -860,17 +885,20 @@
       opacity: 0.55;
     }
   }
-  .sing {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    white-space: nowrap;
-    color: rgba(255, 255, 255, 0.75);
+  /* How much of the singer is left, while singing along. */
+  .level {
+    width: 80px;
   }
-  .num {
-    width: 30px;
-    font-variant-numeric: tabular-nums;
+  /* Lyrics options, at the end of the row. */
+  .more {
+    margin-left: auto;
+    flex: none;
+  }
+  /* Where the lyrics come from, under the last line. */
+  .credit {
+    margin: 18px 12px 0;
+    font-size: 12.5px;
+    color: rgba(255, 255, 255, 0.6);
   }
   .small {
     font-size: 12.5px;
@@ -1036,9 +1064,6 @@
     }
     .tools {
       flex-wrap: wrap;
-    }
-    .sing {
-      margin-left: 0;
     }
   }
 </style>

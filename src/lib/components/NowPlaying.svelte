@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, artUrl, formatTime, khz, qualityOf } from "#lib/api.js";
+  import { coverLight, shadeFor } from "#lib/coverLight.js";
   import { app, signalPath } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import LyricsView from "./LyricsView.svelte";
@@ -9,6 +10,37 @@
   const t = $derived(app.current);
   const album = $derived(app.currentAlbum);
   const art = $derived(artUrl(album?.art));
+
+  // The backdrop is the cover, blurred: darkened as much as this cover needs for the text on it to
+  // stay readable (a white cover needs a lot, a dark one almost none).
+  let shade = $state(shadeFor(null));
+  $effect(() => {
+    const url = artUrl(album?.artSmall) || art;
+    coverLight(url).then((light) => {
+      if ((artUrl(album?.artSmall) || art) === url) shade = shadeFor(light);
+    });
+  });
+
+  // With lyrics, the cover takes what the column has left after the song's info and controls, so
+  // everything fits any window (sized by its height as well as its width).
+  let leftW = $state(0);
+  let leftH = $state(0);
+  let infoH = $state(0);
+  const COLUMN_GAP = 22;
+  const coverSize = $derived(Math.round(Math.max(120, Math.min(leftW, leftH - infoH - COLUMN_GAP))));
+
+  /** The song's menu, with the sleep timer (it isn't about one song, but this is where it's looked for). */
+  function moreMenu(e: MouseEvent) {
+    if (!t) return;
+    const { clientX: x, clientY: y } = e;
+    app.trackMenu(e, [t], 0, [
+      {
+        label: app.sleepActive ? "Sleep Timer (on)…" : "Sleep Timer…",
+        icon: "moon",
+        action: () => setTimeout(() => (app.menu = { x, y, items: app.sleepItems() })),
+      },
+    ]);
+  }
 
   let dragging = $state(false);
   let dragValue = $state(0);
@@ -89,7 +121,7 @@
   ontouchcancel={touchEnd}
 >
   {#if art && app.theme === "album"}<div class="bg" style="background-image: url('{art}')"></div>{/if}
-  <div class="shade"></div>
+  <div class="shade" style="--shade: {art && app.theme === 'album' ? shade : 0.12}"></div>
 
   <div class="top" data-tauri-drag-region>
     <button class="icon-btn light" onclick={() => (app.nowPlayingOpen = false)} aria-label="Close Now Playing" title="Close (Esc)">
@@ -98,7 +130,7 @@
   </div>
 
   <div class="stage">
-    <div class="left">
+    <div class="left" bind:clientWidth={leftW} bind:clientHeight={leftH} style:--cover={app.lyricsOpen && leftH ? `${coverSize}px` : undefined}>
       <div class="cover" class:paused={!s?.playing}>
         {#if art}<img src={art} alt="" />{:else}<div class="ph"><Icon name="note" size={80} /></div>{/if}
         {#if t}
@@ -108,7 +140,7 @@
         {/if}
       </div>
 
-      <div class="info">
+      <div class="info" bind:clientHeight={infoH}>
         {#if t}
           <div class="title-row">
             <h1>{t.title}</h1>
@@ -127,7 +159,7 @@
             >
               <Icon name={app.isLoved(t) ? "heartFill" : "heart"} size={20} />
             </button>
-            <button class="icon-btn light skip" onclick={(e) => app.trackMenu(e, [t])} aria-label="More options" title="More options">
+            <button class="icon-btn light skip" onclick={moreMenu} aria-label="More options" title="More: add to playlist, go to album, sleep timer…">
               <Icon name="more" size={20} />
             </button>
           </div>
@@ -135,6 +167,15 @@
           <button class="album" onclick={() => app.go({ name: "album", id: t.albumId })}>{t.album}{t.year ? `, ${t.year}` : ""}</button>
         {:else}
           <h1>Nothing playing</h1>
+        {/if}
+
+        {#if quality || sp}
+          <div class="facts">
+            {#if quality}<QualityBadge {quality} {detail} large />{/if}
+            {#if sp}
+              <button class="path {sp.tier}" onclick={() => app.go({ name: "sound" })} title={sp.steps.join(", ")}>{sp.label}</button>
+            {/if}
+          </div>
         {/if}
 
         <div class="seek">
@@ -169,30 +210,24 @@
           </button>
           <button class="icon-btn light big" onclick={() => api.player("next")} aria-label="Next"><Icon name="next" size={30} /></button>
           <div class="side end">
-            <button
-              class="icon-btn light"
-              class:on={app.sleepActive}
-              onclick={(e) => {
-                const r = e.currentTarget.getBoundingClientRect();
-                app.menu = { x: r.left - 120, y: Math.max(8, r.top - 8 - app.sleepItems().length * 36), items: app.sleepItems() };
-              }}
-              aria-label="Sleep timer"
-              aria-pressed={app.sleepActive}
-              title="Sleep timer"
-            >
-              <Icon name="moon" size={20} />
-            </button>
-            <button class="icon-btn light" class:on={app.lyricsOpen} onclick={() => (app.lyricsOpen = !app.lyricsOpen)} aria-label="Lyrics" title="Lyrics (Ctrl+L)">
+            <!-- The sleep timer lives in ⋯; while one is set, it shows here so it can be seen and changed. -->
+            {#if app.sleepActive}
+              <button
+                class="icon-btn light on"
+                onclick={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  app.menu = { x: r.left - 120, y: Math.max(8, r.top - 8 - app.sleepItems().length * 36), items: app.sleepItems() };
+                }}
+                aria-label="Sleep timer is on"
+                title="Sleep timer is on: change or turn off"
+              >
+                <Icon name="moon" size={20} />
+              </button>
+            {/if}
+            <button class="icon-btn light" class:on={app.lyricsOpen} onclick={() => (app.lyricsOpen = !app.lyricsOpen)} aria-label="Lyrics" aria-pressed={app.lyricsOpen} title="Lyrics (Ctrl+L)">
               <Icon name="lyrics" size={20} />
             </button>
           </div>
-        </div>
-
-        <div class="facts">
-          {#if quality}<QualityBadge {quality} {detail} large />{/if}
-          {#if sp}
-            <button class="path {sp.tier}" onclick={() => app.go({ name: "sound" })} title={sp.steps.join(", ")}>{sp.label}</button>
-          {/if}
         </div>
       </div>
     </div>
@@ -206,19 +241,22 @@
 </div>
 
 <style>
+  /* Title, then its heart and ⋯ beside it, centred on the title's line. */
   .title-row {
     display: flex;
-    align-items: flex-start;
-    gap: 10px;
+    align-items: center;
+    gap: 4px;
+    width: 100%;
+    margin-bottom: 8px;
   }
   .title-row h1 {
     flex: 1;
     min-width: 0;
+    margin: 0;
   }
   .skip {
     flex: none;
-    margin-top: 2px;
-    opacity: 0.7;
+    opacity: 0.75;
   }
   .skip:hover {
     opacity: 1;
@@ -300,10 +338,15 @@
   :global(html.phone) .bg {
     animation: none;
   }
+  /* Black over the backdrop, as much as this cover needs (`--shade`, see coverLight.ts), with a
+     soft vignette so the edges recede. */
   .shade {
     position: absolute;
     inset: 0;
-    background: radial-gradient(ellipse at 30% 40%, rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.55));
+    background:
+      radial-gradient(ellipse at 30% 40%, transparent 40%, rgba(0, 0, 0, 0.35)),
+      rgba(0, 0, 0, var(--shade, 0.5));
+    transition: background-color 0.6s;
   }
   .top {
     position: absolute;
@@ -329,11 +372,15 @@
     gap: 5vw;
     min-width: 0;
   }
+  /* With lyrics: one column, as tall as the lyrics, its controls at the bottom on the same line as
+     the lyrics' own; the cover gets the height that's left (`--cover`, measured). */
   .with-lyrics .left {
     flex-direction: column;
     align-items: stretch;
-    gap: 26px;
-    width: min(30vw, 54vh);
+    justify-content: flex-end;
+    gap: 22px;
+    width: clamp(240px, 30vw, 520px);
+    height: 100%;
     flex: none;
   }
   .right {
@@ -354,7 +401,8 @@
       width 0.4s;
   }
   .with-lyrics .cover {
-    width: 100%;
+    width: var(--cover, 100%);
+    flex: none;
   }
   .cover.paused {
     transform: scale(0.92);
@@ -394,12 +442,12 @@
   }
   .artist {
     font-size: 19px;
-    color: rgba(255, 255, 255, 0.85);
+    color: rgba(255, 255, 255, 0.9);
     text-align: left;
   }
   .album {
     font-size: 14px;
-    color: rgba(255, 255, 255, 0.55);
+    color: rgba(255, 255, 255, 0.72);
     margin-top: 3px;
     text-align: left;
   }
@@ -419,7 +467,7 @@
     display: flex;
     justify-content: space-between;
     font-size: 12px;
-    color: rgba(255, 255, 255, 0.6);
+    color: rgba(255, 255, 255, 0.75);
     font-variant-numeric: tabular-nums;
     margin-top: 4px;
   }
@@ -458,12 +506,13 @@
     width: 74px;
     height: 74px;
   }
+  /* The sound's quality, under the album (above the seek bar, so the controls end the column). */
   .facts {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     gap: 10px;
-    margin-top: 22px;
+    margin-top: 12px;
   }
   .facts :global(.detail) {
     color: rgba(255, 255, 255, 0.7);
@@ -483,6 +532,51 @@
   .path.bitperfect {
     color: var(--gold);
   }
+  /* ---------- Short windows: the extras go first, so the controls never fall off the bottom ---------- */
+  @media (max-height: 760px) and (min-width: 721px) {
+    .stage {
+      padding-top: 60px;
+      padding-bottom: 28px;
+    }
+    .facts {
+      display: none;
+    }
+    .seek {
+      margin-top: 16px;
+    }
+  }
+  @media (max-height: 600px) and (min-width: 721px) {
+    .album {
+      display: none;
+    }
+    h1,
+    .with-lyrics h1 {
+      font-size: 20px;
+    }
+    .artist {
+      font-size: 16px;
+    }
+    .huge {
+      width: 60px;
+      height: 60px;
+    }
+  }
+
+  /* ---------- Less motion when the system asks for it ---------- */
+  @media (prefers-reduced-motion: reduce) {
+    .np {
+      animation: none;
+    }
+    .bg {
+      animation: none;
+    }
+    .cover,
+    .cover.paused {
+      transition: none;
+      transform: none;
+    }
+  }
+
   /* ---------- Phones: one column, like Apple Music on iPhone ---------- */
   @media (max-width: 720px) {
     .top {
@@ -502,12 +596,14 @@
       align-items: stretch;
       gap: 28px;
       width: 100%;
+      height: auto;
       flex: 1;
       justify-content: center;
     }
     .cover,
     .with-lyrics .cover {
       width: 100%;
+      flex: initial;
       max-width: 440px;
       align-self: center;
       border-radius: 12px;
