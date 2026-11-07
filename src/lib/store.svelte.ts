@@ -70,7 +70,7 @@ function animate(kind: "forward" | "back" | "tab", change: () => void) {
     if (run === transitions) delete root.dataset.nav;
   });
 }
-import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type DspSettings, type HealthProgress, type HealthReport, type HistoryStats, type Mark, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track, type VoiceBatch, type VoiceJob, type VoiceStatus } from "./api";
+import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type DspSettings, type HealthProgress, type HealthReport, type HistoryStats, type JobProgress, type Mark, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track, type VoiceBatch, type VoiceJob, type VoiceStatus } from "./api";
 
 export type View =
   | { name: "home" }
@@ -201,6 +201,14 @@ class AppState {
   artistEditing = $state<string | null>(null);
   /** The song open in Fix Song Info. */
   fixing = $state<Track | null>(null);
+  /** The album open in Fix Album Info. */
+  fixingAlbum = $state<Album | null>(null);
+  /** Fix all (songs without info) while it runs. */
+  fixAllJob = $state<JobProgress | null>(null);
+  /** The check for artists under two names while it runs. */
+  artistJob = $state<JobProgress | null>(null);
+  /** Bumped when a library-fix job ends, so Needs Attention reloads what it shows. */
+  fixJobsDone = $state(0);
   /** The open folder browser (Android): call with the chosen folder, or null if cancelled. */
   folderBrowser = $state<((path: string | null) => void) | null>(null);
   /** The smart playlist being edited (a copy), or null. */
@@ -528,6 +536,18 @@ class AppState {
       listen("marks-changed", () => this.loadMarks()),
       listen<HealthProgress>("health-progress", (e) => (this.healthJob = e.payload.running ? e.payload : null)),
       listen("health-done", () => this.loadHealth()),
+      listen<JobProgress>("fix-all-progress", (e) => {
+        this.fixAllJob = e.payload.running ? e.payload : null;
+        if (!e.payload.running) {
+          this.fixJobsDone++;
+          const n = e.payload.found ?? 0;
+          this.showToast(n ? `Found the info of ${n} ${n === 1 ? "song" : "songs"}` : "None of the songs without info were found in the catalogues");
+        }
+      }),
+      listen<JobProgress>("artist-check-progress", (e) => {
+        this.artistJob = e.payload.running ? e.payload : null;
+        if (!e.payload.running) this.fixJobsDone++;
+      }),
       listen<number | null>("sleep-timer", (e) => (this.sleepEndsAt = e.payload)),
       listen<{ done: number; total: number }>("analysis-progress", (e) => {
         this.analysis = e.payload.done >= e.payload.total ? null : e.payload;
@@ -815,6 +835,9 @@ class AppState {
       ...(this.albumTracks(album).some((t) => t.cue)
         ? []
         : [{ label: "Edit Album Info…", icon: "edit", action: () => (this.tagEditing = this.albumTracks(album)) }]),
+      ...(this.albumTracks(album).some((t) => t.cue)
+        ? []
+        : [{ label: "Fix Album Info…", icon: "sparkle", action: () => (this.fixingAlbum = album) }]),
       { label: "Change Cover…", icon: "album", action: () => (this.coverEditing = album.id) },
       { label: "Go to Artist", icon: "artist", action: () => this.go({ name: "artist", artist: this.artistOf(album.artist) }) },
     ]);

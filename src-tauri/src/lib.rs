@@ -14,6 +14,7 @@ mod health;
 mod hotkeys;
 mod hub;
 mod jobs;
+mod libfix;
 pub mod library;
 pub mod lyrics;
 mod marks;
@@ -188,6 +189,16 @@ pub fn run() {
             commands::reset_artist_image,
             commands::find_song_info,
             commands::save_song_info,
+            commands::find_album_info,
+            commands::album_plan,
+            commands::save_album_info,
+            commands::fix_all_start,
+            commands::fix_all_stop,
+            commands::artist_check_start,
+            commands::artist_check_stop,
+            commands::artist_pairs,
+            commands::artist_pair_dismiss,
+            commands::merge_artist,
             commands::set_skipped,
             commands::set_skip_instrumentals,
             commands::get_marks,

@@ -186,7 +186,7 @@ fn write(path: &Path, f: &Found, cover: Option<Vec<u8>>) -> Result<(), String> {
     Ok(())
 }
 
-fn download(url: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn download(url: &str) -> Result<Vec<u8>, String> {
     let r = crate::net::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -269,7 +269,7 @@ fn wanted(t: &Track) -> (Option<String>, String) {
 /// How much of the search a result contains (0 to 1): the share of the search's words found in
 /// its title, artist and album. Words in scripts without spaces (Japanese, Chinese) count when
 /// they appear anywhere in it.
-fn relevance(words: &[String], name: &str, by: &str, album: &str) -> f64 {
+pub(crate) fn relevance(words: &[String], name: &str, by: &str, album: &str) -> f64 {
     if words.is_empty() {
         return 1.0;
     }
@@ -281,7 +281,7 @@ fn relevance(words: &[String], name: &str, by: &str, album: &str) -> f64 {
 }
 
 /// Lower-case words of letters and digits ("Don't" → "dont").
-fn search_words(s: &str) -> Vec<String> {
+pub(crate) fn search_words(s: &str) -> Vec<String> {
     s.split(|c: char| c.is_whitespace() || matches!(c, '-' | '–' | '—' | '|' | '/' | ',' | '&' | '(' | ')' | '[' | ']'))
         .map(norm)
         .filter(|w| !w.is_empty())
@@ -421,7 +421,7 @@ impl Want {
 }
 
 /// Written with Chinese, Japanese or Korean letters.
-fn cjk(s: &str) -> bool {
+pub(crate) fn cjk(s: &str) -> bool {
     use crate::romanize::{is_han, is_hangul, is_kana};
     s.chars().any(|c| is_han(c) || is_hangul(c) || is_kana(c))
 }
@@ -440,7 +440,7 @@ fn artist_names(credit: &str) -> Vec<String> {
 }
 
 /// The names in an artist credit as written.
-fn split_credit(credit: &str) -> Vec<String> {
+pub(crate) fn split_credit(credit: &str) -> Vec<String> {
     let mut s = format!(" {credit} ");
     for joiner in [" feat. ", " feat ", " ft. ", " featuring ", " x ", " X ", " with "] {
         s = s.replace(joiner, "/");
@@ -579,17 +579,17 @@ fn deezer_candidates(client: &reqwest::blocking::Client, term: &str, limit: u32)
 }
 
 /// What Deezer's page for a song adds to its search result.
-struct DeezerMore {
+pub(crate) struct DeezerMore {
     /// Everyone credited ("Wuthering Waves, jixwang & Vision Sound"), when more than one.
-    artist: Option<String>,
-    year: Option<u32>,
-    track_no: Option<u32>,
-    disc_no: Option<u32>,
-    album_id: Option<u64>,
+    pub artist: Option<String>,
+    pub year: Option<u32>,
+    pub track_no: Option<u32>,
+    pub disc_no: Option<u32>,
+    pub album_id: Option<u64>,
 }
 
 /// Deezer's page for song `id`: the search lists only the main artist and no date.
-fn deezer_details(client: &reqwest::blocking::Client, id: u64) -> Option<DeezerMore> {
+pub(crate) fn deezer_details(client: &reqwest::blocking::Client, id: u64) -> Option<DeezerMore> {
     let v: serde_json::Value = client.get(format!("https://api.deezer.com/track/{id}")).send().ok()?.json().ok()?;
     if v.get("error").is_some() {
         return None;
@@ -606,24 +606,26 @@ fn deezer_details(client: &reqwest::blocking::Client, id: u64) -> Option<DeezerM
 }
 
 /// The album's genre: Deezer's song search and pages don't give one, its album page does.
-fn album_genre(client: &reqwest::blocking::Client, album_ref: &str) -> Option<String> {
+pub(crate) fn album_genre(client: &reqwest::blocking::Client, album_ref: &str) -> Option<String> {
     let id = album_ref.strip_prefix("deezer:")?;
     let v: serde_json::Value = client.get(format!("https://api.deezer.com/album/{id}")).send().ok()?.json().ok()?;
     v["genres"]["data"][0]["name"].as_str().filter(|g| !g.is_empty()).map(str::to_string)
 }
 
 /// A song in an album's track list.
-struct AlbumSong {
-    title: String,
-    artist: String,
-    duration: f64,
-    track_no: Option<u32>,
-    disc_no: Option<u32>,
-    deezer_id: Option<u64>,
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumSong {
+    pub title: String,
+    pub artist: String,
+    pub duration: f64,
+    pub track_no: Option<u32>,
+    pub disc_no: Option<u32>,
+    pub deezer_id: Option<u64>,
 }
 
 /// The songs of the album `album_ref` names, in order.
-fn album_songs(client: &reqwest::blocking::Client, album_ref: &str) -> Vec<AlbumSong> {
+pub(crate) fn album_songs(client: &reqwest::blocking::Client, album_ref: &str) -> Vec<AlbumSong> {
     if let Some(id) = album_ref.strip_prefix("deezer:") {
         let url = format!("https://api.deezer.com/album/{id}/tracks?limit=300");
         let Some(v) = client.get(url).send().ok().and_then(|r| r.json::<serde_json::Value>().ok()) else { return Vec::new() };
@@ -663,7 +665,7 @@ fn album_songs(client: &reqwest::blocking::Client, album_ref: &str) -> Vec<Album
 
 /// Which of the album's songs (not yet `used`) is `t`: the same length (within 3 s) and the same
 /// kind of recording (the instrumental for 伴奏), then the same track number, then the closest.
-fn match_song(t: &Track, songs: &[AlbumSong], used: &HashSet<usize>) -> Option<usize> {
+pub(crate) fn match_song(t: &Track, songs: &[AlbumSong], used: &HashSet<usize>) -> Option<usize> {
     let kinds = version_kinds(&t.title);
     songs
         .iter()
@@ -796,29 +798,38 @@ pub fn save_choice(ctx: &Ctx, id: &str, mut choice: Candidate, keep_title: bool,
         }
     }
     let others = plan.len() - 1;
+    let later = commit(ctx, &plan, choice.cover_url.as_deref(), true)?;
+    Ok(Saved { later, others, matched })
+}
 
+/// Writes the songs' new info (the first song's failure is an error, the others' are only logged)
+/// and shows it at once. The playing song's file is written when it ends; returns whether the
+/// first song is that one. All the songs are of one album, with `cover_url`'s cover.
+pub(crate) fn commit(ctx: &Ctx, plan: &[(Track, Found)], cover_url: Option<&str>, rescan: bool) -> Result<bool, String> {
+    let state = ctx.state.clone();
+    let Some((first, _)) = plan.first() else { return Ok(false) };
     let playing = {
         let s = state.engine.status();
         s.index.and_then(|i| s.queue.get(i).cloned())
     };
-    let cover = choice.cover_url.as_deref().and_then(|u| download(u).ok());
+    let cover = cover_url.and_then(|u| download(u).ok());
     let mut later = false;
     let mut written = 0;
     {
         let mut rt = runtime().lock().unwrap();
         let tried = rt.tried.get_or_insert_with(|| load_tried(&state.data_dir));
         let mut new = false;
-        for (t, _) in &plan {
+        for (t, _) in plan {
             new |= tried.insert(t.path.clone());
         }
         if new {
             save_tried(&state.data_dir, tried);
         }
-        for (t, f) in &plan {
+        for (t, f) in plan {
             if playing.as_deref() == Some(t.id.as_str()) {
                 rt.playing = Some(t.id.clone());
                 rt.waiting.insert(t.id.clone(), (PathBuf::from(&t.path), f.clone()));
-                later |= t.id == track.id;
+                later |= t.id == first.id;
             } else {
                 rt.waiting.remove(&t.id);
             }
@@ -835,13 +846,13 @@ pub fn save_choice(ctx: &Ctx, id: &str, mut choice: Candidate, keep_title: bool,
             Err(e) => log::warn!("couldn't tag {}: {e}", t.path),
         }
     }
-    show_now(&state, &plan, cover.as_deref());
+    show_now(&state, plan, cover.as_deref());
     ctx.emit("library-changed", ());
     // A rescan would read the playing song's old tags back: it runs when that song ends.
-    if written > 0 && playing.as_deref().is_none_or(|p| !plan.iter().any(|(t, _)| t.id == p)) {
+    if rescan && written > 0 && playing.as_deref().is_none_or(|p| !plan.iter().any(|(t, _)| t.id == p)) {
         crate::jobs::start_scan(ctx.clone());
     }
-    Ok(Saved { later, others, matched })
+    Ok(later)
 }
 
 /// The folder an album's files are in: the song's folder, or the one above a disc folder
@@ -949,7 +960,7 @@ fn strip_noise(s: &str) -> String {
 }
 
 /// Letters and digits only, lower case, for comparing names.
-fn norm(s: &str) -> String {
+pub(crate) fn norm(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
@@ -985,6 +996,32 @@ struct Hit {
     deezer_id: Option<u64>,
 }
 
+thread_local! {
+    static PACED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with the iTunes catalogue asked at most once every 3 seconds: it allows about 20
+/// searches a minute, and a batch job (Fix all, the artist check) would otherwise be refused.
+pub(crate) fn paced<T>(f: impl FnOnce() -> T) -> T {
+    PACED.with(|p| p.set(true));
+    let r = f();
+    PACED.with(|p| p.set(false));
+    r
+}
+
+/// Before each iTunes request: waits its turn inside `paced`, returns at once elsewhere.
+pub(crate) fn pace_itunes() {
+    if !PACED.with(|p| p.get()) {
+        return;
+    }
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap();
+    if let Some(t) = *last {
+        std::thread::sleep(std::time::Duration::from_millis(3100).saturating_sub(t.elapsed()));
+    }
+    *last = Some(std::time::Instant::now());
+}
+
 /// Searches the catalogue for this song; several stores, since local music is often only
 /// listed in its own country's store.
 pub fn lookup(t: &Track) -> Option<Found> {
@@ -1004,6 +1041,7 @@ pub fn lookup(t: &Track) -> Option<Found> {
             "https://itunes.apple.com/search?media=music&entity=song&limit=25&country={country}&term={}",
             urlencoding::encode(&term)
         );
+        pace_itunes();
         let Ok(r) = client.get(&url).send() else { continue };
         let Ok(s) = r.json::<Search>() else { continue };
         if let Some((rank, found, _)) = best(&s.results, artist.as_deref(), &title, t.duration) {

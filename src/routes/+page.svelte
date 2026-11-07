@@ -15,6 +15,7 @@
   import SmartEditor from "#lib/components/SmartEditor.svelte";
   import TagEditor from "#lib/components/TagEditor.svelte";
   import FixInfo from "#lib/components/FixInfo.svelte";
+  import FixAlbum from "#lib/components/FixAlbum.svelte";
   import ArtistPicture from "#lib/components/ArtistPicture.svelte";
   import SkippedSongs from "#lib/components/SkippedSongs.svelte";
   import CoverPicker from "#lib/components/CoverPicker.svelte";
@@ -332,6 +333,7 @@
 {#if app.smartEditing}<SmartEditor />{/if}
 {#if app.tagEditing}<TagEditor />{/if}
 {#if app.fixing}{#key app.fixing.id}<FixInfo />{/key}{/if}
+{#if app.fixingAlbum}{#key app.fixingAlbum.id}<FixAlbum />{/key}{/if}
 {#if app.artistEditing}{#key app.artistEditing}<ArtistPicture />{/key}{/if}
 {#if app.skippedOpen}<SkippedSongs />{/if}
 <AccessBanner />

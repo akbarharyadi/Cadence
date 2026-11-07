@@ -1256,6 +1256,60 @@ pub fn save_song_info(
     (move || crate::autotag::save_choice(ctx, &id, info, keep_title, whole_album))()
 }
 
+/// Fix Album Info: catalogue albums for an album (searching `query`, or its artist and name).
+pub fn find_album_info(ctx: &Ctx, album_id: String, query: Option<String>) -> Result<crate::libfix::AlbumResults, String> {
+    crate::libfix::find_album_info(ctx, &album_id, query)
+}
+
+/// Fix Album Info: the catalogue album's songs, lined up with the album's files.
+pub fn album_plan(ctx: &Ctx, album_id: String, album_ref: String) -> Result<crate::libfix::AlbumPlan, String> {
+    crate::libfix::album_plan(ctx, &album_id, &album_ref)
+}
+
+/// Fix Album Info: writes the picked album's info into the album's files.
+pub fn save_album_info(
+    ctx: &Ctx,
+    album_id: String,
+    album: crate::libfix::AlbumCandidate,
+    songs: Vec<crate::autotag::AlbumSong>,
+    assign: Vec<crate::libfix::Assign>,
+    keep_titles: bool,
+) -> Result<crate::libfix::AlbumSaved, String> {
+    crate::libfix::save_album_info(ctx, &album_id, album, songs, assign, keep_titles)
+}
+
+/// Looks up every song without tags in the background; false if that's running already.
+pub fn fix_all_start(ctx: &Ctx) -> bool {
+    crate::libfix::fix_all_start(ctx.clone())
+}
+
+pub fn fix_all_stop(_ctx: &Ctx) {
+    crate::libfix::fix_all_stop();
+}
+
+/// Asks the catalogue which artist names in Japanese or Chinese letters have a Latin one too.
+pub fn artist_check_start(ctx: &Ctx) -> bool {
+    crate::libfix::artist_check_start(ctx.clone())
+}
+
+pub fn artist_check_stop(_ctx: &Ctx) {
+    crate::libfix::artist_check_stop();
+}
+
+/// Artists in the library under two names.
+pub fn artist_pairs(ctx: &Ctx) -> crate::libfix::ArtistPairs {
+    crate::libfix::artist_pairs(ctx)
+}
+
+pub fn artist_pair_dismiss(ctx: &Ctx, native: String, latin: String) {
+    crate::libfix::artist_pair_dismiss(ctx, native, latin);
+}
+
+/// Renames an artist in every song (artist and album artist); returns how many songs.
+pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<usize, String> {
+    crate::libfix::merge_artist(ctx, from, to)
+}
+
 /// Lyrics lines in Latin letters (Japanese romaji, Chinese pinyin, Korean); empty for lines
 /// that need none.
 pub fn romanize_lyrics(_ctx: &Ctx, lines: Vec<String>) -> Result<Vec<String>, String> {
@@ -1806,6 +1860,16 @@ macro_rules! cadence_commands {
             blocking write_tags(ids: Vec<String>, changes: $crate::tagedit::TagChanges) -> $crate::api::TagsSaved;
             blocking find_song_info(id: String, query: Option<String>) -> $crate::api::SongInfoResults;
             blocking save_song_info(id: String, info: $crate::autotag::Candidate, keep_title: bool, whole_album: bool) -> $crate::autotag::Saved;
+            blocking find_album_info(album_id: String, query: Option<String>) -> $crate::libfix::AlbumResults;
+            blocking album_plan(album_id: String, album_ref: String) -> $crate::libfix::AlbumPlan;
+            blocking save_album_info(album_id: String, album: $crate::libfix::AlbumCandidate, songs: Vec<$crate::autotag::AlbumSong>, assign: Vec<$crate::libfix::Assign>, keep_titles: bool) -> $crate::libfix::AlbumSaved;
+            plain fix_all_start() -> bool;
+            plain fix_all_stop() -> ();
+            plain artist_check_start() -> bool;
+            plain artist_check_stop() -> ();
+            plain artist_pairs() -> $crate::libfix::ArtistPairs;
+            plain artist_pair_dismiss(native: String, latin: String) -> ();
+            blocking merge_artist(from: String, to: String) -> usize;
             blocking romanize_lyrics(lines: Vec<String>) -> Vec<String>;
             blocking find_covers(album_id: String, query: Option<String>) -> $crate::api::CoverResults;
             blocking set_album_cover(album_id: String, source: $crate::artists::Source) -> $crate::covers::Changed;

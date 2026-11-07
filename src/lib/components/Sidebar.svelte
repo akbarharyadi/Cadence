@@ -48,6 +48,22 @@
             unit: "%",
             about: `Listening to “${app.voice.job.title}” once, to place its lyrics on the singing.`,
           }
+        : app.fixAllJob
+        ? {
+            label: "Finding song info",
+            done: app.fixAllJob.done,
+            total: app.fixAllJob.total,
+            unit: "songs",
+            about: `Looking up songs without info in the iTunes and Deezer catalogues, one every few seconds (${app.fixAllJob.found ?? 0} found so far).`,
+          }
+        : app.artistJob
+        ? {
+            label: "Checking artist names",
+            done: app.artistJob.done,
+            total: app.artistJob.total,
+            unit: "names",
+            about: "Asking the catalogue which artists in your library also go by a name in Latin letters.",
+          }
         : app.healthJob
         ? {
             label: app.healthJob.kind === "quality" ? "Checking file quality" : "Checking files",

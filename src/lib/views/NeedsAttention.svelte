@@ -1,8 +1,9 @@
 <script lang="ts">
   // Needs Attention: the library's info problems, each with its fix. Albums split in two (songs of
-  // one album, in one folder, under different album artists), songs without tags, and albums
-  // without a cover. Worked out from the library as it is; nothing runs in the background.
-  import { api, type Album, type Track } from "#lib/api.js";
+  // one album, in one folder, under different album artists), artists under two names (米津玄師 /
+  // Kenshi Yonezu), songs without tags, and albums without a cover. Worked out from the library as
+  // it is; the catalogue is only asked when the user starts Fix all or the artist check.
+  import { api, type Album, type ArtistPairs, type Track } from "#lib/api.js";
   import { app } from "#lib/store.svelte.js";
   import Icon from "#lib/components/Icon.svelte";
 
@@ -62,8 +63,45 @@
     }
   }
 
+  /** Artists under two names, from the catalogue check (kept between runs). */
+  let artistPairs = $state<ArtistPairs | null>(null);
+  const loadPairs = async () => (artistPairs = await api.artistPairs());
+  // Again whenever the library changes or a check ends.
+  $effect(() => {
+    void app.tracks;
+    void app.fixJobsDone;
+    loadPairs();
+  });
+
+  async function fixAll() {
+    if (!(await api.fixAllStart())) app.showToast("Already looking up songs without info");
+  }
+
+  async function checkArtists() {
+    if (!(await api.artistCheckStart())) app.showToast("Already checking artist names");
+  }
+
+  /** Writes `to` in place of `from` in every song, so the artist shows up once. */
+  async function mergeArtist(from: string, to: string) {
+    busy = `artist|${from}`;
+    try {
+      const n = await api.mergeArtist(from, to);
+      app.showToast(`${songs(n)} now say “${to}” instead of “${from}”`);
+    } catch (e) {
+      app.showToast(`Couldn't rename “${from}”: ${e}`);
+    } finally {
+      busy = null;
+      loadPairs();
+    }
+  }
+
+  async function notSame(native: string, latin: string) {
+    await api.artistPairDismiss(native, latin);
+    loadPairs();
+  }
+
   const songs = (n: number) => `${n} ${n === 1 ? "song" : "songs"}`;
-  const nothing = $derived(!splits.length && !untagged.length && !coverless.length);
+  const nothing = $derived(!splits.length && !untagged.length && !coverless.length && !artistPairs?.pairs.length);
 </script>
 
 <div class="page">
@@ -105,10 +143,65 @@
     </section>
   {/if}
 
+  {#if artistPairs?.pairs.length}
+    <section>
+      <h2 class="section-title">Same artist under two names <span class="n">{artistPairs.pairs.length}</span></h2>
+      <p class="secondary about">
+        Some songs name the artist in Japanese or Chinese letters and others in Latin ones, so the artist shows up twice. Pick the name
+        all their songs should have.
+      </p>
+      {#each artistPairs.pairs as p (p.native + p.latin)}
+        <div class="row">
+          <Icon name="artist" size={18} />
+          <div class="lines">
+            <span class="title">{p.native} · {p.latin}</span>
+            <span class="sub">{p.native} ({songs(p.nativeSongs)}) · {p.latin} ({songs(p.latinSongs)})</span>
+          </div>
+          <div class="actions">
+            <button class="pill ghost small" disabled={busy !== null} onclick={() => mergeArtist(p.latin, p.native)}>Use {p.native}</button>
+            <button class="pill ghost small" disabled={busy !== null} onclick={() => mergeArtist(p.native, p.latin)}>Use {p.latin}</button>
+            <button class="pill ghost small" disabled={busy !== null} onclick={() => notSame(p.native, p.latin)} title="They're different artists: don't suggest this again">Not the same</button>
+          </div>
+        </div>
+      {/each}
+    </section>
+  {/if}
+
+  {#if artistPairs && (artistPairs.unchecked > 0 || app.artistJob)}
+    <section>
+      <h2 class="section-title">Artist names</h2>
+      <p class="secondary about">
+        {#if app.artistJob}
+          Checking {app.artistJob.done} of {app.artistJob.total} names in Japanese or Chinese letters; artists also listed under a Latin name will show up above.
+        {:else}
+          {artistPairs.unchecked} artist {artistPairs.unchecked === 1 ? "name is" : "names are"} in Japanese or Chinese letters. The catalogue can tell which
+          of them are also in your library under a Latin name (about 6 seconds a name, in the background; only the names are sent).
+        {/if}
+      </p>
+      <div class="actions inline">
+        {#if app.artistJob}
+          <button class="pill ghost small" onclick={() => api.artistCheckStop()}>Stop</button>
+        {:else}
+          <button class="pill ghost small" onclick={checkArtists}><Icon name="search" size={14} />Check artist names</button>
+        {/if}
+      </div>
+    </section>
+  {/if}
+
   {#if untagged.length}
     <section>
       <h2 class="section-title">Songs without info <span class="n">{untagged.length}</span></h2>
       <p class="secondary about">No artist or album in the file (often downloads named “Artist - Title”). Fix song info finds them in the iTunes and Deezer catalogues.</p>
+      <div class="actions inline">
+        {#if app.fixAllJob}
+          <span class="secondary">Looking up {app.fixAllJob.done} of {app.fixAllJob.total}, {app.fixAllJob.found ?? 0} found…</span>
+          <button class="pill ghost small" onclick={() => api.fixAllStop()}>Stop</button>
+        {:else}
+          <button class="pill ghost small" onclick={fixAll} title="Looks each one up in the background, one every few seconds; only clear matches are saved">
+            <Icon name="sparkle" size={14} />Fix all {untagged.length}
+          </button>
+        {/if}
+      </div>
       {#each allUntagged ? untagged : untagged.slice(0, 20) as t (t.id)}
         <div class="row">
           <Icon name="song" size={18} />
@@ -219,6 +312,12 @@
     display: flex;
     gap: 6px;
     flex: none;
+  }
+  .actions.inline {
+    align-items: center;
+    gap: 10px;
+    margin: 0 10px 8px;
+    font-size: 13px;
   }
   .small {
     padding: 4px 11px;

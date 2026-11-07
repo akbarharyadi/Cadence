@@ -464,6 +464,19 @@ export const api = {
   connectListenBrainz: (token: string) => invoke<string>("connect_listenbrainz", { token }),
   disconnectListenBrainz: () => invoke<void>("disconnect_listenbrainz"),
   setLyricsOnline: (enabled: boolean) => invoke<void>("set_lyrics_online", { enabled }),
+  findAlbumInfo: (albumId: string, query?: string) =>
+    invoke<{ term: string; results: AlbumMatch[] }>("find_album_info", { albumId, query: query ?? null }),
+  albumPlan: (albumId: string, albumRef: string) => invoke<AlbumPlan>("album_plan", { albumId, albumRef }),
+  saveAlbumInfo: (albumId: string, album: AlbumMatch, songs: CatalogSong[], assign: SongAssign[], keepTitles: boolean) =>
+    invoke<{ songs: number; matched: number; later: boolean }>("save_album_info", { albumId, album, songs, assign, keepTitles }),
+  fixAllStart: () => invoke<boolean>("fix_all_start"),
+  fixAllStop: () => invoke<void>("fix_all_stop"),
+  artistCheckStart: () => invoke<boolean>("artist_check_start"),
+  artistCheckStop: () => invoke<void>("artist_check_stop"),
+  artistPairs: () => invoke<ArtistPairs>("artist_pairs"),
+  artistPairDismiss: (native: string, latin: string) => invoke<void>("artist_pair_dismiss", { native, latin }),
+  /** Renames an artist in every song's artist and album artist; returns how many songs. */
+  mergeArtist: (from: string, to: string) => invoke<number>("merge_artist", { from, to }),
   findSongInfo: (id: string, query?: string) => invoke<{ term: string; results: SongInfo[] }>("find_song_info", { id, query: query ?? null }),
   /** keepTitle: the song's own title instead of the match's; wholeAlbum: the album's info for its other songs too. */
   saveSongInfo: (id: string, info: SongInfo, keepTitle: boolean, wholeAlbum: boolean) =>
@@ -627,6 +640,69 @@ export interface SongInfo {
   source: string;
   /** Its album in that catalogue, for the album's other songs and genre. */
   albumRef: string | null;
+}
+
+/** An album in the iTunes or Deezer catalogue (Fix Album Info). */
+export interface AlbumMatch {
+  title: string;
+  artist: string;
+  year: number | null;
+  genre: string;
+  coverUrl: string | null;
+  thumb: string | null;
+  tracks: number;
+  albumRef: string;
+  source: string;
+  /** Every song of the album in the library matches one of its songs by length. */
+  likely: boolean;
+  /** How many of the album's files match one of its songs (for the likeliest few results). */
+  matched: number;
+}
+
+/** A song of a catalogue album. */
+export interface CatalogSong {
+  title: string;
+  artist: string;
+  duration: number;
+  trackNo: number | null;
+  discNo: number | null;
+  deezerId: number | null;
+}
+
+/** Which catalogue song (index into the album's songs) a file is; null: not on the album. */
+export interface SongAssign {
+  trackId: string;
+  song: number | null;
+}
+
+export interface AlbumPlan {
+  songs: CatalogSong[];
+  assign: SongAssign[];
+  year: number | null;
+  genre: string;
+}
+
+/** A background job's progress (Fix all: `found` songs tagged so far). */
+export interface JobProgress {
+  done: number;
+  total: number;
+  found?: number;
+  running: boolean;
+}
+
+/** An artist in the library under two names. */
+export interface ArtistPair {
+  native: string;
+  nativeSongs: number;
+  latin: string;
+  latinSongs: number;
+}
+
+export interface ArtistPairs {
+  pairs: ArtistPair[];
+  /** Names in Japanese or Chinese letters not checked yet. */
+  unchecked: number;
+  running: boolean;
 }
 
 /** What Fix Song Info saved. */
