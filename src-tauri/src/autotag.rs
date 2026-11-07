@@ -114,6 +114,9 @@ pub fn on_track_change(ctx: &Ctx, previous: Option<&str>, current: Option<&str>)
             return;
         };
         log::info!("matched {} → {} — {} ({})", track.path, found.artist, found.title, found.album);
+        let mut rec = crate::changes::Recorder::new(&ctx, format!("Found the info of “{}”", found.title));
+        rec.add(&track.path, false);
+        rec.finish(&ctx);
         let path = PathBuf::from(&track.path);
         let mut rt = runtime().lock().unwrap();
         if rt.playing.as_deref() == Some(id.as_str()) {
@@ -174,12 +177,11 @@ fn write(path: &Path, f: &Found, cover: Option<Vec<u8>>) -> Result<(), String> {
         tag.insert_text(ItemKey::TrackSubtitle, sub.to_string());
         changed = true;
     }
-    if let (false, Some(cover)) = (f.replace_cover, cover) {
-        if !tag.pictures().iter().any(|p| p.pic_type() == PictureType::CoverFront) {
+    if let (false, Some(cover)) = (f.replace_cover, cover)
+        && !tag.pictures().iter().any(|p| p.pic_type() == PictureType::CoverFront) {
             tag.push_picture(Picture::unchecked(cover).pic_type(PictureType::CoverFront).mime_type(MimeType::Jpeg).build());
             changed = true;
         }
-    }
     if changed {
         tag.save_to_path(path, WriteOptions::default()).map_err(|e| e.to_string())?;
     }
@@ -688,6 +690,8 @@ pub struct Saved {
     pub others: usize,
     /// Of those, the ones found on the album, which got their own title, artist and track number.
     pub matched: usize,
+    /// The change, to undo it.
+    pub change: Option<String>,
 }
 
 /// Saves the info the user picked: its title too, or the song's own (`keep_title`); and with
@@ -722,11 +726,10 @@ pub fn save_choice(ctx: &Ctx, id: &str, mut choice: Candidate, keep_title: bool,
         };
         (t, mates)
     };
-    if choice.genre.is_empty() {
-        if let Some(g) = choice.album_ref.as_deref().and_then(|r| album_genre(&client, r)) {
+    if choice.genre.is_empty()
+        && let Some(g) = choice.album_ref.as_deref().and_then(|r| album_genre(&client, r)) {
             choice.genre = g;
         }
-    }
     let album = |title: String, artist: String, track_no: Option<u32>, disc_no: Option<u32>| Found {
         title,
         artist,
@@ -798,16 +801,27 @@ pub fn save_choice(ctx: &Ctx, id: &str, mut choice: Candidate, keep_title: bool,
         }
     }
     let others = plan.len() - 1;
-    let later = commit(ctx, &plan, choice.cover_url.as_deref(), true)?;
-    Ok(Saved { later, others, matched })
+    let mut rec = crate::changes::Recorder::new(ctx, format!("Fix song info: “{}”", plan[0].1.title));
+    let later = commit(ctx, &plan, choice.cover_url.as_deref(), true, &mut rec)?;
+    Ok(Saved { later, others, matched, change: rec.finish(ctx) })
 }
 
 /// Writes the songs' new info (the first song's failure is an error, the others' are only logged)
 /// and shows it at once. The playing song's file is written when it ends; returns whether the
 /// first song is that one. All the songs are of one album, with `cover_url`'s cover.
-pub(crate) fn commit(ctx: &Ctx, plan: &[(Track, Found)], cover_url: Option<&str>, rescan: bool) -> Result<bool, String> {
+pub(crate) fn commit(
+    ctx: &Ctx,
+    plan: &[(Track, Found)],
+    cover_url: Option<&str>,
+    rescan: bool,
+    rec: &mut crate::changes::Recorder,
+) -> Result<bool, String> {
     let state = ctx.state.clone();
     let Some((first, _)) = plan.first() else { return Ok(false) };
+    // What the files are like now, to undo the change (the playing song's is written later).
+    for (t, f) in plan {
+        rec.add(&t.path, f.replace_cover);
+    }
     let playing = {
         let s = state.engine.status();
         s.index.and_then(|i| s.queue.get(i).cloned())
@@ -872,11 +886,10 @@ fn show_now(state: &AppState, plan: &[(Track, Found)], cover: Option<&[u8]>) {
     let Some((_, first)) = plan.first() else { return };
     let art_dir = state.art_dir();
     let album_id = crate::library::album_id_for(&first.album_artist, &first.album);
-    if first.replace_cover || !art_dir.join(format!("{album_id}_s.jpg")).exists() {
-        if let Some(bytes) = cover {
+    if (first.replace_cover || !art_dir.join(format!("{album_id}_s.jpg")).exists())
+        && let Some(bytes) = cover {
             crate::library::write_art(&album_id, bytes, &art_dir);
         }
-    }
     let mut lib = state.library.lock();
     let mut tracks = lib.snapshot.tracks.clone();
     for (t, f) in plan {
@@ -1075,8 +1088,8 @@ pub fn lookup(t: &Track) -> Option<Found> {
                 deezer_id: Some(id),
             })
             .collect();
-        if let Some((rank, mut found, id)) = best(&hits, artist.as_deref(), &title, t.duration) {
-            if best_so_far.as_ref().is_none_or(|(r, _)| rank < *r) {
+        if let Some((rank, mut found, id)) = best(&hits, artist.as_deref(), &title, t.duration)
+            && best_so_far.as_ref().is_none_or(|(r, _)| rank < *r) {
                 if let Some(more) = id.and_then(|id| deezer_details(&client, id)) {
                     if let Some(a) = more.artist {
                         found.artist = a;
@@ -1090,7 +1103,6 @@ pub fn lookup(t: &Track) -> Option<Found> {
                 }
                 best_so_far = Some((rank, found));
             }
-        }
     }
     best_so_far.map(|(_, f)| f)
 }
@@ -1153,7 +1165,7 @@ fn best(hits: &[Hit], artist: Option<&str>, title: &str, duration: f64) -> Optio
                 return None;
             }
             let label = format!("{} {}", name, h.collection_name.as_deref().unwrap_or(""));
-            Some((Rank(other_version(&label, &wanted) as u8, (!exact) as u8, off), h))
+            Some((Rank(other_version(&label, wanted) as u8, (!exact) as u8, off), h))
         })
         .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(rank, h)| {

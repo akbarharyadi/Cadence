@@ -468,15 +468,23 @@ export const api = {
     invoke<{ term: string; results: AlbumMatch[] }>("find_album_info", { albumId, query: query ?? null }),
   albumPlan: (albumId: string, albumRef: string) => invoke<AlbumPlan>("album_plan", { albumId, albumRef }),
   saveAlbumInfo: (albumId: string, album: AlbumMatch, songs: CatalogSong[], assign: SongAssign[], keepTitles: boolean) =>
-    invoke<{ songs: number; matched: number; later: boolean }>("save_album_info", { albumId, album, songs, assign, keepTitles }),
+    invoke<{ songs: number; matched: number; later: boolean; change: string | null }>("save_album_info", { albumId, album, songs, assign, keepTitles }),
   fixAllStart: () => invoke<boolean>("fix_all_start"),
   fixAllStop: () => invoke<void>("fix_all_stop"),
+  /** What Fix all found, to check before saving. */
+  fixAllFound: () => invoke<FoundInfo[]>("fix_all_found"),
+  fixAllSave: (ids: string[]) => invoke<{ songs: number; change: string | null }>("fix_all_save", { ids }),
+  fixAllDiscard: () => invoke<void>("fix_all_discard"),
+  /** Cadence's recent changes to songs' files, newest first. */
+  recentChanges: () => invoke<ChangeInfo[]>("recent_changes"),
+  /** Puts a change's files back as they were; returns how many songs. */
+  undoChange: (id: string) => invoke<number>("undo_change", { id }),
   artistCheckStart: () => invoke<boolean>("artist_check_start"),
   artistCheckStop: () => invoke<void>("artist_check_stop"),
   artistPairs: () => invoke<ArtistPairs>("artist_pairs"),
   artistPairDismiss: (native: string, latin: string) => invoke<void>("artist_pair_dismiss", { native, latin }),
   /** Renames an artist in every song's artist and album artist; returns how many songs. */
-  mergeArtist: (from: string, to: string) => invoke<number>("merge_artist", { from, to }),
+  mergeArtist: (from: string, to: string) => invoke<{ songs: number; change: string | null }>("merge_artist", { from, to }),
   findSongInfo: (id: string, query?: string) => invoke<{ term: string; results: SongInfo[] }>("find_song_info", { id, query: query ?? null }),
   /** keepTitle: the song's own title instead of the match's; wholeAlbum: the album's info for its other songs too. */
   saveSongInfo: (id: string, info: SongInfo, keepTitle: boolean, wholeAlbum: boolean) =>
@@ -509,7 +517,7 @@ export const api = {
   romanize: (lines: string[]) => invoke<string[]>("romanize_lyrics", { lines }),
   /** `later`: songs playing now, shown changed already; their files are written when they stop. */
   writeTags: (ids: string[], changes: Record<string, string>) =>
-    invoke<{ saved: number; later: number }>("write_tags", { ids, changes }),
+    invoke<{ saved: number; later: number; change: string | null }>("write_tags", { ids, changes }),
   playlists: () => invoke<Playlist[]>("get_playlists"),
   savePlaylist: (playlist: Playlist) => invoke<Playlist>("save_playlist", { playlist }),
   deletePlaylist: (id: string) => invoke<void>("delete_playlist", { id }),
@@ -642,6 +650,27 @@ export interface SongInfo {
   albumRef: string | null;
 }
 
+/** Info Fix all found for a song without tags, to check before saving. */
+export interface FoundInfo {
+  trackId: string;
+  /** What the song is called now (often its file name). */
+  now: string;
+  title: string;
+  artist: string;
+  album: string;
+  year: number | null;
+  cover: string | null;
+}
+
+/** A change Cadence made to songs' files, which can be undone. */
+export interface ChangeInfo {
+  id: string;
+  /** Unix seconds. */
+  at: number;
+  label: string;
+  songs: number;
+}
+
 /** An album in the iTunes or Deezer catalogue (Fix Album Info). */
 export interface AlbumMatch {
   title: string;
@@ -709,6 +738,8 @@ export interface ArtistPairs {
 export interface SongInfoSaved {
   /** The song is playing: its file is written when it finishes. */
   later: boolean;
+  /** The change, to undo it. */
+  change: string | null;
   /** Other songs of its album given the album's info. */
   others: number;
   /** Of those, the ones found on the catalogue's album (own title, artist and track number). */

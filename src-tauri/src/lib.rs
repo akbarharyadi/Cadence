@@ -3,6 +3,7 @@ mod api;
 mod artists;
 mod autotag;
 mod catalog;
+mod changes;
 mod covers;
 pub mod cue;
 mod ctx;
@@ -126,15 +127,14 @@ pub fn run() {
         .on_window_event(|window, event| {
             // Closing the main window keeps the music playing in the tray (unless turned off).
             #[cfg(desktop)]
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
+            if let WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main" {
                     let ctx = window.app_handle().state::<Ctx>();
                     if ctx.state.settings.lock().close_to_tray {
                         api.prevent_close();
                         let _ = window.hide();
                     }
                 }
-            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_library,
@@ -199,6 +199,11 @@ pub fn run() {
             commands::artist_pairs,
             commands::artist_pair_dismiss,
             commands::merge_artist,
+            commands::fix_all_found,
+            commands::fix_all_save,
+            commands::fix_all_discard,
+            commands::recent_changes,
+            commands::undo_change,
             commands::set_skipped,
             commands::set_skip_instrumentals,
             commands::get_marks,

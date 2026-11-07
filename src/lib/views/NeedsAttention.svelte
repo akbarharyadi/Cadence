@@ -2,60 +2,32 @@
   // Needs Attention: the library's info problems, each with its fix. Albums split in two (songs of
   // one album, in one folder, under different album artists), artists under two names (米津玄師 /
   // Kenshi Yonezu), songs without tags, and albums without a cover. Worked out from the library as
-  // it is; the catalogue is only asked when the user starts Fix all or the artist check.
-  import { api, type Album, type ArtistPairs, type Track } from "#lib/api.js";
-  import { app } from "#lib/store.svelte.js";
+  // it is (`app.attention`); the catalogue is only asked when the user starts Fix all or the artist
+  // check. Every change here can be undone (Recent changes, at the bottom).
+  import { api, type ArtistPairs, type ChangeInfo, type FoundInfo } from "#lib/api.js";
+  import { app, type SplitAlbum } from "#lib/store.svelte.js";
   import Icon from "#lib/components/Icon.svelte";
 
-  const fold = (s: string) => s.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().trim();
   const folder = (path: string) => path.replace(/[\\/][^\\/]*$/, "");
-
-  interface Split {
-    key: string;
-    album: string;
-    folder: string;
-    /** Each album artist the songs are under, most songs first. */
-    variants: { albumArtist: string; tracks: Track[] }[];
-  }
-
-  /** One album (same name, same folder) shown as several: its songs have different album artists. */
-  const splits = $derived.by(() => {
-    const groups = new Map<string, Track[]>();
-    for (const t of app.tracks) {
-      // Songs without tags are grouped under their folder's name: they're listed below instead.
-      if (app.needsInfo(t) || !t.album.trim()) continue;
-      const key = `${folder(t.path)}|${fold(t.album)}`;
-      const g = groups.get(key);
-      if (g) g.push(t);
-      else groups.set(key, [t]);
-    }
-    const out: Split[] = [];
-    for (const [key, tracks] of groups) {
-      if (new Set(tracks.map((t) => t.albumId)).size < 2) continue;
-      const by = new Map<string, Track[]>();
-      for (const t of tracks) by.set(t.albumArtist, [...(by.get(t.albumArtist) ?? []), t]);
-      const variants = [...by].map(([albumArtist, tracks]) => ({ albumArtist, tracks })).sort((a, b) => b.tracks.length - a.tracks.length);
-      out.push({ key, album: tracks[0].album, folder: folder(tracks[0].path), variants });
-    }
-    return out.sort((a, b) => a.album.localeCompare(b.album));
-  });
-
-  const untagged = $derived(app.tracks.filter((t) => app.needsInfo(t)));
+  const splits = $derived(app.attention.splits);
+  const untagged = $derived(app.attention.untagged);
+  const coverless = $derived(app.attention.coverless);
   let allUntagged = $state(false);
-
-  /** Real albums (not the made-up ones of songs without tags) without a cover. */
-  const coverless = $derived(app.albums.filter((a: Album) => !a.art && a.artist !== "Unknown Artist"));
   let allCoverless = $state(false);
 
   let busy = $state<string | null>(null);
+  const songs = (n: number) => `${n} ${n === 1 ? "song" : "songs"}`;
 
   /** Puts every song of the split album under `albumArtist`, so it's one album again. */
-  async function merge(s: Split, albumArtist: string) {
+  async function merge(s: SplitAlbum, albumArtist: string) {
     const ids = s.variants.filter((v) => v.albumArtist !== albumArtist).flatMap((v) => v.tracks.map((t) => t.id));
     busy = s.key;
     try {
-      const { later } = await api.writeTags(ids, { albumArtist });
-      app.showToast(`“${s.album}” is one album now, by ${albumArtist}${later ? ". The playing song’s file is updated when it finishes." : ""}`);
+      const { later, change } = await api.writeTags(ids, { albumArtist });
+      app.showToast(
+        `“${s.album}” is one album now, by ${albumArtist}${later ? ". The playing song’s file is updated when it finishes." : ""}`,
+        app.undoAction(change),
+      );
     } catch (e) {
       app.showToast(`Couldn't merge “${s.album}”: ${e}`);
     } finally {
@@ -63,9 +35,14 @@
     }
   }
 
+  // ---------- artists under two names ----------
+
   /** Artists under two names, from the catalogue check (kept between runs). */
   let artistPairs = $state<ArtistPairs | null>(null);
-  const loadPairs = async () => (artistPairs = await api.artistPairs());
+  const loadPairs = async () => {
+    artistPairs = await api.artistPairs();
+    app.artistPairsCount = artistPairs.pairs.length;
+  };
   // Again whenever the library changes or a check ends.
   $effect(() => {
     void app.tracks;
@@ -73,20 +50,20 @@
     loadPairs();
   });
 
-  async function fixAll() {
-    if (!(await api.fixAllStart())) app.showToast("Already looking up songs without info");
-  }
-
   async function checkArtists() {
     if (!(await api.artistCheckStart())) app.showToast("Already checking artist names");
   }
 
+  /** A rename waiting for the user to confirm: it changes every song of the artist. */
+  let confirming = $state<{ from: string; to: string; songs: number } | null>(null);
+
   /** Writes `to` in place of `from` in every song, so the artist shows up once. */
   async function mergeArtist(from: string, to: string) {
+    confirming = null;
     busy = `artist|${from}`;
     try {
-      const n = await api.mergeArtist(from, to);
-      app.showToast(`${songs(n)} now say “${to}” instead of “${from}”`);
+      const r = await api.mergeArtist(from, to);
+      app.showToast(`${songs(r.songs)} now say “${to}” instead of “${from}”`, app.undoAction(r.change));
     } catch (e) {
       app.showToast(`Couldn't rename “${from}”: ${e}`);
     } finally {
@@ -100,8 +77,63 @@
     loadPairs();
   }
 
-  const songs = (n: number) => `${n} ${n === 1 ? "song" : "songs"}`;
-  const nothing = $derived(!splits.length && !untagged.length && !coverless.length && !artistPairs?.pairs.length);
+  // ---------- Fix all: find, check, save ----------
+
+  /** What Fix all found, to check before it's saved; unticked songs are left as they are. */
+  let found = $state<FoundInfo[]>([]);
+  let skipped = $state<Set<string>>(new Set());
+  $effect(() => {
+    void app.fixAllFoundCount;
+    api.fixAllFound().then((f) => (found = f));
+  });
+
+  async function fixAll() {
+    if (!(await api.fixAllStart())) app.showToast("Already looking up songs without info");
+  }
+
+  async function saveFound() {
+    const ids = found.filter((f) => !skipped.has(f.trackId)).map((f) => f.trackId);
+    busy = "fixall";
+    try {
+      const r = await api.fixAllSave(ids);
+      skipped = new Set();
+      app.showToast(`Saved the info of ${songs(r.songs)}`, app.undoAction(r.change));
+    } catch (e) {
+      app.showToast(String(e));
+    } finally {
+      busy = null;
+    }
+  }
+
+  async function discardFound() {
+    await api.fixAllDiscard();
+    skipped = new Set();
+  }
+
+  const toggleSkip = (id: string) => {
+    const s = new Set(skipped);
+    if (s.has(id)) s.delete(id);
+    else s.add(id);
+    skipped = s;
+  };
+
+  // ---------- recent changes ----------
+
+  let changes = $state<ChangeInfo[]>([]);
+  let allChanges = $state(false);
+  $effect(() => {
+    void app.changesVersion;
+    api.recentChanges().then((c) => (changes = c));
+  });
+  const when = (at: number) => {
+    const mins = Math.round((Date.now() / 1000 - at) / 60);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins} min ago`;
+    if (mins < 60 * 24) return `${Math.round(mins / 60)} h ago`;
+    return new Date(at * 1000).toLocaleDateString();
+  };
+
+  const nothing = $derived(!splits.length && !untagged.length && !coverless.length && !artistPairs?.pairs.length && !found.length);
 </script>
 
 <div class="page">
@@ -158,9 +190,16 @@
             <span class="sub">{p.native} ({songs(p.nativeSongs)}) · {p.latin} ({songs(p.latinSongs)})</span>
           </div>
           <div class="actions">
-            <button class="pill ghost small" disabled={busy !== null} onclick={() => mergeArtist(p.latin, p.native)}>Use {p.native}</button>
-            <button class="pill ghost small" disabled={busy !== null} onclick={() => mergeArtist(p.native, p.latin)}>Use {p.latin}</button>
-            <button class="pill ghost small" disabled={busy !== null} onclick={() => notSame(p.native, p.latin)} title="They're different artists: don't suggest this again">Not the same</button>
+            {#if confirming && (confirming.from === p.native || confirming.from === p.latin)}
+              {@const c = confirming}
+              <span class="confirm">Rename “{c.from}” to “{c.to}” in {songs(c.songs)}?</span>
+              <button class="pill small" disabled={busy !== null} onclick={() => mergeArtist(c.from, c.to)}>Rename</button>
+              <button class="pill ghost small" onclick={() => (confirming = null)}>Cancel</button>
+            {:else}
+              <button class="pill ghost small" disabled={busy !== null} onclick={() => (confirming = { from: p.latin, to: p.native, songs: p.latinSongs })}>Use {p.native}</button>
+              <button class="pill ghost small" disabled={busy !== null} onclick={() => (confirming = { from: p.native, to: p.latin, songs: p.nativeSongs })}>Use {p.latin}</button>
+              <button class="pill ghost small" disabled={busy !== null} onclick={() => notSame(p.native, p.latin)} title="They're different artists: don't suggest this again">Not the same</button>
+            {/if}
           </div>
         </div>
       {/each}
@@ -188,6 +227,30 @@
     </section>
   {/if}
 
+  {#if found.length && !app.fixAllJob}
+    <section>
+      <h2 class="section-title">Found info to check <span class="n">{found.length}</span></h2>
+      <p class="secondary about">Fix all found these songs in the catalogues. Untick any that are wrong, then save; nothing is written before that.</p>
+      {#each found as f (f.trackId)}
+        <label class="row check">
+          <input type="checkbox" checked={!skipped.has(f.trackId)} onchange={() => toggleSkip(f.trackId)} />
+          <span class="art">{#if f.cover}<img src={f.cover} alt="" loading="lazy" />{/if}</span>
+          <span class="lines">
+            <span class="title">{f.title}</span>
+            <span class="sub">{f.artist} · {f.album}{f.year ? ` (${f.year})` : ""}</span>
+            <span class="sub was" title="What it's called now">now: {f.now}</span>
+          </span>
+        </label>
+      {/each}
+      <div class="actions inline">
+        <button class="pill small" disabled={busy !== null || skipped.size === found.length} onclick={saveFound}>
+          Save {songs(found.length - skipped.size)}
+        </button>
+        <button class="pill ghost small" disabled={busy !== null} onclick={discardFound}>Discard</button>
+      </div>
+    </section>
+  {/if}
+
   {#if untagged.length}
     <section>
       <h2 class="section-title">Songs without info <span class="n">{untagged.length}</span></h2>
@@ -196,9 +259,9 @@
         {#if app.fixAllJob}
           <span class="secondary">Looking up {app.fixAllJob.done} of {app.fixAllJob.total}, {app.fixAllJob.found ?? 0} found…</span>
           <button class="pill ghost small" onclick={() => api.fixAllStop()}>Stop</button>
-        {:else}
-          <button class="pill ghost small" onclick={fixAll} title="Looks each one up in the background, one every few seconds; only clear matches are saved">
-            <Icon name="sparkle" size={14} />Fix all {untagged.length}
+        {:else if !found.length}
+          <button class="pill ghost small" onclick={fixAll} title="Looks each one up in the background, one every few seconds; you check what it finds before anything is saved">
+            <Icon name="sparkle" size={14} />Find info for all {untagged.length}
           </button>
         {/if}
       </div>
@@ -237,6 +300,28 @@
       {/each}
       {#if coverless.length > 20 && !allCoverless}
         <button class="link more" onclick={() => (allCoverless = true)}>Show all {coverless.length}</button>
+      {/if}
+    </section>
+  {/if}
+
+  {#if changes.length}
+    <section>
+      <h2 class="section-title">Recent changes</h2>
+      <p class="secondary about">What Cadence changed in your songs’ files. Undo puts them back as they were, cover included.</p>
+      {#each allChanges ? changes : changes.slice(0, 5) as c (c.id)}
+        <div class="row">
+          <Icon name="clock" size={18} />
+          <div class="lines">
+            <span class="title">{c.label}</span>
+            <span class="sub">{when(c.at)} · {songs(c.songs)}</span>
+          </div>
+          <div class="actions">
+            <button class="pill ghost small" onclick={() => app.undoChange(c.id)}>Undo</button>
+          </div>
+        </div>
+      {/each}
+      {#if changes.length > 5 && !allChanges}
+        <button class="link more" onclick={() => (allChanges = true)}>Show all {changes.length}</button>
       {/if}
     </section>
   {/if}
@@ -312,6 +397,31 @@
     display: flex;
     gap: 6px;
     flex: none;
+  }
+  .confirm {
+    align-self: center;
+    font-size: 13px;
+    color: var(--text);
+    margin-right: 4px;
+  }
+  .row.check {
+    cursor: pointer;
+  }
+  .row .art {
+    width: 40px;
+    height: 40px;
+    flex: none;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--surface);
+  }
+  .row .art img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .sub.was {
+    color: var(--text-3);
   }
   .actions.inline {
     align-items: center;

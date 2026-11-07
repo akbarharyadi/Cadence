@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -235,12 +236,11 @@ pub fn album_plan(ctx: &Ctx, album_id: &str, album_ref: &str) -> Result<AlbumPla
         }
     }
     let (mut year, mut genre) = (None, String::new());
-    if let Some(id) = album_ref.strip_prefix("deezer:") {
-        if let Some(v) = get(&client, &format!("https://api.deezer.com/album/{id}")) {
+    if let Some(id) = album_ref.strip_prefix("deezer:")
+        && let Some(v) = get(&client, &format!("https://api.deezer.com/album/{id}")) {
             year = v["release_date"].as_str().and_then(|d| d.get(..4)?.parse().ok()).filter(|&y| y > 0);
             genre = v["genres"]["data"][0]["name"].as_str().unwrap_or("").to_string();
         }
-    }
     Ok(AlbumPlan { songs, assign, year, genre })
 }
 
@@ -253,6 +253,8 @@ pub struct AlbumSaved {
     matched: usize,
     /// The playing song's file is written when it ends.
     later: bool,
+    /// The change, to undo it.
+    change: Option<String>,
 }
 
 /// Writes the album's info into all its files, and each matched song's own title (unless
@@ -320,8 +322,9 @@ pub fn save_album_info(
         s.index.and_then(|i| s.queue.get(i).cloned())
     };
     let later = plan.iter().any(|(t, _)| playing.as_deref() == Some(t.id.as_str()));
-    autotag::commit(ctx, &plan, album.cover_url.as_deref(), true)?;
-    Ok(AlbumSaved { songs: songs_n, matched, later })
+    let mut rec = crate::changes::Recorder::new(ctx, format!("Fix album info: “{}”", album.title));
+    autotag::commit(ctx, &plan, album.cover_url.as_deref(), true, &mut rec)?;
+    Ok(AlbumSaved { songs: songs_n, matched, later, change: rec.finish(ctx) })
 }
 
 // ---------- Fix all ----------
@@ -329,17 +332,38 @@ pub fn save_album_info(
 static FIX_ALL_RUNNING: AtomicBool = AtomicBool::new(false);
 static FIX_ALL_STOP: AtomicBool = AtomicBool::new(false);
 
+/// What Fix all found, waiting for the user to check it: the song and the info for it.
+fn found() -> &'static Mutex<Vec<(Track, Found)>> {
+    static FOUND: OnceLock<Mutex<Vec<(Track, Found)>>> = OnceLock::new();
+    FOUND.get_or_init(Default::default)
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FixAllProgress {
     done: usize,
     total: usize,
-    /// Songs found and tagged so far.
+    /// Songs found so far (to check before saving).
     found: usize,
     running: bool,
 }
 
-/// Looks up every song without tags (one at a time, in the background). False if it's running.
+/// Info Fix all found for a song, for the user to check.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FoundInfo {
+    track_id: String,
+    /// What the song is called now (often its file name).
+    now: String,
+    title: String,
+    artist: String,
+    album: String,
+    year: Option<u32>,
+    cover: Option<String>,
+}
+
+/// Looks up every song without tags (one at a time, in the background) and keeps what it finds
+/// for the user to check; nothing is written yet. False if it's running.
 pub fn fix_all_start(ctx: Ctx) -> bool {
     if FIX_ALL_RUNNING.swap(true, Ordering::SeqCst) {
         return false;
@@ -347,44 +371,95 @@ pub fn fix_all_start(ctx: Ctx) -> bool {
     FIX_ALL_STOP.store(false, Ordering::SeqCst);
     let todo: Vec<Track> = {
         let lib = ctx.state.library.lock();
-        lib.snapshot.tracks.iter().filter(|t| untagged(t) && t.cue.is_none()).cloned().collect()
+        let waiting: HashSet<String> = found().lock().unwrap().iter().map(|(t, _)| t.id.clone()).collect();
+        lib.snapshot.tracks.iter().filter(|t| untagged(t) && t.cue.is_none() && !waiting.contains(&t.id)).cloned().collect()
     };
     std::thread::spawn(move || {
         let total = todo.len();
-        let progress = |done: usize, found: usize, running: bool| ctx.emit("fix-all-progress", FixAllProgress { done, total, found, running });
+        let progress = |done: usize, running: bool| {
+            let found = found().lock().unwrap().len();
+            ctx.emit("fix-all-progress", FixAllProgress { done, total, found, running })
+        };
         let pool = crate::jobs::background_pool();
-        let found = pool.install(|| {
+        pool.install(|| {
             autotag::paced(|| {
-                let mut found = 0;
                 for (i, t) in todo.iter().enumerate() {
                     if FIX_ALL_STOP.load(Ordering::SeqCst) {
                         break;
                     }
-                    progress(i, found, true);
-                    let Some(f) = autotag::lookup(t) else {
-                        log::info!("fix all: no catalogue match for {}", t.path);
-                        continue;
-                    };
-                    let cover = f.cover_url.clone();
-                    match autotag::commit(&ctx, &[(t.clone(), f)], cover.as_deref(), false) {
-                        Ok(_) => found += 1,
-                        Err(e) => log::warn!("fix all: couldn't tag {}: {e}", t.path),
+                    progress(i, true);
+                    match autotag::lookup(t) {
+                        Some(f) => found().lock().unwrap().push((t.clone(), f)),
+                        None => log::info!("fix all: no catalogue match for {}", t.path),
                     }
                 }
-                found
             })
         });
-        if found > 0 {
-            crate::jobs::start_scan(ctx.clone());
-        }
         FIX_ALL_RUNNING.store(false, Ordering::SeqCst);
-        progress(total, found, false);
+        progress(total, false);
     });
     true
 }
 
 pub fn fix_all_stop() {
     FIX_ALL_STOP.store(true, Ordering::SeqCst);
+}
+
+/// What Fix all found, to check.
+pub fn fix_all_found() -> Vec<FoundInfo> {
+    found()
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(t, f)| FoundInfo {
+            track_id: t.id.clone(),
+            now: t.title.clone(),
+            title: f.title.clone(),
+            artist: f.artist.clone(),
+            album: f.album.clone(),
+            year: f.year,
+            cover: f.cover_url.clone(),
+        })
+        .collect()
+}
+
+/// What Fix all saved.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FixAllSaved {
+    songs: usize,
+    /// The change, to undo it.
+    change: Option<String>,
+}
+
+/// Saves the found info of the songs the user kept (`ids`); the rest is let go.
+pub fn fix_all_save(ctx: &Ctx, ids: Vec<String>) -> Result<FixAllSaved, String> {
+    let picked: Vec<(Track, Found)> = {
+        let mut all = found().lock().unwrap();
+        let keep: HashSet<&String> = ids.iter().collect();
+        let picked = all.iter().filter(|(t, _)| keep.contains(&t.id)).cloned().collect();
+        all.clear();
+        picked
+    };
+    let songs = picked.len();
+    let mut rec = crate::changes::Recorder::new(ctx, format!("Fix all: {songs} {}", if songs == 1 { "song" } else { "songs" }));
+    for (t, f) in &picked {
+        let cover = f.cover_url.clone();
+        if let Err(e) = autotag::commit(ctx, std::slice::from_ref(&(t.clone(), f.clone())), cover.as_deref(), false, &mut rec) {
+            log::warn!("fix all: couldn't tag {}: {e}", t.path);
+        }
+    }
+    if songs > 0 {
+        crate::jobs::start_scan(ctx.clone());
+    }
+    ctx.emit("fix-all-progress", FixAllProgress { done: 0, total: 0, found: 0, running: false });
+    Ok(FixAllSaved { songs, change: rec.finish(ctx) })
+}
+
+/// Lets go of what Fix all found.
+pub fn fix_all_discard(ctx: &Ctx) {
+    found().lock().unwrap().clear();
+    ctx.emit("fix-all-progress", FixAllProgress { done: 0, total: 0, found: 0, running: false });
 }
 
 // ---------- Artists under two names ----------
@@ -576,8 +651,17 @@ fn renamed(credit: &str, from: &str, to: &str) -> Option<String> {
     Some(credit.replacen(&part, to, 1))
 }
 
-/// Writes `to` in place of `from` in every song's artist and album artist; returns how many songs.
-pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<usize, String> {
+/// What renaming an artist changed.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Renamed {
+    songs: usize,
+    /// The change, to undo it.
+    change: Option<String>,
+}
+
+/// Writes `to` in place of `from` in every song's artist and album artist.
+pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<Renamed, String> {
     let changes: Vec<(String, PathBuf, crate::tagedit::TagChanges)> = {
         let lib = ctx.state.library.lock();
         lib.snapshot
@@ -597,6 +681,10 @@ pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<usize, String
         let s = ctx.state.engine.status();
         s.index.and_then(|i| s.queue.get(i).cloned())
     };
+    let mut rec = crate::changes::Recorder::new(ctx, format!("Renamed “{from}” to “{to}”"));
+    for (_, path, _) in &changes {
+        rec.add(&path.to_string_lossy(), false);
+    }
     let mut written = 0;
     for (id, path, c) in &changes {
         if playing.as_deref() == Some(id.as_str()) {
@@ -619,7 +707,7 @@ pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<usize, String
     if written > 0 {
         crate::jobs::start_scan(ctx.clone());
     }
-    Ok(changes.len())
+    Ok(Renamed { songs: changes.len(), change: rec.finish(ctx) })
 }
 
 #[cfg(test)]

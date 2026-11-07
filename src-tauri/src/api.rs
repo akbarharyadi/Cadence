@@ -328,7 +328,7 @@ fn with_sonic<T>(state: &AppState, f: impl FnOnce(&[crate::sonic::Item], &crate:
 /// Songs that sound like `id`, closest first (empty until the song has been analysed).
 pub fn similar_tracks(ctx: &Ctx, id: String, limit: Option<usize>) -> Vec<String> {
     let state = &ctx.state;
-    with_sonic(&state, |items, lib| {
+    with_sonic(state, |items, lib| {
         let Some(&i) = lib.by_id.get(&id) else {
             return Vec::new();
         };
@@ -342,7 +342,7 @@ pub fn similar_tracks(ctx: &Ctx, id: String, limit: Option<usize>) -> Vec<String
 /// A radio of songs that sound like `id`, starting with it.
 pub fn sound_radio(ctx: &Ctx, id: String, count: Option<usize>) -> Vec<String> {
     let state = &ctx.state;
-    with_sonic(&state, |items, lib| {
+    with_sonic(state, |items, lib| {
         let Some(&i) = lib.by_id.get(&id) else {
             return Vec::new();
         };
@@ -355,7 +355,7 @@ pub fn sound_radio(ctx: &Ctx, id: String, count: Option<usize>) -> Vec<String> {
 
 pub fn sound_mixes(ctx: &Ctx) -> Vec<crate::sonic::Mix> {
     let state = &ctx.state;
-    with_sonic(&state, |items, _| crate::sonic::mixes(items))
+    with_sonic(state, |items, _| crate::sonic::mixes(items))
 }
 
 // ---------- AI DJ ----------
@@ -482,13 +482,13 @@ fn dj_input(state: &AppState, request: &str) -> DjInput {
 pub fn ai_test(ctx: &Ctx) -> Result<String, String> {
     let state = &ctx.state;
     let settings = state.settings.lock().ai.clone();
-    (move || crate::ai::test(&settings).map(|_| "Connected".to_string()))()
+    crate::ai::test(&settings).map(|_| "Connected".to_string())
 }
 
 /// Exactly what would be sent for this request (shown in Settings).
 pub fn ai_preview(ctx: &Ctx, request: String) -> String {
     let state = &ctx.state;
-    let input = dj_input(&state, &request);
+    let input = dj_input(state, &request);
     format!(
         "{}\n\n{}",
         crate::ai::SYSTEM,
@@ -530,15 +530,13 @@ fn fill_by_sound(state: &AppState, mix: &mut crate::ai::AiMix, want: usize) {
 
 pub fn ai_ask(ctx: &Ctx, request: String) -> Result<crate::ai::AiMix, String> {
     let state = &ctx.state;
-    let input = dj_input(&state, &request);
+    let input = dj_input(state, &request);
     let library = state.library.lock().snapshot.tracks.clone();
-    let mut mix = (move || {
-        crate::ai::ask(&input.settings, &request, &input.taste, &input.candidates, &input.history).map(|mut m| {
+    let mut mix = crate::ai::ask(&input.settings, &request, &input.taste, &input.candidates, &input.history).map(|mut m| {
             m.discover = crate::catalog::check(std::mem::take(&mut m.discover), &library);
             m
-        })
-    })()?;
-    fill_by_sound(&state, &mut mix, 12);
+        })?;
+    fill_by_sound(state, &mut mix, 12);
     Ok(mix)
 }
 
@@ -556,10 +554,8 @@ pub fn ai_mixes(ctx: &Ctx, refresh: bool) -> Result<Vec<crate::ai::AiMix>, Strin
             return Err(cache.error);
         }
     }
-    let input = dj_input(&state, "");
-    let result = (move || {
-        crate::ai::daily_mixes(&input.settings, &input.taste, &input.candidates, &input.history)
-    })();
+    let input = dj_input(state, "");
+    let result = crate::ai::daily_mixes(&input.settings, &input.taste, &input.candidates, &input.history);
     crate::state::write_json(
         &file,
         &crate::ai::DailyCache {
@@ -949,7 +945,7 @@ pub fn set_fix_tags_online(ctx: &Ctx, enabled: bool) {
 pub fn get_lyrics(ctx: &Ctx, track_id: String) -> Result<crate::lyrics::Lyrics, String> {
     let state = &ctx.state;
     let voice = &ctx.voice;
-    let track = track_of(&state, &track_id)?;
+    let track = track_of(state, &track_id)?;
     let (state, voice) = (state.clone(), voice.clone());
     let lyrics = voice.apply(&track, resolve_lyrics(&state, &track));
     // Followed before Cadence told singers apart: their voices once more (separating only).
@@ -1052,7 +1048,7 @@ pub fn voice_install(ctx: &Ctx) {
 
 pub fn voice_remove(ctx: &Ctx) {
     let voice = &ctx.voice;
-    crate::voice::remove(&voice);
+    crate::voice::remove(voice);
 }
 
 pub fn voice_set_auto(ctx: &Ctx, enabled: bool) {
@@ -1084,7 +1080,7 @@ pub fn voice_batch_stop(ctx: &Ctx) {
 pub fn voice_use(ctx: &Ctx, track_id: String, on: bool) -> Result<crate::lyrics::Lyrics, String> {
     let state = &ctx.state;
     let voice = &ctx.voice;
-    let track = track_of(&state, &track_id)?;
+    let track = track_of(state, &track_id)?;
     let (state, voice) = (state.clone(), voice.clone());
     voice.set_on(&track.id, on);
     Ok(voice.apply(&track, resolve_lyrics(&state, &track)))
@@ -1127,7 +1123,7 @@ pub fn delete_playlist(ctx: &Ctx, id: String) {
 pub fn connect_listenbrainz(ctx: &Ctx, token: String) -> Result<String, String> {
     let state = &ctx.state;
     let t = token.clone();
-    let user = (move || crate::scrobble::validate(&t))()?;
+    let user = crate::scrobble::validate(&t)?;
     crate::secrets::set(crate::scrobble::TOKEN_SECRET, &token)?;
     state.settings.lock().listenbrainz_user = user.clone();
     state.save_settings();
@@ -1149,6 +1145,8 @@ pub struct TagsSaved {
     saved: usize,
     /// Songs playing now: shown changed already, their files are written when they stop.
     later: usize,
+    /// The change, to undo it.
+    change: Option<String>,
 }
 
 /// Writes the changed fields into each song's file, then rescans so the library shows them.
@@ -1175,6 +1173,15 @@ pub fn write_tags(ctx: &Ctx, ids: Vec<String>, changes: crate::tagedit::TagChang
             })
             .collect()
     };
+    // What the files are like now, to undo the change.
+    let mut rec = crate::changes::Recorder::new(
+        ctx,
+        if songs.len() == 1 { "Edited song info".to_string() } else { format!("Edited the info of {} songs", songs.len()) },
+    );
+    for (_, path) in &songs {
+        rec.add(path, false);
+    }
+    let change = rec.finish(ctx);
     let (later, now): (Vec<_>, Vec<_>) = songs
         .into_iter()
         .partition(|(id, _)| Some(id) == playing.as_ref());
@@ -1220,6 +1227,7 @@ pub fn write_tags(ctx: &Ctx, ids: Vec<String>, changes: crate::tagedit::TagChang
     Ok(TagsSaved {
         saved: written + later.len(),
         later: later.len(),
+        change,
     })
 }
 
@@ -1233,7 +1241,7 @@ pub struct SongInfoResults {
 /// Fix Song Info: catalogue matches for a song (searching `query`, or its name).
 pub fn find_song_info(ctx: &Ctx, id: String, query: Option<String>) -> Result<SongInfoResults, String> {
     let state = &ctx.state;
-    let track = track_of(&state, &id)?;
+    let track = track_of(state, &id)?;
     (move || {
         let term = query
             .map(|q| q.trim().to_string())
@@ -1253,7 +1261,7 @@ pub fn save_song_info(
     keep_title: bool,
     whole_album: bool,
 ) -> Result<crate::autotag::Saved, String> {
-    (move || crate::autotag::save_choice(ctx, &id, info, keep_title, whole_album))()
+    crate::autotag::save_choice(ctx, &id, info, keep_title, whole_album)
 }
 
 /// Fix Album Info: catalogue albums for an album (searching `query`, or its artist and name).
@@ -1287,6 +1295,30 @@ pub fn fix_all_stop(_ctx: &Ctx) {
     crate::libfix::fix_all_stop();
 }
 
+/// What Fix all found, for the user to check before it's saved.
+pub fn fix_all_found(_ctx: &Ctx) -> Vec<crate::libfix::FoundInfo> {
+    crate::libfix::fix_all_found()
+}
+
+/// Saves what Fix all found for the songs the user kept.
+pub fn fix_all_save(ctx: &Ctx, ids: Vec<String>) -> Result<crate::libfix::FixAllSaved, String> {
+    crate::libfix::fix_all_save(ctx, ids)
+}
+
+pub fn fix_all_discard(ctx: &Ctx) {
+    crate::libfix::fix_all_discard(ctx);
+}
+
+/// Cadence's recent changes to songs' files, newest first, to undo.
+pub fn recent_changes(ctx: &Ctx) -> Vec<crate::changes::ChangeInfo> {
+    crate::changes::recent(ctx)
+}
+
+/// Puts the files of a change back as they were; returns how many songs.
+pub fn undo_change(ctx: &Ctx, id: String) -> Result<usize, String> {
+    crate::changes::undo(ctx, &id)
+}
+
 /// Asks the catalogue which artist names in Japanese or Chinese letters have a Latin one too.
 pub fn artist_check_start(ctx: &Ctx) -> bool {
     crate::libfix::artist_check_start(ctx.clone())
@@ -1305,8 +1337,8 @@ pub fn artist_pair_dismiss(ctx: &Ctx, native: String, latin: String) {
     crate::libfix::artist_pair_dismiss(ctx, native, latin);
 }
 
-/// Renames an artist in every song (artist and album artist); returns how many songs.
-pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<usize, String> {
+/// Renames an artist in every song (artist and album artist).
+pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<crate::libfix::Renamed, String> {
     crate::libfix::merge_artist(ctx, from, to)
 }
 
@@ -1355,7 +1387,7 @@ pub fn find_covers(ctx: &Ctx, album_id: String, query: Option<String>) -> Result
 
 /// Sets an album's cover (shown at once, and written into its songs' files).
 pub fn set_album_cover(ctx: &Ctx, album_id: String, source: crate::artists::Source) -> Result<crate::covers::Changed, String> {
-    (move || crate::covers::set(ctx, &album_id, source))()
+    crate::covers::set(ctx, &album_id, source)
 }
 
 // ---------- artist pictures ----------
@@ -1367,13 +1399,13 @@ pub fn artist_images(ctx: &Ctx) -> std::collections::HashMap<String, crate::arti
 
 /// Photos of this artist from the online catalogue.
 pub fn find_artist_photos(_ctx: &Ctx, name: String) -> Result<Vec<crate::artists::Photo>, String> {
-    (move || crate::artists::search(&name))()
+    crate::artists::search(&name)
 }
 
 pub fn set_artist_image(ctx: &Ctx, name: String, source: crate::artists::Source) -> Result<crate::artists::ArtistImage, String> {
     let state = &ctx.state;
     let (data, art) = (state.data_dir.clone(), state.art_dir());
-    (move || crate::artists::set(&data, &art, &name, source))()
+    crate::artists::set(&data, &art, &name, source)
 }
 
 pub fn reset_artist_image(ctx: &Ctx, name: String) {
@@ -1391,7 +1423,7 @@ fn track_of(state: &AppState, id: &str) -> Result<crate::library::Track, String>
 
 /// Searches LRCLIB for lyrics (any text: title, artist, a line).
 pub fn search_lyrics(_ctx: &Ctx, query: String) -> Result<Vec<crate::lyrics::Hit>, String> {
-    (move || crate::lyrics::search(&query))()
+    crate::lyrics::search(&query)
 }
 
 /// Uses an LRCLIB search result as this song's lyrics (kept for next time).
@@ -1399,7 +1431,7 @@ pub fn use_lyrics(ctx: &Ctx, track_id: String, hit_id: u64) -> Result<crate::lyr
     let state = &ctx.state;
     let voice = &ctx.voice;
     let cache = state.data_dir.join("lyrics");
-    let track = track_of(&state, &track_id)?;
+    let track = track_of(state, &track_id)?;
     let voice = voice.clone();
     (move || {
         let l = crate::lyrics::fetch(hit_id)?;
@@ -1420,7 +1452,7 @@ pub fn paste_lyrics(ctx: &Ctx, track_id: String, text: String) -> Result<crate::
     let voice = &ctx.voice;
     let l = crate::lyrics::from_pasted(&text).ok_or("There’s no text to use.")?;
     crate::lyrics::pick(&state.data_dir.join("lyrics"), &track_id, &l);
-    let track = track_of(&state, &track_id)?;
+    let track = track_of(state, &track_id)?;
     Ok(voice.apply(&track, l))
 }
 
@@ -1429,7 +1461,7 @@ pub fn paste_lyrics(ctx: &Ctx, track_id: String, text: String) -> Result<crate::
 pub fn ai_find_lyrics(ctx: &Ctx, track_id: String) -> Result<crate::lyrics::Lyrics, String> {
     let state = &ctx.state;
     let voice = &ctx.voice;
-    let track = track_of(&state, &track_id)?;
+    let track = track_of(state, &track_id)?;
     let settings = state.settings.lock().ai.clone();
     let cache = state.data_dir.join("lyrics");
     let voice = voice.clone();
@@ -1444,12 +1476,11 @@ pub fn ai_find_lyrics(ctx: &Ctx, track_id: String) -> Result<crate::lyrics::Lyri
                     album: &track.album,
                     duration: track.duration,
                 };
-                if let Some(hit) = crate::lyrics::best_hit(&hits, &wanted) {
-                    if let Ok(l) = crate::lyrics::fetch(hit.id) {
+                if let Some(hit) = crate::lyrics::best_hit(&hits, &wanted)
+                    && let Ok(l) = crate::lyrics::fetch(hit.id) {
                         crate::lyrics::pick(&cache, &track.id, &l);
                         return Ok(voice.apply(&track, l));
                     }
-                }
             }
         }
         let l = if found.instrumental {
@@ -1869,7 +1900,12 @@ macro_rules! cadence_commands {
             plain artist_check_stop() -> ();
             plain artist_pairs() -> $crate::libfix::ArtistPairs;
             plain artist_pair_dismiss(native: String, latin: String) -> ();
-            blocking merge_artist(from: String, to: String) -> usize;
+            blocking merge_artist(from: String, to: String) -> $crate::libfix::Renamed;
+            plain fix_all_found() -> Vec<$crate::libfix::FoundInfo>;
+            blocking fix_all_save(ids: Vec<String>) -> $crate::libfix::FixAllSaved;
+            plain fix_all_discard() -> ();
+            plain recent_changes() -> Vec<$crate::changes::ChangeInfo>;
+            blocking undo_change(id: String) -> usize;
             blocking romanize_lyrics(lines: Vec<String>) -> Vec<String>;
             blocking find_covers(album_id: String, query: Option<String>) -> $crate::api::CoverResults;
             blocking set_album_cover(album_id: String, source: $crate::artists::Source) -> $crate::covers::Changed;

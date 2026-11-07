@@ -157,6 +157,9 @@
     {#each library as item}
       <button class="item" class:active={isActive(item.view)} onclick={() => app.go(item.view)}>
         <Icon name={item.icon} size={18} />{item.label}
+        {#if item.view.name === "attention" && app.attentionCount > 0}
+          <span class="badge" aria-label="{app.attentionCount} to fix">{app.attentionCount > 999 ? "999+" : app.attentionCount}</span>
+        {/if}
       </button>
     {/each}
 
@@ -316,6 +319,21 @@
     color: var(--text-2);
     font-weight: 500;
     transition: background 0.12s, color 0.12s;
+  }
+  /* How many things Needs Attention has to fix. */
+  .badge {
+    margin-left: auto;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 99px;
+    display: grid;
+    place-items: center;
+    font-size: 11.5px;
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 28%, transparent);
   }
   .item :global(svg) {
     color: var(--text-3);

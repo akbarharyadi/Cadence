@@ -72,6 +72,15 @@ function animate(kind: "forward" | "back" | "tab", change: () => void) {
 }
 import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type DspSettings, type HealthProgress, type HealthReport, type HistoryStats, type JobProgress, type Mark, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track, type VoiceBatch, type VoiceJob, type VoiceStatus } from "./api";
 
+/** One album (same name, same folder) shown as several: its songs have different album artists. */
+export interface SplitAlbum {
+  key: string;
+  album: string;
+  folder: string;
+  /** Each album artist the songs are under, most songs first. */
+  variants: { albumArtist: string; tracks: Track[] }[];
+}
+
 export type View =
   | { name: "home" }
   | { name: "albums" }
@@ -209,12 +218,53 @@ class AppState {
   artistJob = $state<JobProgress | null>(null);
   /** Bumped when a library-fix job ends, so Needs Attention reloads what it shows. */
   fixJobsDone = $state(0);
+  /** Songs Fix all found info for, waiting to be checked and saved. */
+  fixAllFoundCount = $state(0);
+  /** Artists under two names (from the artist check), for the sidebar's count. */
+  artistPairsCount = $state(0);
+  /** Bumped when Cadence's changes to files (the ones that can be undone) change. */
+  changesVersion = $state(0);
   /** The open folder browser (Android): call with the chosen folder, or null if cancelled. */
   folderBrowser = $state<((path: string | null) => void) | null>(null);
   /** The smart playlist being edited (a copy), or null. */
   smartEditing = $state<Playlist | null>(null);
 
   trackById = $derived(new Map(this.tracks.map((t) => [t.id, t])));
+
+  /** Needs Attention's lists, from the library as it is: albums split in two (one album, in one
+   *  folder, under different album artists), songs without tags, and real albums without a cover. */
+  attention = $derived.by(() => {
+    const fold = (s: string) => s.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().trim();
+    const folder = (path: string) => path.replace(/[\\/][^\\/]*$/, "");
+    const groups = new Map<string, Track[]>();
+    const untagged: Track[] = [];
+    for (const t of this.tracks) {
+      // Songs without tags are grouped under their folder's name: they're listed on their own.
+      if (this.needsInfo(t)) {
+        untagged.push(t);
+        continue;
+      }
+      if (!t.album.trim()) continue;
+      const key = `${folder(t.path)}|${fold(t.album)}`;
+      const g = groups.get(key);
+      if (g) g.push(t);
+      else groups.set(key, [t]);
+    }
+    const splits: SplitAlbum[] = [];
+    for (const [key, tracks] of groups) {
+      if (new Set(tracks.map((t) => t.albumId)).size < 2) continue;
+      const by = new Map<string, Track[]>();
+      for (const t of tracks) by.set(t.albumArtist, [...(by.get(t.albumArtist) ?? []), t]);
+      const variants = [...by].map(([albumArtist, tracks]) => ({ albumArtist, tracks })).sort((a, b) => b.tracks.length - a.tracks.length);
+      splits.push({ key, album: tracks[0].album, folder: folder(tracks[0].path), variants });
+    }
+    splits.sort((a, b) => a.album.localeCompare(b.album));
+    const coverless = this.albums.filter((a) => !a.art && a.artist !== "Unknown Artist");
+    return { splits, untagged, coverless };
+  });
+  /** What the sidebar counts on Needs Attention: things to fix (albums without a cover aren't counted:
+   *  many libraries have some on purpose). */
+  attentionCount = $derived(this.attention.splits.length + this.attention.untagged.length + this.artistPairsCount);
   albumById = $derived(new Map(this.albums.map((a) => [a.id, a])));
   /** Album-artist credit → the artists it's listed under (see `artistIndex`). */
   creditIndex = $derived(artistIndex(this.albums.map((a) => a.artist)));
@@ -538,12 +588,17 @@ class AppState {
       listen("health-done", () => this.loadHealth()),
       listen<JobProgress>("fix-all-progress", (e) => {
         this.fixAllJob = e.payload.running ? e.payload : null;
-        if (!e.payload.running) {
-          this.fixJobsDone++;
+        this.fixAllFoundCount = e.payload.found ?? 0;
+        if (e.payload.running) return;
+        this.fixJobsDone++;
+        // A finished run (saving or letting go of what it found also ends with an empty report).
+        if (e.payload.total > 0) {
           const n = e.payload.found ?? 0;
-          this.showToast(n ? `Found the info of ${n} ${n === 1 ? "song" : "songs"}` : "None of the songs without info were found in the catalogues");
+          if (n) this.showToast(`Found the info of ${n} ${n === 1 ? "song" : "songs"}: check before saving`, { label: "Check", run: () => this.go({ name: "attention" }) }, 8000);
+          else this.showToast("None of the songs without info were found in the catalogues");
         }
       }),
+      listen("changes-changed", () => this.changesVersion++),
       listen<JobProgress>("artist-check-progress", (e) => {
         this.artistJob = e.payload.running ? e.payload : null;
         if (!e.payload.running) this.fixJobsDone++;
@@ -760,6 +815,21 @@ class AppState {
         this.navKind = "back";
         this.navSeq++;
       });
+  }
+
+  /** Puts the files of one of Cadence's changes back as they were. */
+  async undoChange(id: string) {
+    try {
+      const n = await api.undoChange(id);
+      this.showToast(`Undone: ${n === 1 ? "the song is" : `${n} songs are`} back as before`);
+    } catch (e) {
+      this.showToast(String(e));
+    }
+  }
+
+  /** The Undo button for a toast about a change (none when there's nothing to undo). */
+  undoAction(change: string | null | undefined): { label: string; run: () => void } | null {
+    return change ? { label: "Undo", run: () => this.undoChange(change) } : null;
   }
 
   showToast(message: string, action: { label: string; run: () => void } | null = null, ms?: number) {

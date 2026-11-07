@@ -94,6 +94,7 @@
       const songs = (n: number) => `${n} ${n === 1 ? "song" : "songs"}`;
       app.showToast(
         `Saved “${info.title}” (${songs(r.songs)})${r.later ? ". The playing song’s file is updated when it finishes." : ""}`,
+        app.undoAction(r.change),
       );
       close();
     } catch (e) {

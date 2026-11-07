@@ -60,7 +60,7 @@
       const r = await api.saveSongInfo(track.id, $state.snapshot(picked) as SongInfo, keeping, wholeAlbum && mates.length > 0);
       const songs = (n: number) => `${n} ${n === 1 ? "song" : "songs"}`;
       const album = r.others ? ` and ${songs(r.others)} of its album${r.matched < r.others ? ` (${songs(r.others - r.matched)} not on the catalogue's album got only the album's info)` : ""}` : "";
-      app.showToast(r.later ? `Saved “${title}”${album}. Its file is updated when it finishes.` : `Saved “${title}”${album}`);
+      app.showToast(r.later ? `Saved “${title}”${album}. Its file is updated when it finishes.` : `Saved “${title}”${album}`, app.undoAction(r.change));
       close();
     } catch (e) {
       error = String(e);
