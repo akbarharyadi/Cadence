@@ -1214,14 +1214,16 @@ pub fn write_tags(ctx: &Ctx, ids: Vec<String>, changes: crate::tagedit::TagChang
         ctx.emit("library-changed", ());
     }
 
-    let paths: Vec<String> = now.into_iter().map(|(_, p)| p).collect();
-    let written = (move || -> Result<usize, String> {
-        for p in &paths {
-            crate::tagedit::write(Path::new(p), &changes)?;
-        }
-        Ok(paths.len())
-    })()?;
+    let mut shown = Vec::new();
+    for (id, p) in &now {
+        crate::tagedit::write(Path::new(p), &changes)?;
+        shown.push((id.clone(), changes.clone()));
+    }
+    let written = shown.len();
     if written > 0 {
+        // Shown at once; the rescan reads the files back (it can take a while in a big library).
+        crate::tagedit::show_now(state, &shown);
+        ctx.emit("library-changed", ());
         start_scan(ctx.clone());
     }
     Ok(TagsSaved {

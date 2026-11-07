@@ -351,10 +351,12 @@
   .empty {
     margin-top: 18px;
   }
+  /* Long names don't squeeze the title: the buttons go onto the next line instead. */
   .row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 12px;
+    gap: 8px 12px;
     padding: 8px 10px;
     border-radius: var(--r-sm);
     color: var(--text-3);
@@ -368,7 +370,7 @@
     flex: none;
   }
   .lines {
-    flex: 1;
+    flex: 1 1 260px;
     min-width: 0;
     display: flex;
     flex-direction: column;
@@ -395,8 +397,18 @@
   }
   .actions {
     display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 6px;
-    flex: none;
+    flex: 0 1 auto;
+    max-width: 100%;
+    margin-left: auto;
+  }
+  .actions .pill {
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .confirm {
     align-self: center;

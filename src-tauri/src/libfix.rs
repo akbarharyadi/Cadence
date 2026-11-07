@@ -685,7 +685,7 @@ pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<Renamed, Stri
     for (_, path, _) in &changes {
         rec.add(&path.to_string_lossy(), false);
     }
-    let mut written = 0;
+    let mut shown = Vec::new();
     for (id, path, c) in &changes {
         if playing.as_deref() == Some(id.as_str()) {
             let (ctx, path, c) = (ctx.clone(), path.clone(), c.clone());
@@ -699,12 +699,15 @@ pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<Renamed, Stri
             );
         } else {
             match crate::tagedit::write(path, c) {
-                Ok(()) => written += 1,
+                Ok(()) => shown.push((id.clone(), c.clone())),
                 Err(e) => log::warn!("couldn't rename the artist in {}: {e}", path.display()),
             }
         }
     }
-    if written > 0 {
+    if !shown.is_empty() {
+        // Shown at once; the rescan reads the files back (it can take a while in a big library).
+        crate::tagedit::show_now(&ctx.state, &shown);
+        ctx.emit("library-changed", ());
         crate::jobs::start_scan(ctx.clone());
     }
     Ok(Renamed { songs: changes.len(), change: rec.finish(ctx) })

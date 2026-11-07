@@ -115,6 +115,27 @@ pub fn write(path: &Path, c: &TagChanges) -> Result<(), String> {
         .map_err(|e| format!("Couldn't save {}: {e}", file_name(path)))
 }
 
+/// Shows written changes in the library at once (song id → changes), with the albums rebuilt once:
+/// the rescan that reads them back can take a while in a big library, and until then the change
+/// would seem not to have happened. Saves the library; the caller says "library-changed".
+pub fn show_now(state: &crate::state::AppState, changes: &[(String, TagChanges)]) {
+    if changes.is_empty() {
+        return;
+    }
+    {
+        let mut lib = state.library.lock();
+        let mut tracks = lib.snapshot.tracks.clone();
+        for (id, c) in changes {
+            if let Some(&i) = lib.by_id.get(id) {
+                show(&mut tracks[i], c);
+            }
+        }
+        let albums = crate::library::build_albums(&mut tracks, &state.art_dir());
+        lib.set_tracks(tracks, albums);
+    }
+    state.save_library();
+}
+
 /// Puts the changes into a song's library entry the way a rescan would read them from the file
 /// (an emptied artist is "Unknown Artist", and so on). The album id follows; rebuild the albums.
 pub fn show(t: &mut Track, c: &TagChanges) {
