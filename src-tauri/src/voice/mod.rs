@@ -15,6 +15,8 @@
 
 pub mod align;
 #[cfg(desktop)]
+pub mod sing;
+#[cfg(desktop)]
 mod listen;
 #[cfg(desktop)]
 mod models;
@@ -31,6 +33,28 @@ use crate::ctx::Ctx;
 use crate::library::Track;
 use crate::lyrics::{Line, Lyrics};
 use crate::state::AppState;
+
+/// A singer the AI found: the name, and "lower" or "higher" when it knows whose voice is which.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AiSinger {
+    pub name: String,
+    #[serde(default)]
+    pub voice: String,
+    /// The page that credits them as a vocalist on this song (singers without one aren't kept).
+    #[serde(default)]
+    pub credit: String,
+}
+
+/// What the AI found about who sings a song's lyrics (`lyrics/<id>.singers.json`).
+#[derive(Serialize, Deserialize)]
+struct AiSingers {
+    /// Hash of the lyrics' text, as `Placed::text`.
+    text: String,
+    singers: Vec<AiSinger>,
+    /// Per line, who sings it (indexes into `singers`); empty when the AI found no published parts.
+    #[serde(default)]
+    parts: Vec<Vec<u8>>,
+}
 
 /// Placed lyrics, saved per song.
 #[derive(Serialize, Deserialize)]
@@ -177,6 +201,35 @@ impl Voice {
         self.listened_dir.join(format!("{id}.bin"))
     }
 
+    fn voices_path(&self, id: &str) -> PathBuf {
+        self.listened_dir.join(format!("{id}.sing"))
+    }
+
+    /// Whether the song's voices have been described (who sings when).
+    pub fn has_voices(&self, track: &Track) -> bool {
+        #[cfg(desktop)]
+        return sing::is_saved(&self.voices_path(&track.id), &crate::sonic::stamp(track));
+        #[cfg(not(desktop))]
+        {
+            let _ = track;
+            false
+        }
+    }
+
+    /// Who sings each line of these (placed) lyrics, from the song's saved voices.
+    pub fn split(&self, track: &Track, lines: &[Line]) -> Option<sing::Split> {
+        #[cfg(desktop)]
+        {
+            let v = sing::load(&self.voices_path(&track.id), &crate::sonic::stamp(track))?;
+            sing::split(&v, lines)
+        }
+        #[cfg(not(desktop))]
+        {
+            let _ = (track, lines);
+            None
+        }
+    }
+
     fn read_placed(&self, id: &str) -> Option<Placed> {
         serde_json::from_slice(&std::fs::read(self.placed_path(id)).ok()?).ok()
     }
@@ -230,15 +283,84 @@ impl Voice {
             _ => self.place(track, &lyrics, &texts, &hash, off),
         };
         let Some(placed) = placed else {
+            self.attach_singers(track, &mut lyrics, &hash, None);
             return lyrics;
         };
         if placed.off {
             lyrics.voice = "off".into();
         } else {
             lyrics.voice = "on".into();
-            lyrics.synced = placed.lines;
+            let mut lines = placed.lines.clone();
+            // Singers named in the lyrics stay with their lines.
+            if lines.len() == lyrics.synced.len() {
+                for (l, o) in lines.iter_mut().zip(&lyrics.synced) {
+                    l.singers = o.singers.clone();
+                }
+            }
+            lyrics.synced = lines;
         }
+        self.attach_singers(track, &mut lyrics, &hash, Some(&placed.lines));
         lyrics
+    }
+
+    fn ai_singers_path(&self, id: &str) -> PathBuf {
+        self.lyrics_dir.join(format!("{id}.singers.json"))
+    }
+
+    fn read_ai_singers(&self, id: &str) -> Option<AiSingers> {
+        serde_json::from_slice(&std::fs::read(self.ai_singers_path(id)).ok()?).ok()
+    }
+
+    /// Keeps what the AI found about who sings this song's lyrics (`texts`, line by line).
+    pub fn save_ai_singers(&self, id: &str, texts: &[String], singers: Vec<AiSinger>, parts: Vec<Vec<u8>>) {
+        let _ = std::fs::create_dir_all(&self.lyrics_dir);
+        let found = AiSingers {
+            text: text_hash(texts),
+            singers,
+            parts,
+        };
+        if let Ok(bytes) = serde_json::to_vec(&found) {
+            let _ = std::fs::write(self.ai_singers_path(id), bytes);
+        }
+    }
+
+    /// Who sings each line, when the lyrics don't say: the AI's parts (from published lyrics
+    /// that mark them), else the voices told apart in the singing (`placed`: the lines placed on
+    /// it), named by the AI when it found the singers.
+    fn attach_singers(&self, track: &Track, lyrics: &mut Lyrics, hash: &str, placed: Option<&[Line]>) {
+        if !lyrics.singers.is_empty() || lyrics.synced.is_empty() {
+            return;
+        }
+        let ai = self.read_ai_singers(&track.id).filter(|a| a.text == hash);
+        if let Some(ai) = &ai {
+            let n = ai.singers.len();
+            if n >= 2 && ai.parts.len() == lyrics.synced.len() && ai.parts.iter().filter(|p| !p.is_empty()).count() * 2 >= ai.parts.len() {
+                for (l, p) in lyrics.synced.iter_mut().zip(&ai.parts) {
+                    l.singers = p.iter().copied().filter(|&i| (i as usize) < n).collect();
+                }
+                lyrics.singers = ai.singers.iter().map(|s| s.name.clone()).collect();
+                lyrics.singers_from = "ai".into();
+                return;
+            }
+        }
+        let Some(placed) = placed.filter(|p| p.len() == lyrics.synced.len()) else { return };
+        let Some(split) = self.split(track, placed) else { return };
+        // The AI's singers, matched by voice: the lower one first.
+        let named = |voice: &str| {
+            ai.as_ref()
+                .and_then(|a| a.singers.iter().find(|s| s.voice == voice))
+                .map(|s| s.name.clone())
+                .unwrap_or_default()
+        };
+        lyrics.singers = vec![named("lower"), named("higher")];
+        for (l, g) in lyrics.synced.iter_mut().zip(&split.lines) {
+            l.singers = match g {
+                Some(2) => vec![0, 1],
+                Some(g) => vec![*g],
+                None => Vec::new(),
+            };
+        }
+        lyrics.singers_from = "voice".into();
     }
 
     /// Places lyrics with the saved listening and saves the result; None without a listening
@@ -445,7 +567,7 @@ fn batch_songs(state: &AppState, voice: &Voice) -> Vec<String> {
     let mut found: Vec<(u32, u64, String)> = tracks
         .iter()
         .filter(|t| t.duration >= 20.0 && t.duration <= listen::LONGEST_SECS && !skipped.contains(&t.id))
-        .filter(|t| !voice.has_listened(t) && !crate::lyrics::is_hidden(&cache, &t.id))
+        .filter(|t| !(voice.has_listened(t) && voice.has_voices(t)) && !crate::lyrics::is_hidden(&cache, &t.id))
         .filter(|t| has_lyrics(&cache, t))
         .map(|t| {
             (
@@ -690,7 +812,7 @@ fn look_ahead(ctx: &Ctx, state: &AppState, voice: &Voice, just_done: &str) {
         lib.by_id.get(&next).map(|&i| lib.snapshot.tracks[i].clone())
     };
     let Some(track) = track else { return };
-    if voice.has_listened(&track) || track.duration > listen::LONGEST_SECS {
+    if (voice.has_listened(&track) && voice.has_voices(&track)) || track.duration > listen::LONGEST_SECS {
         return;
     }
     if has_lyrics(&state.data_dir.join("lyrics"), &track) {
@@ -711,7 +833,10 @@ fn run(ctx: &Ctx, state: &AppState, voice: &Voice, track: &Track, resolve: Resol
     }
     let stamp = crate::sonic::stamp(track);
     let listened = voice.listened_path(&track.id);
-    if !listen::is_saved(&listened, &stamp) {
+    let voices_file = voice.voices_path(&track.id);
+    let has_letters = listen::is_saved(&listened, &stamp);
+    let has_voices = sing::is_saved(&voices_file, &stamp);
+    if !has_letters || !has_voices {
         if track.duration > listen::LONGEST_SECS {
             bail!("This song is too long to listen to.");
         }
@@ -719,7 +844,9 @@ fn run(ctx: &Ctx, state: &AppState, voice: &Voice, track: &Track, resolve: Resol
             bail!("The voice models aren’t downloaded.");
         }
         update_runtime(ctx, voice);
-        let total = listen::steps(track.duration) + 1;
+        // Listened to before the voices were described: only the separation again.
+        let only_voices = has_letters;
+        let total = if only_voices { listen::voice_steps(track.duration) } else { listen::steps(track.duration) } + 1;
         let mut job = Job {
             track_id: track.id.clone(),
             title: track.title.clone(),
@@ -730,23 +857,25 @@ fn run(ctx: &Ctx, state: &AppState, voice: &Voice, track: &Track, resolve: Resol
         *voice.job.lock() = Some(job.clone());
         ctx.emit("voice-progress", job.clone());
         let started = std::time::Instant::now();
-        let (em, gpu) = loop {
+        let (heard, gpu) = loop {
             let mut gpu = false;
-            let result = listen::listen(
-                Path::new(&track.path),
-                |separator| {
-                    let opened = open_model(voice, separator)?;
-                    gpu |= opened.1;
-                    Ok(opened)
-                },
-                || {
-                    job.done = (job.done + 1).min(total - 1);
-                    *voice.job.lock() = Some(job.clone());
-                    ctx.emit("voice-progress", job.clone());
-                    voice.wait_while_busy();
-                    !voice.stop.load(Ordering::Relaxed)
-                },
-            );
+            let open = |separator| {
+                let opened = open_model(voice, separator)?;
+                gpu |= opened.1;
+                Ok(opened)
+            };
+            let step = || {
+                job.done = (job.done + 1).min(total - 1);
+                *voice.job.lock() = Some(job.clone());
+                ctx.emit("voice-progress", job.clone());
+                voice.wait_while_busy();
+                !voice.stop.load(Ordering::Relaxed)
+            };
+            let result = if only_voices {
+                listen::listen_voices(Path::new(&track.path), open, step).map(|v| (None, v))
+            } else {
+                listen::listen(Path::new(&track.path), open, step).map(|(em, v)| (Some(em), v))
+            };
             match result {
                 // The graphics card failed while working (its driver restarted, out of memory…):
                 // the song again, on the processor.
@@ -766,7 +895,11 @@ fn run(ctx: &Ctx, state: &AppState, voice: &Voice, track: &Track, resolve: Resol
             started.elapsed(),
             if gpu { "graphics card" } else { "processor" }
         );
-        listen::save(&listened, &stamp, &em)?;
+        let (em, voices) = heard;
+        if let Some(em) = em {
+            listen::save(&listened, &stamp, &em)?;
+        }
+        sing::save(&voices_file, &stamp, &voices)?;
     }
     let hash = text_hash(&texts);
     let off = voice.read_placed(&track.id).is_some_and(|p| p.off);
@@ -885,7 +1018,8 @@ mod tests {
                 true
             },
         )
-        .unwrap();
+        .unwrap()
+        .0;
         let end = started.elapsed();
         println!("listened in {end:?} ({steps} steps, {} frames)", em.frames);
         // (separator, on the GPU, asked at, opened at): decoding, then each model's load and work.
@@ -947,6 +1081,49 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(all(test, desktop))]
+mod sing_tests {
+    use super::*;
+
+    /// Tells the singers of a real song apart: `CADENCE_VOICE_LOCAL` = a folder with `models/`,
+    /// `CADENCE_VOICE_SONG` = the audio file, `CADENCE_VOICE_PLACED` = its `lyrics/<id>.voice.json`.
+    /// The voices are kept in `CADENCE_VOICE_LOCAL/<song name>.sing`, so a second run is quick.
+    #[test]
+    #[ignore]
+    fn split_a_real_song() {
+        let local = PathBuf::from(std::env::var("CADENCE_VOICE_LOCAL").unwrap());
+        let song = PathBuf::from(std::env::var("CADENCE_VOICE_SONG").unwrap());
+        let placed: Placed = serde_json::from_slice(&std::fs::read(std::env::var("CADENCE_VOICE_PLACED").unwrap()).unwrap()).unwrap();
+        let cached = local.join(format!("{}.sing", song.file_stem().unwrap().to_string_lossy()));
+        let voices = sing::load(&cached, "test").unwrap_or_else(|| {
+            let voice = Voice::new(&local, &local);
+            let started = std::time::Instant::now();
+            let v = listen::listen_voices(&song, |sep| open_model(&voice, sep), || true).unwrap();
+            println!("separated and described in {:?}", started.elapsed());
+            sing::save(&cached, "test", &v).unwrap();
+            v
+        });
+        let started = std::time::Instant::now();
+        let split = sing::split(&voices, &placed.lines);
+        println!("split in {:?}", started.elapsed());
+        let Some(split) = split else {
+            println!("one singer");
+            return;
+        };
+        println!("voices at {:.1} / {:.1} semitones above 55 Hz", split.pitch[0], split.pitch[1]);
+        for (l, g) in placed.lines.iter().zip(&split.lines) {
+            let who = match g {
+                Some(0) => "LOW ",
+                Some(1) => "HIGH",
+                Some(2) => "BOTH",
+                _ => " ?  ",
+            };
+            println!("{:7.2} {who} {}", l.time, l.text);
+        }
+    }
+
 }
 
 #[cfg(all(test, desktop))]

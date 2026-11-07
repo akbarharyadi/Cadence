@@ -23,6 +23,10 @@ pub struct Line {
     /// Word timings from "enhanced" LRC (`<mm:ss.xx>word`), for karaoke-style highlighting.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<Word>,
+    /// Who sings the line: indexes into `Lyrics::singers` (several when they sing it together);
+    /// empty when not known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub singers: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -51,6 +55,14 @@ pub struct Lyrics {
     /// exists but the listener turned it off for this song, "" when the song hasn't had it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub voice: String,
+    /// The singers, when the song has several and their lines are known (see `Line::singers`).
+    /// A name is "" when the voices were told apart but not named.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub singers: Vec<String>,
+    /// Where the singers come from: "lyrics" (named in them), "ai", "voice" (told apart by
+    /// their voices), or "" when there are none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub singers_from: String,
 }
 
 impl Lyrics {
@@ -59,7 +71,8 @@ impl Lyrics {
         if text.is_empty() {
             return None;
         }
-        let synced = parse_lrc(text);
+        let mut synced = parse_lrc(text);
+        let singers = mark_singers(&mut synced);
         let plain = if synced.is_empty() {
             text.to_string()
         } else {
@@ -76,6 +89,8 @@ impl Lyrics {
             instrumental: false,
             lookup: String::new(),
             voice: String::new(),
+            singers_from: if singers.is_empty() { String::new() } else { "lyrics".into() },
+            singers,
         })
     }
 
@@ -88,12 +103,25 @@ impl Lyrics {
 pub fn parse_lrc(text: &str) -> Vec<Line> {
     let mut offset = 0.0;
     let mut lines = Vec::new();
+    // An untimed line that only names a singer ("[Cassie]", "Yamato:"): for the next timed line.
+    let mut header: Option<String> = None;
     for raw in text.lines() {
         let mut rest = raw.trim();
         let mut times = Vec::new();
         while let Some(stripped) = rest.strip_prefix('[') {
             let Some(end) = stripped.find(']') else { break };
             let tag = &stripped[..end];
+            // After the times, a tag that isn't one names the singer ("[00:12.00][Cassie] …"):
+            // it stays in the text, for `mark_singers`.
+            if !times.is_empty() && parse_timestamp(tag).is_none() {
+                break;
+            }
+            if times.is_empty() && !is_meta_tag(tag) && parse_timestamp(tag).is_none() {
+                if singer_prefix(raw.trim()).is_some_and(|(_, r)| r.is_empty()) {
+                    header = Some(raw.trim().to_string());
+                }
+                break;
+            }
             rest = stripped[end + 1..].trim_start();
             if let Some(ms) = tag.strip_prefix("offset:") {
                 // A positive offset shows lyrics earlier.
@@ -102,12 +130,24 @@ pub fn parse_lrc(text: &str) -> Vec<Line> {
                 times.push(t);
             }
         }
-        let (text, words) = parse_words(rest);
+        if times.is_empty() {
+            if singer_prefix(rest).is_some_and(|(_, r)| r.is_empty()) {
+                header = Some(rest.to_string());
+            }
+            continue;
+        }
+        let (mut text, words) = parse_words(rest);
+        if let Some(h) = header.take() {
+            if singer_prefix(&text).is_none() {
+                text = format!("{h} {text}");
+            }
+        }
         for t in times {
             lines.push(Line {
                 time: t,
                 text: text.clone(),
                 words: words.clone(),
+                singers: Vec::new(),
             });
         }
     }
@@ -119,6 +159,152 @@ pub fn parse_lrc(text: &str) -> Vec<Line> {
     }
     lines.sort_by(|a, b| a.time.total_cmp(&b.time));
     lines
+}
+
+/// LRC's own tags: `[ti:Title]`, `[ar:Artist]`, `[length:3:20]`…
+fn is_meta_tag(tag: &str) -> bool {
+    let key = tag.split(':').next().unwrap_or("").trim().to_lowercase();
+    tag.contains(':') && ["ti", "ar", "al", "au", "by", "re", "ve", "tool", "length", "offset", "la", "lr", "id", "#"].contains(&key.as_str())
+}
+
+// ---------- singers named in the lyrics ----------
+
+/// Names that mean everyone sings the line.
+const EVERYONE: [&str; 9] = ["all", "both", "together", "everyone", "tutti", "group", "合唱", "全員", "다같이"];
+
+/// Song parts, not singers: "[Chorus]", "Verse 2:".
+const SECTIONS: [&str; 16] = [
+    "chorus", "verse", "bridge", "intro", "outro", "hook", "refrain", "interlude", "instrumental", "repeat", "pre", "post", "rap",
+    "spoken", "solo", "break",
+];
+
+/// A singer's name at the start of a line: "Cassie: …", "[Cassie] …", "(Cassie) …", "【男】…",
+/// or a line that is only the name ("[Cassie]", "Cassie:"). Returns the name and the rest.
+fn singer_prefix(text: &str) -> Option<(String, String)> {
+    let t = text.trim();
+    let first = t.chars().next()?;
+    let (name, rest) = if matches!(first, '[' | '(' | '（' | '【') {
+        let close = match first {
+            '[' => ']',
+            '(' => ')',
+            '（' => '）',
+            _ => '】',
+        };
+        let end = t.find(close)?;
+        let name = t[first.len_utf8()..end].trim().trim_end_matches([':', '：']);
+        let rest = t[end + close.len_utf8()..].trim_start_matches([':', '：', ' ']);
+        // "(Eat up) Fill your stomach": backing vocals. Parentheses name a singer only alone.
+        if matches!(first, '(' | '（') && !rest.trim().is_empty() {
+            return None;
+        }
+        (name, rest)
+    } else {
+        let (name, rest) = t.split_once([':', '：'])?;
+        (name, rest)
+    };
+    let name = name.trim();
+    let lower = name.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    // Singing, not a name: "(Oh oh)", "(La la la)".
+    const SUNG: [&str; 14] = ["oh", "ah", "la", "yeah", "hey", "woo", "na", "ooh", "uh", "ha", "mm", "whoa", "da", "yo"];
+    if name.is_empty()
+        || name.chars().count() > 30
+        || name.split_whitespace().count() > 4
+        || name.contains(['.', '!', '?', '"', '“', '…'])
+        || words.is_empty()
+        || words.iter().all(|w| SUNG.contains(w) || w.chars().all(|c| c.is_ascii_digit()))
+        || words.iter().any(|w| SECTIONS.contains(w) || w.starts_with("chorus") || w.starts_with("verse"))
+    {
+        return None;
+    }
+    Some((name.to_string(), rest.trim().to_string()))
+}
+
+/// Several singers in one name: "Cassie & Yamato", "A, B and C", "A x B".
+fn split_names(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string()];
+    for sep in [" & ", ", ", " and ", " x ", " X ", "&", "/", "、", "・", ","] {
+        out = out.iter().flat_map(|n| n.split(sep).map(|p| p.trim().to_string()).collect::<Vec<_>>()).filter(|p| !p.is_empty()).collect();
+    }
+    out
+}
+
+/// Finds singers named in the lyrics (see `singer_prefix`), takes the names out of the lines and
+/// marks who sings each: a name holds for the lines after it, until the next one. Lines that are
+/// only a name are removed. Needs two or more singers; otherwise nothing changes.
+pub fn mark_singers(lines: &mut Vec<Line>) -> Vec<String> {
+    let mut found: Vec<Option<(String, String)>> = lines.iter().map(|l| singer_prefix(&l.text)).collect();
+    // "Remember this: …" is a line, not a singer: a name before a colon has to come back.
+    let bare: Vec<bool> = lines.iter().map(|l| !l.text.trim_start().starts_with(['[', '(', '（', '【'])).collect();
+    let uses = |name: &str, found: &[Option<(String, String)>]| found.iter().flatten().filter(|(n, _)| n == name).count();
+    let lonely: Vec<bool> = found
+        .iter()
+        .zip(&bare)
+        .map(|(f, &bare)| {
+            f.as_ref().is_some_and(|(n, rest)| {
+                bare && !rest.is_empty() && uses(n, &found) < 2 && !EVERYONE.contains(&n.to_lowercase().as_str())
+                    && !["M", "F", "D", "男", "女"].contains(&n.as_str())
+            })
+        })
+        .collect();
+    for (f, lonely) in found.iter_mut().zip(lonely) {
+        if lonely {
+            *f = None;
+        }
+    }
+    // Karaoke's M / F / D (male, female, duet); D is both.
+    let duet = |n: &str| matches!(n, "D" | "d" | "Duet" | "duet" | "M&F" | "F&M");
+    let everyone = |n: &str| EVERYONE.contains(&n.to_lowercase().as_str()) || duet(n);
+    let mut singers: Vec<String> = Vec::new();
+    for (name, _) in found.iter().flatten() {
+        if everyone(name) {
+            continue;
+        }
+        for n in split_names(name) {
+            if !singers.iter().any(|s| s.eq_ignore_ascii_case(&n)) {
+                singers.push(n);
+            }
+        }
+    }
+    let marked = found.iter().flatten().count();
+    let with_text = lines.iter().filter(|l| !l.text.trim().is_empty()).count().max(1);
+    // Two or more names, on enough lines to be a pattern rather than a stray "Note: …".
+    if singers.len() < 2 || singers.len() > 12 || marked < 2 || marked * 20 < with_text {
+        return Vec::new();
+    }
+    let index = |n: &str| singers.iter().position(|s| s.eq_ignore_ascii_case(n)).map(|i| i as u8);
+    let all: Vec<u8> = (0..singers.len() as u8).collect();
+    let mut current: Vec<u8> = Vec::new();
+    let mut keep = Vec::with_capacity(lines.len());
+    for (line, f) in lines.iter_mut().zip(found) {
+        let mut only_name = false;
+        if let Some((name, rest)) = f {
+            current = if everyone(&name) { all.clone() } else { split_names(&name).iter().filter_map(|n| index(n)).collect() };
+            only_name = rest.is_empty();
+            // Take the name out of the line, and out of its first timed word.
+            let trimmed = line.text.trim();
+            let prefix = trimmed[..trimmed.len() - rest.len()].trim().to_string();
+            line.text = rest;
+            if let Some(w) = line.words.first_mut() {
+                if let Some(r) = w.text.trim_start().strip_prefix(&prefix) {
+                    w.text = r.trim_start_matches([':', '：', ' ']).to_string();
+                }
+            }
+            line.words.retain(|w| !w.text.trim().is_empty());
+        }
+        line.singers = if line.text.trim().is_empty() { Vec::new() } else { current.clone() };
+        keep.push(!only_name);
+    }
+    let mut k = keep.into_iter();
+    lines.retain(|_| k.next().unwrap_or(true));
+    singers
+        .into_iter()
+        .map(|s| match s.as_str() {
+            "M" | "m" | "男" => "Male".into(),
+            "F" | "f" | "女" => "Female".into(),
+            _ => s,
+        })
+        .collect()
 }
 
 /// Splits `<00:01.00>Hello <00:01.50>world` into plain text and timed words.
@@ -640,6 +826,70 @@ pub fn online(
 mod tests {
     use super::*;
 
+    fn who(l: &Lyrics) -> Vec<(String, Vec<u8>)> {
+        l.synced.iter().map(|x| (x.text.clone(), x.singers.clone())).collect()
+    }
+
+    #[test]
+    fn finds_singers_named_in_the_lyrics() {
+        // Names before a colon, held until the next one; "Both" is everyone.
+        let l = Lyrics::from_text(
+            "[00:01.00]Cassie: The magical potion\n[00:03.00]Of reanimation\n[00:05.00]Yamato: So I can see you\n[00:07.00]Both: Eat up\n[00:09.00]Cassie: Fill your stomach\n[00:11.00]Yamato: again",
+            "file",
+        )
+        .unwrap();
+        assert_eq!(l.singers, ["Cassie", "Yamato"]);
+        assert_eq!(l.singers_from, "lyrics");
+        assert_eq!(
+            who(&l),
+            [
+                ("The magical potion".into(), vec![0]),
+                ("Of reanimation".into(), vec![0]),
+                ("So I can see you".into(), vec![1]),
+                ("Eat up".into(), vec![0, 1]),
+                ("Fill your stomach".into(), vec![0]),
+                ("again".into(), vec![1]),
+            ]
+        );
+        // Lines that only name the singer, timed or not, and "A & B" for both.
+        let l = Lyrics::from_text(
+            "[Ayaka]\n[00:01.00]First line\n[00:02.00]Second line\n[00:03.00][Ken]\n[00:04.00]Third line\n[00:05.00][Ayaka & Ken] Fourth",
+            "file",
+        )
+        .unwrap();
+        assert_eq!(l.singers, ["Ayaka", "Ken"]);
+        assert_eq!(
+            who(&l),
+            [("First line".into(), vec![0]), ("Second line".into(), vec![0]), ("Third line".into(), vec![1]), ("Fourth".into(), vec![0, 1])]
+        );
+        // Karaoke's M / F / D.
+        let l = Lyrics::from_text("[00:01.00]M: one\n[00:02.00]F: two\n[00:03.00]D: three\n[00:04.00]M: four", "file").unwrap();
+        assert_eq!(l.singers, ["Male", "Female"]);
+        assert_eq!(l.synced[2].singers, [0, 1]);
+        // Word-timed lines lose the name from their first word too.
+        let l = Lyrics::from_text("[00:01.00]<00:01.00>Mia: <00:01.50>hello\n[00:02.00]Leo: bye\n[00:03.00]Mia: again\n[00:04.00]Leo: end", "file").unwrap();
+        assert_eq!(l.synced[0].text, "hello");
+        assert_eq!(l.synced[0].words.len(), 1);
+    }
+
+    #[test]
+    fn ordinary_lyrics_have_no_singers() {
+        for text in [
+            // Backing vocals in parentheses, song parts, a colon in a line.
+            "[00:01.00](Eat up) Fill your stomach\n[00:02.00](Eat up) Eat it all\n[00:03.00](Oh oh) yeah",
+            "[Verse 1]\n[00:01.00]One\n[Chorus]\n[00:02.00]Two\n[Pre-Chorus]\n[00:03.00]Three",
+            "[00:01.00]Remember this: love is all\n[00:02.00]Listen: the night\n[00:03.00]Something else",
+            "[ti:Song]\n[ar:Someone]\n[00:01.00]Hello\n[00:02.00]World",
+        ] {
+            let l = Lyrics::from_text(text, "file").unwrap();
+            assert!(l.singers.is_empty(), "{text}: {:?}", l.singers);
+            assert!(l.synced.iter().all(|x| x.singers.is_empty()));
+        }
+        // Their text is left as it was.
+        let l = Lyrics::from_text("[00:01.00](Eat up) Fill your stomach", "file").unwrap();
+        assert_eq!(l.synced[0].text, "(Eat up) Fill your stomach");
+    }
+
     #[test]
     fn parses_lrc() {
         let l = parse_lrc(
@@ -651,7 +901,8 @@ mod tests {
             Line {
                 time: 1.0,
                 text: "Hello".into(),
-                words: Vec::new()
+                words: Vec::new(),
+                singers: Vec::new()
             }
         );
         assert_eq!(l[1].text, "Again");

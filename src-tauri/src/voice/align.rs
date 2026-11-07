@@ -444,6 +444,7 @@ pub fn align(em: &Emissions, texts: &[String], times: Option<&[f64]>) -> Option<
                 time,
                 text: text.clone(),
                 words: Vec::new(),
+                singers: Vec::new(),
             });
             continue;
         }
@@ -484,6 +485,7 @@ pub fn align(em: &Emissions, texts: &[String], times: Option<&[f64]>) -> Option<
             time,
             text: text.clone(),
             words,
+            singers: Vec::new(),
         });
     }
     let lines_with_words = listened.iter().filter(|&&l| l).count();

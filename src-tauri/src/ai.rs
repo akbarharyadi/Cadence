@@ -796,6 +796,98 @@ Never invent or translate lyrics.\ninstrumental: true if the song has no vocals.
     })
 }
 
+/// Who sings a song: its singers, and per line who sings it when published lyrics say so.
+pub struct FoundSingers {
+    pub singers: Vec<crate::voice::AiSinger>,
+    /// Per line (as given), indexes into `singers`; empty when no published parts were found.
+    pub parts: Vec<Vec<u8>>,
+}
+
+/// Asks the AI (with web search) who sings this song and which lines each singer sings.
+pub fn find_singers(s: &AiSettings, t: &Track, lines: &[String]) -> Result<FoundSingers, String> {
+    let numbered: String = lines.iter().enumerate().map(|(i, l)| format!("{i}: {l}\n")).collect();
+    let prompt = format!(
+        "Who sings this song, and who sings each line? Search the web: credits, the official lyrics, \
+lyrics sites that mark each singer's part (color-coded or with names), fan wikis.\n\
+Title: {title}\nArtist: {artist}\nAlbum: {album}\n\nThe lyrics, numbered:\n{numbered}\n\
+Return JSON only: {{\"singers\":[{{\"name\":\"\",\"voice\":\"\",\"credit\":\"\"}}],\"parts\":[[0]],\"parts_source\":\"\"}}\n\
+singers: the vocalists credited on THIS recording (not producers, composers or band members who play \
+instruments), in the order they first sing. credit: the URL of the page that credits them as a vocalist on \
+this song or its album (official site, liner notes, Discogs, VGMdb, the label). A singer you can't cite a \
+credit for must be left out: never name a vocalist from memory or because they are in the band.\n\
+voice: \"lower\" or \"higher\" when there are two credited singers and you know whose voice is lower (e.g. a \
+man and a woman), else \"\".\n\
+parts: one entry per numbered line, in order ({n} entries): the indexes in singers of who sings that line \
+([0,1] when they sing it together, [] for an empty line). Only fill parts from a real source that marks the \
+parts, and give its URL in parts_source; if you didn't find one, return \"parts\":[] and \"parts_source\":\"\". \
+Never guess.",
+        title = t.title,
+        artist = t.artist,
+        album = t.album,
+        n = lines.len(),
+    );
+    let v = chat_json(s, &prompt, true)?;
+    Ok(read_singers(&v, lines.len()))
+}
+
+/// A web address the AI cites (anything else is no source).
+fn is_url(s: &str) -> bool {
+    let s = s.trim();
+    (s.starts_with("https://") || s.starts_with("http://")) && s.len() > 12 && !s.contains(char::is_whitespace)
+}
+
+/// The AI's answer about the singers, keeping only what it cites a source for: singers without a
+/// credit are dropped (a model will otherwise name a band member who only plays guitar), and the
+/// parts need a source and one entry per line.
+fn read_singers(v: &Value, lines: usize) -> FoundSingers {
+    let singers: Vec<crate::voice::AiSinger> = v["singers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| {
+            let name = x["name"].as_str()?.trim().to_string();
+            let credit = x["credit"].as_str().unwrap_or("").trim().to_string();
+            if name.is_empty() || !is_url(&credit) {
+                return None;
+            }
+            let voice = x["voice"].as_str().unwrap_or("").trim().to_lowercase();
+            Some(crate::voice::AiSinger {
+                name,
+                voice: if voice == "lower" || voice == "higher" { voice } else { String::new() },
+                credit,
+            })
+        })
+        .take(12)
+        .collect();
+    // Whose voice is lower only means something with two credited singers.
+    let singers = if singers.len() == 2 {
+        singers
+    } else {
+        singers.into_iter().map(|s| crate::voice::AiSinger { voice: String::new(), ..s }).collect()
+    };
+    let n = singers.len();
+    let parts: Vec<Vec<u8>> = v["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| {
+            p.as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|i| i.as_u64())
+                .filter(|&i| (i as usize) < n)
+                .map(|i| i as u8)
+                .collect()
+        })
+        .collect();
+    let sourced = is_url(v["parts_source"].as_str().unwrap_or(""));
+    FoundSingers {
+        // Parts without a source, or that don't match the lines, are of no use.
+        parts: if sourced && parts.len() == lines { parts } else { Vec::new() },
+        singers,
+    }
+}
+
 /// Songs the listener doesn't have yet, picked from their listening (taste, most played songs)
 /// with web search for recent releases.
 
@@ -818,6 +910,40 @@ pub fn today() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn singers_need_a_credit() {
+        // A band member named from memory (no credit) is left out, and with one credited singer
+        // left, "lower"/"higher" means nothing.
+        let v = json!({
+            "singers": [
+                { "name": "Cassie Wei", "voice": "higher", "credit": "https://vgmdb.net/album/62456" },
+                { "name": "Yamato Kasai", "voice": "lower", "credit": "" },
+            ],
+            "parts": [[0], [1]],
+            "parts_source": "",
+        });
+        let f = read_singers(&v, 2);
+        assert_eq!(f.singers.len(), 1);
+        assert_eq!(f.singers[0].name, "Cassie Wei");
+        assert_eq!(f.singers[0].voice, "");
+        // Parts without a source are dropped too.
+        assert!(f.parts.is_empty());
+        // Two credited singers with sourced parts: all kept.
+        let v = json!({
+            "singers": [
+                { "name": "A", "voice": "lower", "credit": "https://example.com/credits" },
+                { "name": "B", "voice": "higher", "credit": "https://example.com/credits" },
+            ],
+            "parts": [[0], [0, 1]],
+            "parts_source": "https://example.com/lyrics",
+        });
+        let f = read_singers(&v, 2);
+        assert_eq!(f.singers.iter().map(|s| s.voice.as_str()).collect::<Vec<_>>(), ["lower", "higher"]);
+        assert_eq!(f.parts, vec![vec![0], vec![0, 1]]);
+        // Parts for the wrong number of lines: dropped.
+        assert!(read_singers(&v, 3).parts.is_empty());
+    }
 
     #[test]
     fn claude_request() {

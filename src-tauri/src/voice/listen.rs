@@ -17,6 +17,7 @@ use realfft::num_complex::Complex32;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
 use super::align::{Emissions, VOCAB};
+use super::sing::Voices;
 use crate::audio::{Resampler, Source};
 
 /// MDX-Net hears stereo 44.1 kHz as a spectrogram (6144-point FFT, hop 1024) of 256 frames and
@@ -248,8 +249,8 @@ fn separate(model: &mut Session, gpu: bool, mix: &[f32], mut step: impl FnMut() 
     Ok(vocals)
 }
 
-/// Letter log-probabilities for the vocals (mono 44.1 kHz).
-fn hear(model: &mut Session, gpu: bool, vocals: &[f32], mut step: impl FnMut() -> bool) -> Result<Emissions> {
+/// The vocals (mono 44.1 kHz) at 16 kHz, as the letter model and the singer description hear them.
+fn to_16k(vocals: &[f32]) -> Result<Vec<f32>> {
     let mut audio = Vec::with_capacity(vocals.len() * 4 / 11 + 1024);
     let mut r = Resampler::new(SEP_RATE, ASR_RATE, 1)?;
     // A piece at a time: the resampler moves what's left of its input after every 1024 samples,
@@ -258,6 +259,11 @@ fn hear(model: &mut Session, gpu: bool, vocals: &[f32], mut step: impl FnMut() -
         r.push(piece, &mut audio)?;
     }
     r.flush(&mut audio)?;
+    Ok(audio)
+}
+
+/// Letter log-probabilities for the vocals (mono 16 kHz).
+fn hear(model: &mut Session, gpu: bool, audio: &[f32], mut step: impl FnMut() -> bool) -> Result<Emissions> {
     let v = VOCAB.len();
     let mut logp = Vec::with_capacity(audio.len() / ASR_HOP * v);
     let mut frames = 0;
@@ -291,22 +297,46 @@ fn hear(model: &mut Session, gpu: bool, vocals: &[f32], mut step: impl FnMut() -
     Ok(Emissions { frames, logp })
 }
 
+/// The separated vocals of a song at 16 kHz.
+fn vocals_16k(path: &Path, open: &mut impl FnMut(bool) -> Result<(Session, bool)>, step: &mut impl FnMut() -> bool) -> Result<Vec<f32>> {
+    let mix = decode(path).context("couldn't read the song")?;
+    let vocals = {
+        let (mut separator, gpu) = open(true)?;
+        separate(&mut separator, gpu, &mix, &mut *step)?
+    };
+    drop(mix);
+    to_16k(&vocals)
+}
+
 /// Listens to a whole song: `open(true)` gives the separator, `open(false)` the letter model,
 /// each loaded only while it's needed, and whether it's on the graphics card. `step` is called
-/// after each piece of work; returning false stops.
+/// after each piece of work; returning false stops. Also describes the voices (who sings when).
 pub fn listen(
     path: &Path,
     mut open: impl FnMut(bool) -> Result<(Session, bool)>,
     mut step: impl FnMut() -> bool,
-) -> Result<Emissions> {
-    let mix = decode(path).context("couldn't read the song")?;
-    let vocals = {
-        let (mut separator, gpu) = open(true)?;
-        separate(&mut separator, gpu, &mix, &mut step)?
-    };
-    drop(mix);
+) -> Result<(Emissions, Voices)> {
+    let audio = vocals_16k(path, &mut open, &mut step)?;
+    let voices = super::sing::analyze(&audio);
     let (mut letters, gpu) = open(false)?;
-    hear(&mut letters, gpu, &vocals, &mut step)
+    Ok((hear(&mut letters, gpu, &audio, &mut step)?, voices))
+}
+
+/// Only describes the voices, for a song listened to before Cadence did that: the vocals are
+/// separated again, the letter model isn't needed.
+pub fn listen_voices(
+    path: &Path,
+    mut open: impl FnMut(bool) -> Result<(Session, bool)>,
+    mut step: impl FnMut() -> bool,
+) -> Result<Voices> {
+    let audio = vocals_16k(path, &mut open, &mut step)?;
+    Ok(super::sing::analyze(&audio))
+}
+
+/// How many steps describing the voices takes (separating only).
+pub fn voice_steps(seconds: f64) -> usize {
+    let n = (seconds * SEP_RATE as f64) as usize;
+    (n + TRIM).div_ceil(STEP).max(1)
 }
 
 // ---------- saved listening ----------

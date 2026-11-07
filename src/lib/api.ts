@@ -160,6 +160,8 @@ export interface LyricLine {
   text: string;
   /** Word timings ("enhanced" LRC, or placed on the singing), when the lyrics have them. */
   words?: { time: number; text: string; end?: number }[];
+  /** Who sings the line: indexes into `Lyrics.singers` (several when they sing it together). */
+  singers?: number[];
 }
 
 export interface Lyrics {
@@ -171,6 +173,10 @@ export interface Lyrics {
   lookup: "off" | "missing" | "unavailable" | "hidden" | "";
   /** Placed on the singing: "on" (these lines), "off" (turned off for this song), absent if not yet. */
   voice?: "on" | "off";
+  /** The singers, when the song has several and their lines are known; "" when told apart by voice but not named. */
+  singers?: string[];
+  /** Where the singers come from: named in the lyrics, found by the AI, or told apart by their voices. */
+  singersFrom?: "lyrics" | "ai" | "voice";
 }
 
 /** Following the singer: Cadence listens to a song once and places every word on the singing. */
@@ -447,6 +453,7 @@ export const api = {
   /** Today's picks for this month's listening: made once a day and kept. */
   aiDailyPicks: (refresh: boolean) => invoke<Recommendations>("ai_daily_picks", { refresh }),
   aiFindLyrics: (trackId: string) => invoke<Lyrics>("ai_find_lyrics", { trackId }),
+  findSingers: (trackId: string) => invoke<Lyrics>("find_singers", { trackId }),
   aiTest: () => invoke<string>("ai_test"),
   aiPreview: (request: string) => invoke<string>("ai_preview", { request }),
   aiAsk: (request: string) => invoke<AiMix>("ai_ask", { request }),

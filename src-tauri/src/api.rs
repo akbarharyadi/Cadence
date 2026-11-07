@@ -813,7 +813,12 @@ pub fn get_lyrics(ctx: &Ctx, track_id: String) -> Result<crate::lyrics::Lyrics, 
     let voice = &ctx.voice;
     let track = track_of(&state, &track_id)?;
     let (state, voice) = (state.clone(), voice.clone());
-    Ok(voice.apply(&track, resolve_lyrics(&state, &track)))
+    let lyrics = voice.apply(&track, resolve_lyrics(&state, &track));
+    // Followed before Cadence told singers apart: their voices once more (separating only).
+    if !lyrics.voice.is_empty() && lyrics.singers.is_empty() && state.settings.lock().voice_auto && voice.installed() && !voice.has_voices(&track) {
+        crate::voice::request(ctx, track_id, resolve_lyrics);
+    }
+    Ok(lyrics)
 }
 
 /// The lyrics the lyrics view shows for a song (before placing them on the singing). Blocking:
@@ -852,6 +857,41 @@ pub(crate) fn resolve_lyrics(state: &AppState, track: &crate::library::Track) ->
             ..Default::default()
         },
     }
+}
+
+/// Finds out who sings a song's lines: the AI names the singers (and the parts, when published
+/// lyrics mark them), and Cadence tells their voices apart in the singing if it hasn't yet
+/// (a "voice-done" event follows then).
+pub fn find_singers(ctx: &Ctx, track_id: String) -> Result<crate::lyrics::Lyrics, String> {
+    let state = ctx.state.clone();
+    let voice = ctx.voice.clone();
+    let track = track_of(&state, &track_id)?;
+    let lyrics = resolve_lyrics(&state, &track);
+    let shown = voice.apply(&track, lyrics.clone());
+    if shown.synced.is_empty() {
+        return Err("Singers can be shown on timed lyrics only.".into());
+    }
+    if shown.singers_from == "lyrics" {
+        return Ok(shown);
+    }
+    if voice.installed() && !voice.has_voices(&track) {
+        crate::voice::request(ctx, track_id.clone(), resolve_lyrics);
+    }
+    let settings = state.settings.lock().ai.clone();
+    if settings.provider == crate::ai::Provider::Off {
+        return Ok(shown);
+    }
+    // The lines as saved (before placing on the singing: the same text).
+    let texts: Vec<String> = lyrics.synced.iter().map(|l| l.text.clone()).collect();
+    let found = crate::ai::find_singers(&settings, &track, &texts)?;
+    log::info!(
+        "AI singers for {}: {} ({} parts)",
+        track.title,
+        found.singers.iter().map(|s| format!("{} [{}]", s.name, s.voice)).collect::<Vec<_>>().join(", "),
+        found.parts.iter().filter(|p| !p.is_empty()).count()
+    );
+    voice.save_ai_singers(&track.id, &texts, found.singers, found.parts);
+    Ok(voice.apply(&track, lyrics))
 }
 
 /// Whether Cadence can follow the singer here, the download, and what it's listening to.
@@ -1607,6 +1647,7 @@ macro_rules! cadence_commands {
             plain hide_lyrics(track_id: String) -> ();
             fallible paste_lyrics(track_id: String, text: String) -> $crate::lyrics::Lyrics;
             blocking ai_find_lyrics(track_id: String) -> $crate::lyrics::Lyrics;
+            blocking find_singers(track_id: String) -> $crate::lyrics::Lyrics;
             plain debug_tap(on: bool) -> String;
         }
     };

@@ -318,9 +318,79 @@
     ai: "AI DJ",
   };
 
+  // ---------- singers ----------
+
+  /** Each singer's colour (r, g, b): the first stays white; lines sung together are lavender. */
+  const SINGER_COLORS = ["255, 255, 255", "255, 158, 207", "130, 210, 255", "255, 210, 120", "165, 235, 165", "255, 170, 140", "200, 170, 255"];
+  const TOGETHER = "205, 185, 255";
+  let showSingers = $state(typeof localStorage === "undefined" || localStorage.getItem("cadence-singers") !== "off");
+  const hasSingers = $derived(!!lyrics?.singers?.length && !!lyrics.synced.some((l) => l.singers?.length));
+  const singersOn = $derived(showSingers && hasSingers);
+  function singerName(i: number) {
+    const name = lyrics?.singers?.[i];
+    if (name) return name;
+    if (lyrics?.singersFrom === "voice") return i === 0 ? "Lower voice" : "Higher voice";
+    return `Singer ${i + 1}`;
+  }
+  function singerColor(line: LyricLine) {
+    const s = line.singers ?? [];
+    if (!singersOn || !s.length) return SINGER_COLORS[0];
+    return s.length > 1 ? TOGETHER : SINGER_COLORS[s[0] % SINGER_COLORS.length];
+  }
+  /** The name to show above a line: only where the singer changes. */
+  const singerLabels = $derived.by(() => {
+    const out: string[] = [];
+    let last = "";
+    for (const line of lyrics?.synced ?? []) {
+      const s = line.singers ?? [];
+      const key = s.join(",");
+      if (!singersOn || !line.text || !s.length || key === last) {
+        out.push("");
+        if (line.text && s.length) last = key;
+        continue;
+      }
+      last = key;
+      const all = s.length > 1 && s.length === (lyrics?.singers?.length ?? 0);
+      const named = s.every((k) => !!lyrics?.singers?.[k]);
+      // Everyone together: "Both" / "Everyone" unless their names are short enough to read.
+      out.push(all && (!named || s.length > 2) ? (s.length > 2 ? "Everyone" : "Both") : s.map(singerName).join(" & "));
+    }
+    return out;
+  });
+  function toggleSingers() {
+    showSingers = !showSingers;
+    localStorage.setItem("cadence-singers", showSingers ? "on" : "off");
+  }
+  let findingSingers = $state(false);
+  async function findSingers() {
+    if (findingSingers) return;
+    findingSingers = true;
+    if (app.aiReady) app.showToast("The AI is searching the web for the singers; this can take a minute or two.");
+    const id = songId;
+    try {
+      const l = await api.findSingers(id);
+      if (id !== songId) return;
+      lyrics = l;
+      showSingers = true;
+      localStorage.setItem("cadence-singers", "on");
+      if (l.singers?.length) app.showToast(`Singers: ${l.singers.map((_, i) => singerName(i)).join(", ")}`);
+      else if (app.voice?.job) app.showToast("Listening to the voices; the singers show when that’s done.");
+      else app.showToast("Couldn’t tell the singers apart in this song.");
+    } catch (e) {
+      app.showToast(String(e));
+    } finally {
+      findingSingers = false;
+    }
+  }
+
   function moreMenu(e: MouseEvent) {
     const timed = !!lyrics?.synced.length;
+    const canFind = timed && lyrics?.singersFrom !== "lyrics" && (app.aiReady || !!app.voice?.installed);
     app.openMenu(e, [
+      ...(hasSingers ? [{ label: showSingers ? "Hide singers" : "Show singers", icon: "artist", action: toggleSingers }] : []),
+      ...(canFind
+        ? [{ label: findingSingers ? "Finding who sings…" : app.aiReady ? "Who sings? (AI)" : "Tell the singers apart", icon: "sparkle", action: findSingers }]
+        : []),
       { label: timed ? "Search for other lyrics" : "Find timed lyrics", icon: "search", action: openSearch },
       { label: "Paste lyrics", icon: "edit", action: () => (panel = "paste") },
       { label: "Hide these lyrics", icon: "close", action: hideLyrics },
@@ -425,7 +495,8 @@
       {:else if lyrics?.synced.length}
         <div class="pad"></div>
         {#each lyrics.synced as line, i}
-          <button class="line" class:active={i === active} class:past={i < active} class:gap={!line.text} onclick={() => app.seek(line.time)}>
+          <button class="line" class:active={i === active} class:past={i < active} class:gap={!line.text} style="--c: {singerColor(line)}" onclick={() => app.seek(line.time)}>
+            {#if singerLabels[i]}<span class="who"><i></i>{singerLabels[i]}</span>{/if}
             {#if i === active && line.text}
               {#each sweep as p}<span class="w" style="--p: {progress(p) * 100}%">{p.text}</span>{/each}
             {:else}
@@ -566,7 +637,7 @@
     font-weight: 700;
     line-height: 1.25;
     letter-spacing: -0.015em;
-    color: rgba(255, 255, 255, 0.32);
+    color: rgba(var(--c, 255, 255, 255), 0.32);
     transition:
       color 0.35s,
       transform 0.35s,
@@ -575,12 +646,12 @@
     filter: blur(0.6px);
   }
   .line:hover {
-    color: rgba(255, 255, 255, 0.6);
+    color: rgba(var(--c, 255, 255, 255), 0.6);
     background: rgba(255, 255, 255, 0.05);
     filter: none;
   }
   .line.past {
-    color: rgba(255, 255, 255, 0.45);
+    color: rgba(var(--c, 255, 255, 255), 0.45);
   }
   .line.active {
     filter: none;
@@ -589,10 +660,31 @@
   /* Each word fills from left to right as it's sung. */
   .w {
     color: transparent;
-    background: linear-gradient(90deg, #fff var(--p), rgba(255, 255, 255, 0.38) var(--p));
+    background: linear-gradient(90deg, rgb(var(--c, 255, 255, 255)) var(--p), rgba(var(--c, 255, 255, 255), 0.38) var(--p));
     -webkit-background-clip: text;
     background-clip: text;
     white-space: pre-wrap;
+  }
+  /* Who sings, where the singer changes: a small name in the singer's colour. */
+  .who {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 2px;
+    font-family: var(--sans, inherit);
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: rgba(var(--c, 255, 255, 255), 0.75);
+  }
+  .who i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: rgb(var(--c, 255, 255, 255));
+  }
+  .line.active .who {
+    color: rgb(var(--c, 255, 255, 255));
   }
   .line.gap {
     font-size: 20px;

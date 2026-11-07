@@ -193,6 +193,7 @@ pub fn run() {
             commands::ai_daily_picks,
             commands::ai_recommend,
             commands::ai_find_lyrics,
+            commands::find_singers,
             commands::ai_test,
             commands::ai_preview,
             commands::ai_ask,
