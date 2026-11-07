@@ -2,6 +2,20 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.30 (2026-11-07)
+
+- **Who sings each line.** In songs with two singers, each singer's lines now have their own colour, lines sung
+  together have a third, and a small name shows where the singer changes. Turn it off with **⋯ → Hide singers**.
+  - Names written in the lyrics are used first, like "Name: …", "[Name]", or karaoke's M / F / D.
+  - Otherwise, while **Follow singer** listens to a song, Cadence also tells the voices apart by their pitch and
+    tone. It only splits songs with two clearly different voices, and lines it isn't sure about stay unmarked. Songs
+    it has followed before are listened to once more, without the slow part (about 40 seconds with a graphics card),
+    the next time you open their lyrics.
+  - **⋯ → Who sings? (AI)** asks the AI DJ to find the singers' names. It only uses names it can show a credit for,
+    so a band member who only plays an instrument isn't named as a singer; without a credit the voices are shown as
+    "Lower voice" and "Higher voice". When a lyrics site marks each singer's part, as K-pop color-coded lyrics do,
+    those parts are used line by line.
+
 ## 0.2.29 (2026-11-07)
 
 - **Fix song info finds the right songs.** When the catalogue doesn't have the song, the list used to fill up with
