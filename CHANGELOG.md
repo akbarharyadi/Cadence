@@ -2,6 +2,19 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.35 (2026-11-07)
+
+- **Windows: if Microsoft Defender removed Cadence after the 0.2.34 update, install this version.** Defender
+  wrongly flagged 0.2.34's program as a threat (an automatic guess, "Bearfoos.A!ml", about a new app that isn't
+  signed yet). Nothing harmful was in it: it was checked against the source, and the same code built again is
+  clean. It has been reported to Microsoft. From this version, every Windows build is scanned with Microsoft
+  Defender before it's published. Your music and Cadence's library were never touched.
+- **The Android app is back.** 0.2.34 came out for Windows, macOS and Linux only; this brings its changes to
+  Android.
+- **Needs Attention reacts at once.** "Use …" on an album split in two, and renaming an artist, show the change
+  right away (in a big library it used to wait for the whole library to be read again). Long names no longer
+  squeeze the album's name: the buttons go onto their own line.
+
 ## 0.2.34 (2026-11-07)
 
 - **Fix song info finds much more.** It now searches Deezer as well as iTunes, so songs Apple doesn't list (many
