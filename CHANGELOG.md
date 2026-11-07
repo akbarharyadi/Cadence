@@ -2,6 +2,15 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.33 (2026-11-07)
+
+- **No more "500 Internal Error".** On Android, turning the screen off and on again could leave Cadence on a blank
+  "500 / Internal Error" page. Now Cadence loads itself again right away (the music keeps playing), and an error in
+  one page, Now Playing or Up Next stays in that part, with a "Try again" button, while the rest keeps working.
+- **Report a problem in one tap.** After an error, "Report" opens a new GitHub issue already filled in with the
+  error, your Cadence version and device, and the last steps before it (pages opened, buttons pressed, the screen
+  turning off and on). Read it, add what you were doing, and press Submit; nothing is sent without you.
+
 ## 0.2.32 (2026-11-07)
 
 - **Singers: no more made-up second voice.** Since 0.2.30, songs with one singer could show their lines as a
