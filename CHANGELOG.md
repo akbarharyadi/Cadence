@@ -2,6 +2,22 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.36 (2026-11-08)
+
+- **Much lighter while music downloads.** If a downloader (aria2, Soulseek, a browser) saves into your music
+  folder, Cadence used to read the whole library again every time a file was written, which could be every minute
+  or every few seconds, keeping a processor core busy and making pages slow. Now songs still downloading are left
+  out until they're complete, Cadence looks again at most every 15 seconds, and pages don't reload when nothing
+  changed. On a 7,000-song library: from more than a full processor core to about a sixth, and a library check
+  from 7 seconds to a third of a second.
+- **Damaged files don't slow everything down.** A FLAC file whose download never finished could take 8 seconds
+  to read on every check; Cadence now spots it in a fraction of a millisecond and skips its cover.
+- **Albums and Recently Added open faster**: the first albums appear at once (about 5× quicker) and the rest are
+  added as you look.
+- **Clearer message when lyrics can't follow the singer** because they belong to another version (an acoustic or
+  live one sings other lines): "Lyrics don't match this version" opens the lyrics search, instead of offering to
+  try again.
+
 ## 0.2.35 (2026-11-07)
 
 - **Windows: if Microsoft Defender removed Cadence after the 0.2.34 update, install this version.** Defender
