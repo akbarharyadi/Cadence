@@ -2,6 +2,12 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.31 (2026-11-07)
+
+- **The Android app is back.** 0.2.30 came out for Windows, macOS and Linux only; this release brings its changes to
+  Android too. On a phone, singers named in the lyrics are shown in their colours (telling voices apart needs
+  Follow singer, which runs on computers).
+
 ## 0.2.30 (2026-11-07)
 
 - **Who sings each line.** In songs with two singers, each singer's lines now have their own colour, lines sung
