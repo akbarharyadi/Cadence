@@ -2,6 +2,18 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.37 (2026-11-08)
+
+- **Song info in Latin letters.** When Fix song info finds a song named in Japanese, Chinese or Korean letters,
+  the new **Aa Latin** switch shows and saves its names in Latin letters instead: Apple's own where it has them
+  (「あんたなんて。」 by りりあ。 is "Antanante." by "Riria."), otherwise written out by Cadence. The other songs of
+  the album follow, the original title is kept as the subtitle so searching finds the song by either name, and
+  your choice is remembered.
+- **"Both" no longer marks lines one person sings.** In duets whose two voices are close in pitch (a man and a
+  woman singing in a similar range), nearly every line could be marked as sung together. Now that only happens
+  when the voices are clearly apart; otherwise each line goes to the voice it sounds closer to. Songs listened to
+  before are fixed the next time their lyrics open.
+
 ## 0.2.36 (2026-11-08)
 
 - **Much lighter while music downloads.** If a downloader (aria2, Soulseek, a browser) saves into your music
