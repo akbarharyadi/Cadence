@@ -85,12 +85,19 @@ jobs:
           $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
           if (-not (Test-Path $mp)) { Write-Warning "Microsoft Defender isn't on this runner: the build isn't scanned"; exit 0 }
           & $mp -SignatureUpdate | Out-Host
-          $files = @("src-tauri\target\release\cadence.exe") + (Get-ChildItem src-tauri\target\release\bundle -Recurse -Include *.exe, *.msi).FullName
+          # Full paths: MpCmdRun can't find a relative one (0x80508023).
+          $files = @((Resolve-Path "src-tauri\target\release\cadence.exe").Path) + (Get-ChildItem src-tauri\target\release\bundle -Recurse -Include *.exe, *.msi).FullName
           foreach ($f in $files) {
-            & $mp -Scan -ScanType 3 -File $f -DisableRemediation | Out-Host
-            # MpCmdRun: 0 = nothing found, 2 = a threat found.
-            if ($LASTEXITCODE -eq 2) { Write-Error "Microsoft Defender flags ${f}: not publishing this build"; exit 1 }
-            Get-FileHash -Algorithm SHA256 $f | Format-List | Out-Host
+            $out = (& $mp -Scan -ScanType 3 -File $f -DisableRemediation | Out-String)
+            Write-Host $out
+            # Its exit code is 2 both for a threat and for a failed scan: read what it says.
+            if ($out -match "found no threats") {
+              Get-FileHash -Algorithm SHA256 $f | Format-List | Out-Host
+            } elseif ($out -match "Threat") {
+              Write-Error "Microsoft Defender flags ${f}: not publishing this build"; exit 1
+            } else {
+              Write-Error "Microsoft Defender couldn't scan ${f} (exit code $LASTEXITCODE): not publishing an unchecked build"; exit 1
+            }
           }
 
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
