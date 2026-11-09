@@ -2,6 +2,27 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.38 (2026-11-09)
+
+- **Needs Attention, rebuilt.** One card per kind of problem, worst first: damaged files, extra copies, albums
+  split in two, artists under two names, songs without info, then the optional ones (lossless files that aren't,
+  albums without a cover, a year or a genre, and albums with songs missing). Click a card to see its list. The
+  sidebar number only counts what's wrong, not what's missing, and the optional kinds can be hidden.
+- **Sure or Check.** Every suggestion says how sure Cadence is. Sure ones start ticked; Check ones don't, so you
+  look first (a copy of another length, or a song found by its title only).
+- **Downloads you already have.** A file without tags, like "りりあ。 - Kiminotonaride" from YouTube, is now
+  recognised as a copy of the song you have tagged (Riria.'s FLAC), across Japanese and Latin letters.
+- **Removed copies go to the Recycle Bin**, and Undo brings them back. The favourite and rating move to the copy
+  that stays. (Library Health used to delete them for good.)
+- **Covers for all your albums without one**: Cadence looks them up in the background, then shows them in a grid
+  for you to check before anything is saved. Undo puts the old files back.
+- **Ignore** anything that's the way you want it; it stays out of the list (and can be shown again).
+- Artist names in Japanese or Chinese letters are checked by themselves after each scan, and "Compilations - Song"
+  file names are no longer read as an artist called "Compilations".
+- Keys on Needs Attention: ↑ ↓ to move, Enter to fix, Space to tick, I to ignore.
+- **Discover no longer suggests songs you have under their Japanese names** ("Kizuna no Kiseki" when you have
+  絆ノ奇跡).
+
 ## 0.2.37 (2026-11-08)
 
 - **Song info in Latin letters.** When Fix song info finds a song named in Japanese, Chinese or Korean letters,
