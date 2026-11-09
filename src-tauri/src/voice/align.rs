@@ -88,15 +88,15 @@ fn romaji(kana: &str) -> Vec<u8> {
 /// How a kanji group is read, using the kana after it (okurigana) to pick the reading.
 fn kanji_reading(kanji: &str, okurigana: &str) -> String {
     if !okurigana.is_empty() {
-        let both = kakasi::convert(format!("{kanji}{okurigana}")).hiragana;
-        let tail = kakasi::convert(okurigana).hiragana;
+        let both = crate::romanize::reading(&format!("{kanji}{okurigana}"));
+        let tail = crate::romanize::reading(okurigana);
         if let Some(r) = both.strip_suffix(tail.as_str())
             && !r.is_empty()
         {
             return r.to_string();
         }
     }
-    kakasi::convert(kanji).hiragana
+    crate::romanize::reading(kanji)
 }
 
 fn units(line: &str, script: Option<Script>) -> Vec<Unit> {

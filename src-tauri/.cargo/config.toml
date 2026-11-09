@@ -1,0 +1,4 @@
+# The Japanese dictionary (lindera IPADIC) is downloaded and built once, then kept here instead of
+# in every build directory; CI caches this folder, so a release needs no download.
+[env]
+LINDERA_BUILD_DICTIONARY_CACHE_DIR = { value = "lindera-cache", relative = true }

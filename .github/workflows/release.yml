@@ -53,6 +53,12 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
+      # The Japanese dictionary (lindera IPADIC), downloaded and built once: see src-tauri/.cargo/config.toml.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: src-tauri/lindera-cache
+          key: lindera-ipadic-6.2
+
       - run: pnpm install --frozen-lockfile
 
       - name: Open-source license notices (shipped in the app)
@@ -158,6 +164,12 @@ jobs:
       - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: "./src-tauri -> target"
+
+      # The Japanese dictionary (lindera IPADIC), downloaded and built once: see src-tauri/.cargo/config.toml.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: src-tauri/lindera-cache
+          key: lindera-ipadic-6.2
 
       - run: pnpm install --frozen-lockfile
 
