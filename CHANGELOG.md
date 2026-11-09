@@ -2,6 +2,16 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.39 (2026-11-09)
+
+- **Better romaji.** Japanese lyrics are now read word by word in their sentence, with a Japanese dictionary
+  built into Cadence: 君と座ってバス停見上げた is "kimi to suwatte basutei miageta" (it was "kun to suwatsu te
+  basu tei miage ta"), and 君 after a name is still "-kun". Particles are written as they're said (wa, o, e),
+  verb endings stay with their verb ("ikunda", "shiteru"), and English inside a line is left as it is.
+- **Follow the singer reads kanji the same way**, so lyrics are placed on the singing more accurately in
+  Japanese songs.
+- The app is bigger because of the dictionary: about 7 MB more to download, about 45 MB more on disk.
+
 ## 0.2.38 (2026-11-09)
 
 - **Needs Attention, rebuilt.** One card per kind of problem, worst first: damaged files, extra copies, albums
