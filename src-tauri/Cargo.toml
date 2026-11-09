@@ -64,6 +64,8 @@ tauri-plugin-updater = "2.14.0"
 # Lyrics that follow the singer: ONNX Runtime is loaded from a download (not linked in), so it
 # costs nothing until the listener turns the feature on.
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std"] }
+# Removed copies go to the Recycle Bin (Trash), so Undo can bring them back.
+trash = "5.3"
 
 # Secrets go to each system's own store; Direct output (WASAPI exclusive) is Windows-only.
 [target.'cfg(windows)'.dependencies]

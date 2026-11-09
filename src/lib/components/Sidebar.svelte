@@ -56,6 +56,14 @@
             unit: "songs",
             about: `Looking up songs without info in the iTunes and Deezer catalogues, one every few seconds (${app.fixAllJob.found ?? 0} found so far).`,
           }
+        : app.coverJob
+        ? {
+            label: "Finding covers",
+            done: app.coverJob.done,
+            total: app.coverJob.total,
+            unit: "albums",
+            about: `Looking for album covers in the iTunes and Deezer catalogues, one every few seconds (${app.coverJob.found ?? 0} found so far).`,
+          }
         : app.artistJob
         ? {
             label: "Checking artist names",

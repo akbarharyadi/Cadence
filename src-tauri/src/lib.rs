@@ -1,5 +1,6 @@
 mod ai;
 mod api;
+mod attention;
 mod artists;
 mod autotag;
 mod catalog;
@@ -177,6 +178,14 @@ pub fn run() {
             commands::health_start,
             commands::health_stop,
             commands::health_remove,
+            commands::attention_state,
+            commands::attention_ignore,
+            commands::attention_hide,
+            commands::covers_start,
+            commands::covers_stop,
+            commands::covers_list,
+            commands::covers_save,
+            commands::covers_discard,
             commands::set_lyrics_online,
             commands::set_fix_tags_online,
             commands::get_skips,

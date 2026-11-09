@@ -993,7 +993,9 @@ pub fn guess(title: &str) -> (Option<String>, String) {
         if let Some((a, t)) = clean.split_once(sep) {
             let (a, t) = (a.trim(), strip_noise(t.trim()));
             if !a.is_empty() && !t.is_empty() {
-                return (Some(a.to_string()), t);
+                // A playlist or folder name a download tool put first ("Compilations - Song").
+                let placeholder = ["compilations", "compilation", "variousartists", "va", "unknownartist", "unknown", "playlist", "mix"].contains(&norm(a).as_str());
+                return (if placeholder { None } else { Some(a.to_string()) }, t);
             }
         }
     }
@@ -1443,6 +1445,7 @@ mod tests {
         assert_eq!(guess("ChouCho - Yasashisa no Riyu 1"), (Some("ChouCho".into()), "Yasashisa no Riyu".into()));
         assert_eq!(guess("Ello - Masih Ada (2)"), (Some("Ello".into()), "Masih Ada".into()));
         assert_eq!(guess("D_MASIV - Rindu 1_2 Mati"), (Some("D_MASIV".into()), "Rindu 1_2 Mati".into()));
+        assert_eq!(guess("Compilations - Renai Circulation"), (None, "Renai Circulation".into()));
     }
 
     /// Live lookups against the catalogue: `cargo test --lib autotag -- --ignored --nocapture`.

@@ -40,10 +40,13 @@ export interface DupSong {
   keep: boolean;
 }
 export interface DupGroup {
-  /** "same": the same song twice on one album. "lossy": a lossy copy of a song that's also lossless. */
-  kind: "same" | "lossy";
+  /** "same": the same song twice on one album. "lossy": a lossy copy of a song that's also lossless.
+   *  "untagged": a file without tags (an "Artist - Title" download) of a song the library has. */
+  kind: "same" | "lossy" | "untagged";
   songs: DupSong[];
   wasted: number;
+  /** Certainly the same recording; else the same song, maybe another cut (check before removing). */
+  sure: boolean;
 }
 export interface HealthQualityRow {
   id: string;
@@ -78,6 +81,28 @@ export interface Removed {
   deleted: number;
   freed: number;
   skipped: string[];
+  /** The change, to undo (the files are in the Recycle Bin). */
+  change: string | null;
+  /** The files went to the Recycle Bin (false on phones: deleted). */
+  recycled: boolean;
+}
+
+/** What the listener told Needs Attention: problems ignored, kinds of problem hidden. */
+export interface AttentionState {
+  ignored: string[];
+  hidden: string[];
+}
+
+/** A cover found for an album without one, to check before saving. */
+export interface CoverFound {
+  albumId: string;
+  foundTitle: string;
+  foundArtist: string;
+  url: string;
+  thumb: string;
+  source: string;
+  /** Same album and artist; else only the title matched. */
+  sure: boolean;
 }
 
 export interface GainInfo {
@@ -528,6 +553,14 @@ export const api = {
   healthStart: (kind: HealthKind) => invoke<boolean>("health_start", { kind }),
   healthStop: () => invoke<void>("health_stop"),
   healthRemove: (ids: string[]) => invoke<Removed>("health_remove", { ids }),
+  attentionState: () => invoke<AttentionState>("attention_state"),
+  attentionIgnore: (keys: string[], ignored: boolean) => invoke<AttentionState>("attention_ignore", { keys, ignored }),
+  attentionHide: (kind: string, hidden: boolean) => invoke<AttentionState>("attention_hide", { kind, hidden }),
+  coversStart: (albumIds: string[]) => invoke<boolean>("covers_start", { albumIds }),
+  coversStop: () => invoke<void>("covers_stop"),
+  coversList: () => invoke<{ found: CoverFound[]; missed: string[] }>("covers_list"),
+  coversSave: (albumIds: string[]) => invoke<{ albums: number; failed: number; change: string | null }>("covers_save", { albumIds }),
+  coversDiscard: () => invoke<void>("covers_discard"),
   sonicStatus: () => invoke<SonicStatus>("sonic_status"),
   similarTracks: (id: string, limit?: number) => invoke<string[]>("similar_tracks", { id, limit }),
   soundRadio: (id: string, count?: number) => invoke<string[]>("sound_radio", { id, count }),
@@ -665,6 +698,8 @@ export interface FoundInfo {
   album: string;
   year: number | null;
   cover: string | null;
+  /** The file name names this artist too; else found by title and length only. */
+  sure: boolean;
 }
 
 /** A change Cadence made to songs' files, which can be undone. */

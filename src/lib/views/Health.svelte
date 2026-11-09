@@ -34,7 +34,6 @@
 
   async function loadDuplicates() {
     groups = await api.healthDuplicates();
-    unchecked = [];
   }
   // Again whenever the library changes (after deleting, or a rescan).
   $effect(() => {
@@ -42,7 +41,11 @@
     loadDuplicates();
   });
 
+  // (Ones Cadence isn't sure of start unticked.)
   const losers = $derived((groups ?? []).flatMap((g) => g.songs.filter((s) => !s.keep).map((s) => s.id)));
+  $effect(() => {
+    unchecked = (groups ?? []).filter((g) => !g.sure).flatMap((g) => g.songs.filter((s) => !s.keep).map((s) => s.id));
+  });
   const chosen = $derived(losers.filter((id) => !unchecked.includes(id)));
   const chosenBytes = $derived(chosen.reduce((n, id) => n + (app.trackById.get(id)?.size ?? 0), 0));
   const wasted = $derived((groups ?? []).reduce((n, g) => n + g.wasted, 0));
@@ -57,9 +60,9 @@
       const r = await api.healthRemove(chosen);
       confirming = false;
       app.showToast(
-        `Deleted ${r.deleted} ${r.deleted === 1 ? "file" : "files"}, freed ${mb(r.freed)}${r.skipped.length ? `; ${r.skipped.length} left alone` : ""}`,
-        null,
-        7000,
+        `${r.recycled ? "Moved" : "Deleted"} ${r.deleted} ${r.deleted === 1 ? "file" : "files"}${r.recycled ? " to the Recycle Bin" : ""}, freed ${mb(r.freed)}${r.skipped.length ? `; ${r.skipped.length} left alone` : ""}`,
+        app.undoAction(r.change),
+        8000,
       );
       if (r.skipped.length) console.warn("health: left alone", r.skipped);
     } catch (e) {
@@ -138,13 +141,15 @@
         {/if}
       </div>
       {#if chosen.length}
-        <button class="pill danger" onclick={() => (confirming = true)}><Icon name="trash" size={15} />Delete {chosen.length} {chosen.length === 1 ? "copy" : "copies"}…</button>
+        <button class="pill danger" onclick={() => (confirming = true)}><Icon name="trash" size={15} />Remove {chosen.length} {chosen.length === 1 ? "copy" : "copies"}…</button>
       {/if}
     </div>
 
     {#each (groups ?? []).slice(0, shown) as g (g.songs[0].id)}
       <div class="group">
-        <div class="kind">{g.kind === "same" ? "The same song twice" : "A lossy copy of a lossless song"}</div>
+        <div class="kind">
+          {g.kind === "same" ? "The same song twice" : g.kind === "lossy" ? "A lossy copy of a lossless song" : "A download without tags of a song you have"}{g.sure ? "" : " · check the lengths"}
+        </div>
         {#each g.songs as s (s.id)}
           {@const t = app.trackById.get(s.id)}
           {#if t}
@@ -262,15 +267,19 @@
 </div>
 
 {#if confirming}
-  <Modal title="Delete {chosen.length} {chosen.length === 1 ? 'file' : 'files'}?" onclose={() => !removing && (confirming = false)}>
+  <Modal title="Remove {chosen.length} {chosen.length === 1 ? 'file' : 'files'}?" onclose={() => !removing && (confirming = false)}>
     <p>
-      This deletes {chosen.length} {chosen.length === 1 ? "copy" : "copies"} from your disk and frees {mb(chosenBytes)}. They don't go to the Recycle Bin.
+      {#if droid}
+        This deletes {chosen.length} {chosen.length === 1 ? "copy" : "copies"} from your phone and frees {mb(chosenBytes)}.
+      {:else}
+        This moves {chosen.length} {chosen.length === 1 ? "copy" : "copies"} to the Recycle Bin ({mb(chosenBytes)}); Undo brings them back.
+      {/if}
       For each song, the copy marked <b>Keep</b> stays, and Cadence checks again that another copy remains before deleting anything.
     </p>
     <p class="secondary">Favorites and ratings move to the copy that stays.</p>
     {#snippet footer()}
       <button class="pill ghost" disabled={removing} onclick={() => (confirming = false)}>Cancel</button>
-      <button class="pill danger" disabled={removing} onclick={removeChosen}>{removing ? "Deleting…" : "Delete"}</button>
+      <button class="pill danger" disabled={removing} onclick={removeChosen}>{removing ? "Removing…" : "Remove"}</button>
     {/snippet}
   </Modal>
 {/if}

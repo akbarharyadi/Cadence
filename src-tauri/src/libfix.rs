@@ -360,6 +360,8 @@ pub struct FoundInfo {
     album: String,
     year: Option<u32>,
     cover: Option<String>,
+    /// The file name names this artist too (else: found by title and length only, worth a look).
+    sure: bool,
 }
 
 /// Looks up every song without tags (one at a time, in the background) and keeps what it finds
@@ -371,7 +373,11 @@ pub fn fix_all_start(ctx: Ctx) -> bool {
     FIX_ALL_STOP.store(false, Ordering::SeqCst);
     let todo: Vec<Track> = {
         let lib = ctx.state.library.lock();
-        let waiting: HashSet<String> = found().lock().unwrap().iter().map(|(t, _)| t.id.clone()).collect();
+        let mut waiting: HashSet<String> = found().lock().unwrap().iter().map(|(t, _)| t.id.clone()).collect();
+        // Copies of songs the library has tagged are removed, not looked up.
+        for g in crate::health::duplicates(&lib.snapshot.tracks).iter().filter(|g| g.kind == "untagged") {
+            waiting.extend(g.songs.iter().filter(|s| !s.keep).map(|s| s.id.clone()));
+        }
         lib.snapshot.tracks.iter().filter(|t| untagged(t) && t.cue.is_none() && !waiting.contains(&t.id)).cloned().collect()
     };
     std::thread::spawn(move || {
@@ -419,6 +425,7 @@ pub fn fix_all_found() -> Vec<FoundInfo> {
             album: f.album.clone(),
             year: f.year,
             cover: f.cover_url.clone(),
+            sure: autotag::guess(&t.title).0.is_some_and(|a| crate::health::same_artist_credit(&a, &f.artist)),
         })
         .collect()
 }
@@ -460,6 +467,164 @@ pub fn fix_all_save(ctx: &Ctx, ids: Vec<String>) -> Result<FixAllSaved, String> 
 pub fn fix_all_discard(ctx: &Ctx) {
     found().lock().unwrap().clear();
     ctx.emit("fix-all-progress", FixAllProgress { done: 0, total: 0, found: 0, running: false });
+}
+
+// ---------- Covers for albums without one ----------
+
+static COVERS_RUNNING: AtomicBool = AtomicBool::new(false);
+static COVERS_STOP: AtomicBool = AtomicBool::new(false);
+
+/// A cover found for an album without one, for the user to check before it's saved.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverFound {
+    album_id: String,
+    /// The catalogue's album and artist (to compare with ours).
+    found_title: String,
+    found_artist: String,
+    url: String,
+    thumb: String,
+    source: String,
+    /// Same album title and artist; else only the title matched (the artist maybe in another script).
+    sure: bool,
+}
+
+#[derive(Default, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoversFound {
+    found: Vec<CoverFound>,
+    /// Albums nothing was found for.
+    missed: Vec<String>,
+}
+
+fn covers_found() -> &'static Mutex<CoversFound> {
+    static FOUND: OnceLock<Mutex<CoversFound>> = OnceLock::new();
+    FOUND.get_or_init(Default::default)
+}
+
+/// Looks for covers of these albums in the background (one every few seconds); nothing is
+/// written before the user saves. False if it's running.
+pub fn covers_start(ctx: Ctx, album_ids: Vec<String>) -> bool {
+    if COVERS_RUNNING.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    COVERS_STOP.store(false, Ordering::SeqCst);
+    let todo: Vec<(String, String, String)> = {
+        let lib = ctx.state.library.lock();
+        let done = covers_found().lock().unwrap().clone();
+        let asked: HashSet<&str> = done.found.iter().map(|c| c.album_id.as_str()).chain(done.missed.iter().map(String::as_str)).collect();
+        album_ids
+            .iter()
+            .filter(|id| !asked.contains(id.as_str()))
+            .filter_map(|id| lib.snapshot.albums.iter().find(|a| &a.id == id))
+            .map(|a| (a.id.clone(), a.title.clone(), a.artist.clone()))
+            .collect()
+    };
+    std::thread::spawn(move || {
+        let total = todo.len();
+        let progress = |done: usize, running: bool| {
+            let found = covers_found().lock().unwrap().found.len();
+            ctx.emit("cover-job-progress", FixAllProgress { done, total, found, running })
+        };
+        let pool = crate::jobs::background_pool();
+        pool.install(|| {
+            for (i, (id, title, artist)) in todo.iter().enumerate() {
+                if COVERS_STOP.load(Ordering::SeqCst) {
+                    break;
+                }
+                progress(i, true);
+                // A few catalogue requests per album: well below what the iTunes catalogue allows.
+                if i > 0 {
+                    std::thread::sleep(std::time::Duration::from_secs(6));
+                }
+                let mut hit = None;
+                let mut reached = false;
+                for term in crate::covers::search_terms(artist, title) {
+                    let Ok(results) = crate::covers::search(&term, artist, title) else { continue };
+                    reached = true;
+                    // The likely one (same album and artist); else the same album by an artist
+                    // spelt another way (in Japanese letters, say).
+                    let pick = results.iter().find(|c| c.likely).map(|c| (c, true)).or_else(|| {
+                        results
+                            .iter()
+                            .find(|c| norm(&c.title).starts_with(&norm(title)) && (artist == "Unknown Artist" || crate::health::same_artist_credit(&c.artist, artist) || cjk(&c.artist) != cjk(artist)))
+                            .map(|c| (c, false))
+                    });
+                    if let Some((c, sure)) = pick {
+                        hit = Some(CoverFound {
+                            album_id: id.clone(),
+                            found_title: c.title.clone(),
+                            found_artist: c.artist.clone(),
+                            url: c.url.clone(),
+                            thumb: c.thumb.clone(),
+                            source: c.source.clone(),
+                            sure,
+                        });
+                        break;
+                    }
+                }
+                let mut all = covers_found().lock().unwrap();
+                match hit {
+                    Some(c) => all.found.push(c),
+                    // (Not reached: no internet; asked again next time.)
+                    None if reached => all.missed.push(id.clone()),
+                    None => {}
+                }
+            }
+        });
+        COVERS_RUNNING.store(false, Ordering::SeqCst);
+        progress(total, false);
+    });
+    true
+}
+
+pub fn covers_stop() {
+    COVERS_STOP.store(true, Ordering::SeqCst);
+}
+
+/// The covers found so far, and the albums none was found for.
+pub fn covers_list() -> CoversFound {
+    covers_found().lock().unwrap().clone()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoversSaved {
+    albums: usize,
+    failed: usize,
+    change: Option<String>,
+}
+
+/// Saves the found covers of these albums (written into their songs, can be undone); the rest
+/// of what was found is let go.
+pub fn covers_save(ctx: &Ctx, album_ids: Vec<String>) -> Result<CoversSaved, String> {
+    let picked: Vec<CoverFound> = {
+        let mut all = covers_found().lock().unwrap();
+        let keep: HashSet<&String> = album_ids.iter().collect();
+        let picked = all.found.iter().filter(|c| keep.contains(&c.album_id)).cloned().collect();
+        all.found.clear();
+        picked
+    };
+    let n = picked.len();
+    let mut rec = crate::changes::Recorder::new(ctx, format!("Covers for {n} {}", if n == 1 { "album" } else { "albums" }));
+    let (mut albums, mut failed) = (0, 0);
+    for c in &picked {
+        match crate::covers::set_recorded(ctx, &c.album_id, crate::artists::Source::Url { url: c.url.clone() }, Some(&mut rec)) {
+            Ok(_) => albums += 1,
+            Err(e) => {
+                log::warn!("couldn't save the cover of album {}: {e}", c.album_id);
+                failed += 1;
+            }
+        }
+    }
+    ctx.emit("cover-job-progress", FixAllProgress { done: 0, total: 0, found: 0, running: false });
+    Ok(CoversSaved { albums, failed, change: rec.finish(ctx) })
+}
+
+/// Lets go of the found covers (and of which albums had none, so they're asked about again).
+pub fn covers_discard(ctx: &Ctx) {
+    *covers_found().lock().unwrap() = CoversFound::default();
+    ctx.emit("cover-job-progress", FixAllProgress { done: 0, total: 0, found: 0, running: false });
 }
 
 // ---------- Artists under two names ----------
@@ -554,6 +719,18 @@ pub fn artist_check_start(ctx: Ctx) -> bool {
         progress(total, false);
     });
     true
+}
+
+/// After a scan: asks about artist names in Japanese or Chinese letters that are new, by itself
+/// (each name once; a handful at a time is a few seconds each). Not while another job runs.
+pub fn artist_check_auto(ctx: &Ctx) {
+    if ARTISTS_RUNNING.load(Ordering::SeqCst) || FIX_ALL_RUNNING.load(Ordering::SeqCst) || COVERS_RUNNING.load(Ordering::SeqCst) {
+        return;
+    }
+    let known = load_names(&ctx.state.data_dir);
+    if library_artists(ctx).values().any(|(n, _)| cjk(n) && !known.latin.contains_key(n)) {
+        artist_check_start(ctx.clone());
+    }
 }
 
 pub fn artist_check_stop() {

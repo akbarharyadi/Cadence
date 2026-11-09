@@ -70,7 +70,7 @@ function animate(kind: "forward" | "back" | "tab", change: () => void) {
     if (run === transitions) delete root.dataset.nav;
   });
 }
-import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type DspSettings, type HealthProgress, type HealthReport, type HistoryStats, type JobProgress, type Mark, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track, type VoiceBatch, type VoiceJob, type VoiceStatus } from "./api";
+import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type AttentionState, type DspSettings, type DupGroup, type HealthProgress, type HealthReport, type HistoryStats, type JobProgress, type Mark, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track, type VoiceBatch, type VoiceJob, type VoiceStatus } from "./api";
 
 /** One album (same name, same folder) shown as several: its songs have different album artists. */
 export interface SplitAlbum {
@@ -232,7 +232,8 @@ class AppState {
   trackById = $derived(new Map(this.tracks.map((t) => [t.id, t])));
 
   /** Needs Attention's lists, from the library as it is: albums split in two (one album, in one
-   *  folder, under different album artists), songs without tags, and real albums without a cover. */
+   *  folder, under different album artists), songs without tags, and real albums without a cover,
+   *  without a year or genre, or with songs missing (gaps in the track numbers). */
   attention = $derived.by(() => {
     const fold = (s: string) => s.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().trim();
     const folder = (path: string) => path.replace(/[\\/][^\\/]*$/, "");
@@ -259,12 +260,84 @@ class AppState {
       splits.push({ key, album: tracks[0].album, folder: folder(tracks[0].path), variants });
     }
     splits.sort((a, b) => a.album.localeCompare(b.album));
-    const coverless = this.albums.filter((a) => !a.art && a.artist !== "Unknown Artist");
-    return { splits, untagged, coverless };
+    // Real albums: not the "Unknown Artist" bucket of songs without tags.
+    const real = this.albums.filter((a) => a.artist !== "Unknown Artist");
+    const coverless = real.filter((a) => !a.art);
+    const noYear = real.filter((a) => !a.year);
+    const noGenre = real.filter((a) => !a.genre.trim());
+    // Gaps in the track numbers of a disc: songs missing (3 or more there, at most half missing).
+    const incomplete: { album: Album; missing: number[] }[] = [];
+    for (const a of real) {
+      const discs = new Map<number, Set<number>>();
+      for (const id of a.trackIds) {
+        const t = this.trackById.get(id);
+        if (!t?.trackNo || t.cue) continue;
+        const d = t.discNo ?? 1;
+        (discs.get(d) ?? discs.set(d, new Set()).get(d)!).add(t.trackNo);
+      }
+      const missing: number[] = [];
+      for (const nos of discs.values()) {
+        const top = Math.max(...nos);
+        if (nos.size < 3 || top > 99) continue;
+        const gaps = Array.from({ length: top }, (_, i) => i + 1).filter((n) => !nos.has(n));
+        if (gaps.length && gaps.length <= top / 2) missing.push(...gaps);
+      }
+      if (missing.length) incomplete.push({ album: a, missing });
+    }
+    return { splits, untagged, coverless, noYear, noGenre, incomplete };
   });
-  /** What the sidebar counts on Needs Attention: things to fix (albums without a cover aren't counted:
-   *  many libraries have some on purpose). */
-  attentionCount = $derived(this.attention.splits.length + this.attention.untagged.length + this.artistPairsCount);
+
+  /** Songs in the library more than once (Library Health's duplicates, and untagged downloads of
+   *  songs the library has tagged). */
+  duplicates = $state<DupGroup[]>([]);
+  /** What the listener ignored and hid on Needs Attention. */
+  attentionPrefs = $state<AttentionState>({ ignored: [], hidden: [] });
+  ignoredSet = $derived(new Set(this.attentionPrefs.ignored));
+  /** The search for covers of albums without one, while it runs. */
+  coverJob = $state<JobProgress | null>(null);
+  /** Covers found, waiting to be checked and saved. */
+  coversFoundCount = $state(0);
+
+  async loadDuplicates() {
+    this.duplicates = await api.healthDuplicates();
+  }
+  async loadAttentionPrefs() {
+    this.attentionPrefs = await api.attentionState();
+  }
+  async loadArtistPairsCount() {
+    this.artistPairsCount = (await api.artistPairs()).pairs.length;
+  }
+
+  /** Every kind of problem on Needs Attention, worst first, each item with the key it's ignored
+   *  under. `counted`: in the sidebar's number (things that are wrong, not just missing). */
+  issues = $derived.by(() => {
+    const ig = this.ignoredSet;
+    const hidden = new Set(this.attentionPrefs.hidden);
+    const keep = <T,>(kind: string, items: T[], key: (x: T) => string) => (hidden.has(kind) ? [] : items.filter((x) => !ig.has(`${kind}|${key(x)}`)));
+    const a = this.attention;
+    const damaged = keep("damaged", (this.health?.integrity ?? []).filter((r) => this.trackById.has(r.id)), (r) => r.id);
+    const copies = keep("copies", this.duplicates, (g) => g.songs.find((s) => !s.keep)?.id ?? g.songs[0].id);
+    // A song without tags that's a copy of one the library has is listed under copies, not here.
+    const copyIds = new Set(this.duplicates.filter((g) => g.kind === "untagged").flatMap((g) => g.songs.filter((s) => !s.keep).map((s) => s.id)));
+    const untagged = keep("untagged", a.untagged.filter((t) => !copyIds.has(t.id)), (t) => t.id);
+    const splits = keep("splits", a.splits, (s) => s.key);
+    const quality = keep("quality", (this.health?.quality ?? []).filter((r) => this.trackById.has(r.id)), (r) => r.id);
+    const covers = keep("covers", a.coverless, (x) => x.id);
+    const incomplete = keep("incomplete", a.incomplete, (x) => x.album.id);
+    const year = keep("year", a.noYear, (x) => x.id);
+    const genre = keep("genre", a.noGenre, (x) => x.id);
+    return { damaged, copies, splits, untagged, quality, covers, incomplete, year, genre, hidden };
+  });
+  /** What the sidebar counts on Needs Attention: things that are wrong (damaged files, extra
+   *  copies, split albums, artists under two names, songs without info). Missing covers, years
+   *  and the like aren't counted: many libraries have some on purpose. */
+  attentionCount = $derived(
+    this.issues.damaged.length +
+      this.issues.copies.length +
+      this.issues.splits.length +
+      this.issues.untagged.length +
+      (this.issues.hidden.has("names") ? 0 : this.artistPairsCount),
+  );
   albumById = $derived(new Map(this.albums.map((a) => [a.id, a])));
   /** Album-artist credit → the artists it's listed under (see `artistIndex`). */
   creditIndex = $derived(artistIndex(this.albums.map((a) => a.artist)));
@@ -580,6 +653,19 @@ class AppState {
         await Promise.all([this.loadLibrary(), this.loadMarks()]);
         this.scan = null;
         await this.dropOwnedSuggestions();
+        await Promise.all([this.loadDuplicates(), this.loadHealth(), this.loadArtistPairsCount()]);
+      }),
+      listen("attention-changed", () => this.loadAttentionPrefs()),
+      listen<JobProgress>("cover-job-progress", (e) => {
+        this.coverJob = e.payload.running ? e.payload : null;
+        this.coversFoundCount = e.payload.found ?? 0;
+        if (e.payload.running) return;
+        this.fixJobsDone++;
+        if (e.payload.total > 0) {
+          const n = e.payload.found ?? 0;
+          if (n) this.showToast(`Found covers for ${n} ${n === 1 ? "album" : "albums"}: check before saving`, { label: "Check", run: () => this.go({ name: "attention" }) }, 8000);
+          else this.showToast("No covers found for those albums");
+        }
       }),
       listen<{ done: number; total: number }>("library-progress", (e) => (this.scan = e.payload)),
       // A rescan that found nothing new: nothing to reload.
@@ -603,7 +689,9 @@ class AppState {
       listen("changes-changed", () => this.changesVersion++),
       listen<JobProgress>("artist-check-progress", (e) => {
         this.artistJob = e.payload.running ? e.payload : null;
-        if (!e.payload.running) this.fixJobsDone++;
+        if (e.payload.running) return;
+        this.fixJobsDone++;
+        this.loadArtistPairsCount();
       }),
       listen<number | null>("sleep-timer", (e) => (this.sleepEndsAt = e.payload)),
       listen<{ done: number; total: number }>("analysis-progress", (e) => {
@@ -664,6 +752,13 @@ class AppState {
     if (!this.status) this.applyStatus(status);
     this.dsp = dsp;
     this.loaded = true;
+    // Needs Attention's count, after the first screen is up.
+    setTimeout(() => {
+      this.loadAttentionPrefs();
+      this.loadDuplicates();
+      this.loadHealth();
+      this.loadArtistPairsCount();
+    }, 1500);
   }
 
   private applyStatus(s: Status) {

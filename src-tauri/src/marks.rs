@@ -80,6 +80,16 @@ impl Marks {
         }
     }
 
+    /// A removed copy's favourite and rating go to the copy that stays (the higher rating, a
+    /// favourite if either was). True when anything changed.
+    pub fn pass_on(&mut self, from: &str, to: &Track) -> bool {
+        let Some(old) = self.items.remove(from) else { return false };
+        let e = self.items.entry(to.id.clone()).or_insert_with(|| Entry::of(to));
+        e.rating = e.rating.max(old.rating);
+        e.loved |= old.loved;
+        true
+    }
+
     /// Entries whose song id is gone from the library follow the same song under its new id (same
     /// title and length, the same artist and album preferred), unless that song already has its
     /// own mark. Returns how many moved.

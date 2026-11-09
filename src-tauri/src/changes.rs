@@ -5,6 +5,9 @@
 //! genre, year, track and disc numbers, subtitle, and its cover when the change replaces it) is
 //! kept, grouped by change, in `changes/changes.json`. Undo writes it back. The last 30 changes are
 //! kept; older ones (and their covers) are let go.
+//!
+//! Removing copies (Needs Attention, Library Health) is a change too: the files go to the Recycle
+//! Bin (Trash), and Undo brings them back from it.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,6 +51,9 @@ struct Batch {
     at: u64,
     label: String,
     songs: Vec<Before>,
+    /// Files the change moved to the Recycle Bin (their paths), brought back by Undo.
+    #[serde(default)]
+    removed: Vec<String>,
 }
 
 /// A change that can be undone, for the list in Needs Attention.
@@ -85,12 +91,18 @@ pub struct Recorder {
     label: String,
     dir: PathBuf,
     songs: Vec<Before>,
+    removed: Vec<String>,
 }
 
 impl Recorder {
     pub fn new(ctx: &Ctx, label: impl Into<String>) -> Self {
         let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-        Recorder { id: format!("c{at}"), label: label.into(), dir: dir(ctx), songs: Vec::new() }
+        Recorder { id: format!("c{at}"), label: label.into(), dir: dir(ctx), songs: Vec::new(), removed: Vec::new() }
+    }
+
+    /// Notes a file the change moved to the Recycle Bin.
+    pub fn removed(&mut self, path: &str) {
+        self.removed.push(path.to_string());
     }
 
     /// Notes the file's info before it's written (`cover`: the change replaces its cover).
@@ -107,11 +119,11 @@ impl Recorder {
 
     /// Keeps the change to undo; returns its id (none when nothing was noted).
     pub fn finish(self, ctx: &Ctx) -> Option<String> {
-        if self.songs.is_empty() {
+        if self.songs.is_empty() && self.removed.is_empty() {
             return None;
         }
         let mut list = load(&self.dir);
-        list.push(Batch { id: self.id.clone(), at: now(), label: self.label, songs: self.songs });
+        list.push(Batch { id: self.id.clone(), at: now(), label: self.label, songs: self.songs, removed: self.removed });
         while list.len() > KEEP {
             forget(&self.dir, &list.remove(0));
         }
@@ -200,7 +212,7 @@ pub fn recent(ctx: &Ctx) -> Vec<ChangeInfo> {
     load(&dir(ctx))
         .into_iter()
         .rev()
-        .map(|b| ChangeInfo { id: b.id, at: b.at, label: b.label, songs: b.songs.len() })
+        .map(|b| ChangeInfo { id: b.id, at: b.at, label: b.label, songs: b.songs.len() + b.removed.len() })
         .collect()
 }
 
@@ -221,6 +233,13 @@ pub fn undo(ctx: &Ctx, id: &str) -> Result<usize, String> {
     let art_dir = ctx.state.art_dir();
     let mut written = 0;
     let mut failed = Vec::new();
+    if !batch.removed.is_empty() {
+        let back = bring_back(&batch.removed);
+        written += back;
+        if back < batch.removed.len() {
+            failed.push(format!("{} files not in the Recycle Bin any more", batch.removed.len() - back));
+        }
+    }
     for b in &batch.songs {
         // The album's artwork as Cadence shows it goes back too (Fix song info had replaced it).
         if let Some(c) = &b.cover
@@ -231,6 +250,17 @@ pub fn undo(ctx: &Ctx, id: &str) -> Result<usize, String> {
                 });
                 crate::library::write_art(&crate::library::album_id_for(&by, &album), &bytes, &art_dir);
             }
+        // The album had no cover before: the artwork Cadence shows goes too.
+        if b.no_cover && b.cover.is_none() {
+            let by = b.album_artist.clone().or_else(|| b.artist.clone()).unwrap_or_else(|| "Unknown Artist".into());
+            let album = b.album.clone().unwrap_or_else(|| {
+                Path::new(&b.path).parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            });
+            let id = crate::library::album_id_for(&by, &album);
+            for name in [format!("{id}.jpg"), format!("{id}_s.jpg"), format!("{id}.colors")] {
+                let _ = std::fs::remove_file(art_dir.join(name));
+            }
+        }
         if playing_path.as_deref() == Some(b.path.as_str()) {
             let (ctx2, dir2, b2) = (ctx.clone(), dir.clone(), b.clone());
             if let Some(pid) = &playing_id {
@@ -262,9 +292,62 @@ pub fn undo(ctx: &Ctx, id: &str) -> Result<usize, String> {
         crate::jobs::start_scan(ctx.clone());
     }
     if !failed.is_empty() && written == 0 {
+        if batch.songs.is_empty() {
+            return Err("Those files aren't in the Recycle Bin any more.".into());
+        }
         return Err(format!("Couldn't write {} of the songs back (are they open in another app?).", failed.len()));
     }
-    Ok(batch.songs.len())
+    Ok(batch.songs.len() + batch.removed.len())
+}
+
+/// Moves a file to the Recycle Bin (Trash). Phones have none: there it's deleted.
+pub fn to_recycle_bin(path: &Path) -> Result<(), String> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    return trash::delete(path).map_err(|e| e.to_string());
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    return std::fs::remove_file(path).map_err(|e| e.to_string());
+}
+
+/// Whether removed files can be brought back (from the Recycle Bin).
+pub const CAN_BRING_BACK: bool = cfg!(any(windows, target_os = "linux"));
+
+/// Brings files back from the Recycle Bin to where they were (the latest copy of each, if
+/// the place is free). Returns how many.
+fn bring_back(paths: &[String]) -> usize {
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let Ok(items) = trash::os_limited::list() else { return 0 };
+        let mut picked: Vec<trash::TrashItem> = Vec::new();
+        for p in paths {
+            let p = Path::new(p);
+            if p.exists() {
+                continue;
+            }
+            let latest = items
+                .iter()
+                .filter(|i| i.original_path() == p)
+                .max_by_key(|i| i.time_deleted);
+            if let Some(i) = latest {
+                picked.push(i.clone());
+            }
+        }
+        let n = picked.len();
+        if n == 0 {
+            return 0;
+        }
+        match trash::os_limited::restore_all(picked) {
+            Ok(()) => n,
+            Err(e) => {
+                log::warn!("couldn't bring files back from the Recycle Bin: {e}");
+                0
+            }
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = paths;
+        0
+    }
 }
 
 #[cfg(test)]

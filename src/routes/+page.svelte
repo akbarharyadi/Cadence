@@ -179,11 +179,13 @@
   });
 
   function onKey(e: KeyboardEvent) {
+    // A page used the key itself (Needs Attention's rows: Space ticks).
+    if (e.defaultPrevented) return;
     const target = e.target as HTMLElement;
     const typing = (target.tagName === "INPUT" && (target as HTMLInputElement).type !== "range") || target.tagName === "TEXTAREA";
     if (typing) return;
     // Space on a focused button already clicks it; don't also toggle playback.
-    const pressable = target.tagName === "BUTTON" || target.getAttribute("role") === "option";
+    const pressable = target.tagName === "BUTTON" || target.getAttribute("role") === "option" || !!target.closest("[data-row]");
     if (e.key === " " && !pressable) {
       e.preventDefault();
       api.player("toggle");

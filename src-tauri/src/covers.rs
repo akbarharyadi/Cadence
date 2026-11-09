@@ -166,6 +166,11 @@ pub fn search(term: &str, artist: &str, title: &str) -> Result<Vec<Cover>, Strin
 
 /// Puts a new cover on an album.
 pub fn set(ctx: &Ctx, album_id: &str, source: crate::artists::Source) -> Result<Changed, String> {
+    set_recorded(ctx, album_id, source, None)
+}
+
+/// `set`, noting each file's cover before it's replaced in `rec` (to undo it).
+pub fn set_recorded(ctx: &Ctx, album_id: &str, source: crate::artists::Source, mut rec: Option<&mut crate::changes::Recorder>) -> Result<Changed, String> {
     let state = ctx.state.clone();
     let bytes = crate::artists::read_source(source)?;
     let art_dir = state.art_dir();
@@ -208,6 +213,9 @@ pub fn set(ctx: &Ctx, album_id: &str, source: crate::artists::Source) -> Result<
     };
     let (mut later, mut failed, mut written) = (0, 0, 0);
     for (id, path) in songs {
+        if let Some(rec) = rec.as_deref_mut() {
+            rec.add(&path.to_string_lossy(), true);
+        }
         if playing.as_deref() == Some(id.as_str()) {
             later += 1;
             let (ctx, jpeg) = (ctx.clone(), jpeg.clone());

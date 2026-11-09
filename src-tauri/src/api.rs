@@ -812,8 +812,44 @@ pub fn health_stop(ctx: &Ctx) {
 }
 
 /// Deletes the files of songs (duplicates the user picked); see `health::remove` for the safety checks.
-pub fn health_remove(ctx: &Ctx, ids: Vec<String>) -> crate::health::Removed {
-    crate::health::remove(ctx, &ids)
+pub fn health_remove(ctx: &Ctx, ids: Vec<String>) -> Result<crate::health::Removed, String> {
+    Ok(crate::health::remove(ctx, &ids))
+}
+
+// ---------- Needs Attention ----------
+
+/// What the listener ignored, and the kinds of problem they hid.
+pub fn attention_state(ctx: &Ctx) -> crate::attention::Attention {
+    crate::attention::load(&ctx.state.data_dir)
+}
+
+pub fn attention_ignore(ctx: &Ctx, keys: Vec<String>, ignored: bool) -> crate::attention::Attention {
+    crate::attention::ignore(ctx, keys, ignored)
+}
+
+pub fn attention_hide(ctx: &Ctx, kind: String, hidden: bool) -> crate::attention::Attention {
+    crate::attention::hide(ctx, kind, hidden)
+}
+
+/// Looks for covers of these albums in the background; false if that's running already.
+pub fn covers_start(ctx: &Ctx, album_ids: Vec<String>) -> bool {
+    crate::libfix::covers_start(ctx.clone(), album_ids)
+}
+
+pub fn covers_stop(_ctx: &Ctx) {
+    crate::libfix::covers_stop();
+}
+
+pub fn covers_list(_ctx: &Ctx) -> crate::libfix::CoversFound {
+    crate::libfix::covers_list()
+}
+
+pub fn covers_save(ctx: &Ctx, album_ids: Vec<String>) -> Result<crate::libfix::CoversSaved, String> {
+    crate::libfix::covers_save(ctx, album_ids)
+}
+
+pub fn covers_discard(ctx: &Ctx) {
+    crate::libfix::covers_discard(ctx);
 }
 
 pub fn set_global_hotkeys(ctx: &Ctx, enabled: bool) {
@@ -1867,7 +1903,15 @@ macro_rules! cadence_commands {
             plain health_duplicates() -> Vec<$crate::health::DupGroup>;
             plain health_start(kind: String) -> bool;
             plain health_stop() -> ();
-            plain health_remove(ids: Vec<String>) -> $crate::health::Removed;
+            blocking health_remove(ids: Vec<String>) -> $crate::health::Removed;
+            plain attention_state() -> $crate::attention::Attention;
+            plain attention_ignore(keys: Vec<String>, ignored: bool) -> $crate::attention::Attention;
+            plain attention_hide(kind: String, hidden: bool) -> $crate::attention::Attention;
+            plain covers_start(album_ids: Vec<String>) -> bool;
+            plain covers_stop() -> ();
+            plain covers_list() -> $crate::libfix::CoversFound;
+            blocking covers_save(album_ids: Vec<String>) -> $crate::libfix::CoversSaved;
+            plain covers_discard() -> ();
             plain set_lyrics_online(enabled: bool) -> ();
             plain set_fix_tags_online(enabled: bool) -> ();
             plain get_skips() -> $crate::api::Skips;

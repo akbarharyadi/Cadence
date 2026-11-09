@@ -520,11 +520,80 @@ pub struct DupSong {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DupGroup {
-    /// "same": the same song twice on one album. "lossy": a lossy copy of a song that's also lossless.
+    /// "same": the same song twice on one album. "lossy": a lossy copy of a song that's also
+    /// lossless. "untagged": a file without tags ("Artist - Title" downloads) that is a song the
+    /// library has, tagged and as good or better.
     pub kind: &'static str,
     pub songs: Vec<DupSong>,
     /// Bytes the copies to remove take.
     pub wasted: u64,
+    /// Certainly the same recording (else: the same song, maybe another cut: check before removing).
+    pub sure: bool,
+}
+
+/// An untagged copy longer or shorter than this is maybe another cut (a clip, a music video's intro).
+const UNTAGGED_SAME_LENGTH: f64 = 15.0;
+
+/// Each name in an artist credit, as letters and digits, plus its reading in Latin letters when
+/// it's written in Japanese, Chinese or Korean ones (りりあ。 → "riria").
+fn artist_keys(credit: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in crate::autotag::split_credit(&credit.replace('×', "/")) {
+        if crate::autotag::cjk(&name) {
+            let latin = crate::romanize::lines(std::slice::from_ref(&name));
+            if let Some(l) = latin.first().map(|l| match_key(l)).filter(|l| !l.is_empty()) {
+                out.push(l);
+            }
+        }
+        out.push(match_key(&name));
+    }
+    out.retain(|n| !n.is_empty());
+    out
+}
+
+/// Whether two artist credits share an artist (across scripts: りりあ。 and Riria.).
+pub(crate) fn same_artist_credit(a: &str, b: &str) -> bool {
+    shares_artist(&artist_keys(a), &artist_keys(b))
+}
+
+fn shares_artist(a: &[String], b: &[String]) -> bool {
+    a.iter().any(|x| b.iter().any(|y| x == y || (x.len() >= 4 && y.len() >= 4 && (x.contains(y.as_str()) || y.contains(x.as_str())))))
+}
+
+/// A title without "(feat. …)", "[Live]" and the like, letters and digits only.
+fn core_key(title: &str) -> String {
+    let cut = title.find(['(', '[', '（', '【']).unwrap_or(title.len());
+    match_key(&title[..cut])
+}
+
+/// How sure that the untagged file `u` is the tagged song `t`: Some(true) the same recording,
+/// Some(false) the same song (maybe another cut, or the file name doesn't say the artist), None no.
+fn untagged_copy_of(u: &Track, t: &Track) -> Option<bool> {
+    let (artist, title) = crate::autotag::guess(&u.title);
+    let title = core_key(&title);
+    if title.chars().count() < 2 || core_key(&t.title) != title {
+        return None;
+    }
+    let diff = (u.duration - t.duration).abs();
+    match artist {
+        Some(a) => {
+            let ours: Vec<String> = artist_keys(&t.artist).into_iter().chain(artist_keys(&t.album_artist)).collect();
+            shares_artist(&artist_keys(&a), &ours).then_some(diff <= UNTAGGED_SAME_LENGTH)
+        }
+        // Only the title to go by: the same length, or nothing.
+        None => (diff <= UNTAGGED_SAME_LENGTH).then_some(false),
+    }
+}
+
+/// The tagged song an untagged file is a copy of (the closest, as good or better), and how sure.
+fn untagged_match<'a>(u: &Track, tagged: &HashMap<String, Vec<&'a Track>>) -> Option<(&'a Track, bool)> {
+    let (_, title) = crate::autotag::guess(&u.title);
+    tagged
+        .get(&core_key(&title))?
+        .iter()
+        .filter(|t| t.cue.is_none() && rank(t) >= rank(u))
+        .filter_map(|t| untagged_copy_of(u, t).map(|sure| (*t, sure)))
+        .min_by_key(|(t, sure)| (!sure, ((t.duration - u.duration).abs() * 1000.0) as u64, std::cmp::Reverse(rank(t))))
 }
 
 /// How good a copy is: lossless first, then bit depth × rate, bitrate, size; a name that isn't a
@@ -593,7 +662,19 @@ pub fn duplicates(tracks: &[Track]) -> Vec<DupGroup> {
             }
         }
     }
-    groups.sort_by(|a, b| b.wasted.cmp(&a.wasted));
+    // Files without tags that are songs the library has (tagged, as good or better).
+    let mut tagged: HashMap<String, Vec<&Track>> = HashMap::new();
+    for t in tracks.iter().filter(|t| !crate::autotag::untagged(t) && t.cue.is_none()) {
+        tagged.entry(core_key(&t.title)).or_default().push(t);
+    }
+    for u in tracks.iter().filter(|t| crate::autotag::untagged(t)) {
+        if let Some((keep, sure)) = untagged_match(u, &tagged) {
+            let mut g = group("untagged", &[keep, u]);
+            g.sure = sure;
+            groups.push(g);
+        }
+    }
+    groups.sort_by_key(|g| std::cmp::Reverse((g.sure, g.wasted)));
     groups
 }
 
@@ -603,6 +684,7 @@ fn group(kind: &'static str, copies: &[&Track]) -> DupGroup {
         kind,
         wasted: copies.iter().skip(1).map(|t| t.size).sum(),
         songs: copies.iter().enumerate().map(|(i, t)| DupSong { id: t.id.clone(), keep: i == 0 }).collect(),
+        sure: true,
     }
 }
 
@@ -615,10 +697,29 @@ pub struct Removed {
     pub freed: u64,
     /// Songs that were left alone, with the reason.
     pub skipped: Vec<String>,
+    /// The change, to undo it (the files are in the Recycle Bin).
+    pub change: Option<String>,
+    /// Whether the files went to the Recycle Bin (false on phones: deleted).
+    pub recycled: bool,
 }
 
-/// Deletes the files of these songs (not to the Recycle Bin), but only the ones that are inside a
-/// music folder, aren't playing, and have another copy of the same song staying in the library.
+/// The copy of `t` that stays (none: removing it would leave the song nowhere in the library).
+fn staying_copy<'a>(t: &Track, staying: &[&'a Track]) -> Option<&'a Track> {
+    let same = |o: &&&Track| {
+        match_key(&o.title) == match_key(&t.title) && match_key(&o.artist) == match_key(&t.artist) && (o.duration - t.duration).abs() <= SAME_LENGTH
+    };
+    if let Some(o) = staying.iter().find(same) {
+        return Some(o);
+    }
+    if crate::autotag::untagged(t) {
+        return staying.iter().find(|o| !crate::autotag::untagged(o) && o.cue.is_none() && untagged_copy_of(t, o).is_some()).copied();
+    }
+    None
+}
+
+/// Moves the files of these songs to the Recycle Bin (deleted on phones), but only the ones that
+/// are inside a music folder, aren't playing, and have another copy of the same song staying in
+/// the library. Their favourite and rating go to that copy. Can be undone (`changes`).
 pub fn remove(ctx: &Ctx, ids: &[String]) -> Removed {
     let state = &ctx.state;
     let folders: Vec<String> = state.settings.lock().folders.clone();
@@ -626,44 +727,55 @@ pub fn remove(ctx: &Ctx, ids: &[String]) -> Removed {
         let s = state.engine.status();
         s.index.and_then(|i| s.queue.get(i)).cloned()
     };
-    let mut out = Removed { deleted: 0, freed: 0, skipped: Vec::new() };
-    let doomed: Vec<Track> = {
+    let recycled = !cfg!(any(target_os = "android", target_os = "ios"));
+    let mut out = Removed { deleted: 0, freed: 0, skipped: Vec::new(), change: None, recycled };
+    // (the file, the copy that stays)
+    let doomed: Vec<(Track, Track)> = {
         let lib = state.library.lock();
         let wanted: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
         let staying: Vec<&Track> = lib.snapshot.tracks.iter().filter(|t| !wanted.contains(t.id.as_str())).collect();
         let mut doomed = Vec::new();
         for id in ids {
             let Some(t) = lib.by_id.get(id).map(|&i| &lib.snapshot.tracks[i]) else { continue };
-            let name = format!("{} – {}", t.artist, t.title);
+            let name = if crate::autotag::untagged(t) { t.title.clone() } else { format!("{} – {}", t.artist, t.title) };
             let inside = folders.iter().any(|f| Path::new(&t.path).starts_with(f));
-            let has_copy = staying.iter().any(|o| {
-                match_key(&o.title) == match_key(&t.title) && match_key(&o.artist) == match_key(&t.artist) && (o.duration - t.duration).abs() <= SAME_LENGTH
-            });
             if t.cue.is_some() {
                 out.skipped.push(format!("{name}: part of a single-file album, its file holds the whole album"));
             } else if playing.as_deref() == Some(t.id.as_str()) {
                 out.skipped.push(format!("{name}: it's playing"));
             } else if !inside {
                 out.skipped.push(format!("{name}: not inside your music folders"));
-            } else if !has_copy {
-                out.skipped.push(format!("{name}: no other copy of it would be left"));
+            } else if let Some(copy) = staying_copy(t, &staying) {
+                doomed.push((t.clone(), copy.clone()));
             } else {
-                doomed.push(t.clone());
+                out.skipped.push(format!("{name}: no other copy of it would be left"));
             }
         }
         doomed
     };
-    for t in doomed {
-        match std::fs::remove_file(&t.path) {
+    let n = doomed.len();
+    let mut rec = crate::changes::Recorder::new(ctx, format!("Removed {n} {}", if n == 1 { "copy" } else { "copies" }));
+    let mut moved_marks = false;
+    for (t, copy) in doomed {
+        match crate::changes::to_recycle_bin(Path::new(&t.path)) {
             Ok(()) => {
                 out.deleted += 1;
                 out.freed += t.size;
+                rec.removed(&t.path);
+                moved_marks |= state.marks.lock().pass_on(&t.id, &copy);
             }
             Err(e) => out.skipped.push(format!("{} – {}: {e}", t.artist, t.title)),
         }
     }
+    if moved_marks {
+        state.save_marks();
+        ctx.emit("marks-changed", ());
+    }
     if out.deleted > 0 {
         log::info!("removed {} duplicate files ({} bytes)", out.deleted, out.freed);
+        if recycled && crate::changes::CAN_BRING_BACK {
+            out.change = rec.finish(ctx);
+        }
         crate::jobs::start_scan(ctx.clone());
     }
     out
@@ -700,6 +812,30 @@ mod tests {
         inv.process(&mut spec, &mut out).unwrap();
         let rms = (out.iter().map(|v| v * v).sum::<f32>() / len as f32).sqrt();
         out.iter().map(|v| ((v / rms * 0.1) * 32768.0).round() / 32768.0).collect()
+    }
+
+    fn rip(id: &str, title: &str, artist: &str, secs: f64, codec: &str) -> Track {
+        Track { id: id.into(), title: title.into(), artist: artist.into(), album: "A".into(), duration: secs, codec: codec.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn finds_untagged_copies_of_songs_in_the_library() {
+        let lib = vec![
+            rip("flac", "Kiminotonaride.", "Riria.", 275.0, "FLAC"),
+            rip("yt", "りりあ。 - Kiminotonaride", "Unknown Artist", 272.0, "AAC"),
+            rip("mv", "りりあ。 - Kiminotonaride (Official Video)", "Unknown Artist", 330.0, "AAC"),
+            rip("comp", "Compilations - Kiminotonaride", "Unknown Artist", 276.0, "AAC"),
+            rip("other", "王儷婷 - Kiminotonaride", "Unknown Artist", 275.0, "AAC"),
+            rip("far", "Compilations - Kiminotonaride 1", "Unknown Artist", 120.0, "AAC"),
+        ];
+        let groups = duplicates(&lib);
+        let of = |id: &str| groups.iter().find(|g| g.songs.iter().any(|s| s.id == id && !s.keep));
+        let yt = of("yt").expect("same artist, same length");
+        assert!(yt.sure && yt.kind == "untagged" && yt.songs[0].id == "flac");
+        assert!(!of("mv").unwrap().sure, "another cut: check");
+        assert!(!of("comp").unwrap().sure, "no artist in the name: check");
+        assert!(of("other").is_none(), "another artist");
+        assert!(of("far").is_none(), "no artist and another length");
     }
 
     #[test]
@@ -779,8 +915,8 @@ mod tests {
         let groups = duplicates(&cache.tracks);
         let wasted: u64 = groups.iter().map(|g| g.wasted).sum();
         println!("{} songs, {} groups ({} same, {} lossy), {} MB wasted", cache.tracks.len(), groups.len(), groups.iter().filter(|g| g.kind == "same").count(), groups.iter().filter(|g| g.kind == "lossy").count(), wasted / 1_000_000);
-        for g in groups.iter().take(12) {
-            println!("-- {} ({} MB)", g.kind, g.wasted / 1_000_000);
+        for g in groups.iter().filter(|g| g.kind == "untagged").chain(groups.iter().take(12)) {
+            println!("-- {} {} ({} MB)", g.kind, if g.sure { "sure" } else { "check" }, g.wasted / 1_000_000);
             for s in &g.songs {
                 let t = by_id[s.id.as_str()];
                 println!("   {} {} | {} | {} | {} {:?}/{:?} | {}", if s.keep { "KEEP" } else { "del " }, t.title, t.artist, t.album, t.codec, t.bit_depth, t.sample_rate, t.path);

@@ -188,6 +188,10 @@ pub fn start_scan(ctx: Ctx) {
         if again {
             start_scan(ctx);
         } else {
+            // New artist names in Japanese or Chinese letters: is the artist also there under a Latin one?
+            if state.settings.lock().fix_tags_online {
+                crate::libfix::artist_check_auto(&ctx);
+            }
             start_analysis(ctx);
         }
     });
