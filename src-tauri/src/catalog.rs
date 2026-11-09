@@ -83,16 +83,27 @@ pub fn title_clash(d: &Discovery, library: &[Track]) -> bool {
     title.len() >= 3 && library.iter().any(|t| core_title(&t.title) == title && !by(d, t))
 }
 
+fn cjk(s: &str) -> bool {
+    use crate::romanize::{is_han, is_hangul, is_kana};
+    s.chars().any(|c| is_kana(c) || is_han(c) || is_hangul(c))
+}
+
 /// Written in Japanese, Chinese or Korean letters: the catalogue may also have it in Latin ones.
 fn non_latin(d: &Discovery) -> bool {
-    use crate::romanize::{is_han, is_hangul, is_kana};
-    d.artist.chars().chain(d.title.chars()).any(|c| is_kana(c) || is_han(c) || is_hangul(c))
+    cjk(&d.artist) || cjk(&d.title)
+}
+
+/// The library has songs or artists in Japanese (Chinese, Korean) letters, so a suggestion in
+/// Latin ones ("Kizuna no Kiseki") may be one of them (絆ノ奇跡) under its other name.
+fn library_has_non_latin(library: &[Track]) -> bool {
+    library.iter().any(|t| cjk(&t.title) || cjk(&t.artist))
 }
 
 /// Worth asking the catalogue what else the song is called: it's written in Japanese (or Chinese,
-/// Korean) letters, or the library has a song of that title by an artist spelt differently.
+/// Korean) letters, the library has such names, or it has a song of that title by an artist
+/// spelt differently.
 fn wants_other_names(d: &Discovery, library: &[Track]) -> bool {
-    !d.other_names.checked && (non_latin(d) || title_clash(d, library))
+    !d.other_names.checked && (non_latin(d) || title_clash(d, library) || library_has_non_latin(library))
 }
 
 fn get(http: &reqwest::blocking::Client, url: &str) -> Option<Value> {
@@ -359,5 +370,21 @@ mod tests {
         let titles: Vec<_> = out.iter().map(|d| format!("{} - {}", d.artist, d.title)).collect();
         println!("{titles:?}");
         assert_eq!(titles, ["Uru - アンビバレント"]);
+    }
+
+    /// Live: the other way round, the suggestion in Latin letters and the library in Japanese.
+    #[test]
+    #[ignore]
+    fn drops_latin_suggestions_owned_in_japanese() {
+        let mut kizuna = track("絆ノ奇跡", "MAN WITH A MISSION×milet");
+        kizuna.album = "絆ノ奇跡 / コイコガレ".into();
+        let lib = vec![kizuna, track("一途 (ALBUM ver.)", "King Gnu")];
+        let mut saved = pick("MAN WITH A MISSION × milet", "Kizuna no Kiseki");
+        saved.checked = true;
+        assert!(wants_other_names(&saved, &lib));
+        let out = check(vec![saved, pick("King Gnu", "Ichizu"), pick("Paramore", "The News")], &lib);
+        let titles: Vec<_> = out.iter().map(|d| format!("{} - {}", d.artist, d.title)).collect();
+        println!("{titles:?}");
+        assert_eq!(titles, ["Paramore - The News"]);
     }
 }
