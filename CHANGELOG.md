@@ -2,6 +2,18 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.2.40 (2026-11-10)
+
+- **More varied "Made for you today".** The four daily mixes now each come from a different part of your
+  library: **Right now** (what you usually play at this time of day), **On repeat** (this month's most
+  played), **Rediscover** (old favourites you haven't played in two months), **Deep cuts** (songs you've barely
+  played by artists you love) and **Somewhere new** (the part of your library you haven't visited lately).
+  Four of the five appear each day, and the label is shown on each mix.
+- **No more look-alike mixes.** A song is in one mix only, an artist leads one mix at most, a mix has at most
+  3 songs per artist, and two mixes don't wear the same cover.
+- **Fresh every day.** Songs from the last week's mixes wait their turn, and **New mixes** gives you different
+  songs and ideas from the ones you just had.
+
 ## 0.2.39 (2026-11-09)
 
 - **Better romaji.** Japanese lyrics are now read word by word in their sentence, with a Japanese dictionary
