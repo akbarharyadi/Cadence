@@ -19,16 +19,32 @@
   const losslessShare = $derived(app.albums.length ? app.albums.filter((a) => a.quality.includes("Lossless")).length / app.albums.length : 0);
   const totalTime = $derived(app.tracks.reduce((s, t) => s + t.duration, 0));
 
-  /** The covers a mix shows: its albums, most-represented first. */
-  function mixArt(tracks: Track[]): string[] {
+  /** The covers a mix shows: its albums, most-represented first, but albums in `shown` (already
+   *  on another tile in the row) last, so neighbouring mixes don't wear the same cover. */
+  function mixArt(tracks: Track[], shown = new Set<string>()): string[] {
     const counts = new Map<string, number>();
     for (const t of tracks) counts.set(t.albumId, (counts.get(t.albumId) ?? 0) + 1);
     return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => Number(shown.has(a[0])) - Number(shown.has(b[0])) || b[1] - a[1])
       .map(([id]) => app.albumById.get(id)?.art)
       .filter((a): a is string => !!a)
       .slice(0, 3);
   }
+
+  /** Covers for today's AI mixes, each avoiding the albums the mixes before it already show. */
+  const aiArt = $derived.by(() => {
+    const shown = new Set<string>();
+    return app.aiMixes.map((m) => {
+      const tracks = aiTracks(m);
+      const art = mixArt(tracks, shown);
+      const byArt = new Map(tracks.map((t) => [app.albumById.get(t.albumId)?.art, t.albumId]));
+      for (const a of art) {
+        const id = byArt.get(a);
+        if (id) shown.add(id);
+      }
+      return art;
+    });
+  });
 
   async function saveMix(name: string, tracks: Track[]) {
     const p = await app.createPlaylist(name, tracks);
@@ -157,12 +173,12 @@
   </div>
 {/snippet}
 
-{#snippet tile(name: string, desc: string, tracks: Track[])}
-  {@const art = mixArt(tracks)}
+{#snippet tile(name: string, desc: string, tracks: Track[], covers?: string[], lane?: string)}
+  {@const art = covers ?? mixArt(tracks)}
   <div class="mix" role="group" aria-label={name} oncontextmenu={(e) => mixMenu(e, name, tracks)}>
     <button class="mix-tile" onclick={() => app.playTracks(tracks)} aria-label="Play {name}">
       {#each art as a, i}<img class="layer l{i}" src={artUrl(a)} alt="" />{/each}
-      <span class="mix-name">{name}</span>
+      <span class="mix-name">{#if lane}<span class="mix-lane">{lane}</span>{/if}{name}</span>
       <span class="mix-play"><Icon name="play" size={18} /></span>
     </button>
     <p class="mix-desc">{desc}</p>
@@ -302,8 +318,8 @@
       {#snippet actions()}
         <button class="link" onclick={() => app.loadAiMixes(true)} disabled={app.aiMixesState === "loading"}>{app.aiMixesState === "loading" ? "Making mixes…" : "New mixes"}</button>
       {/snippet}
-      {#each app.aiMixes as m (m.title)}
-        {@render tile(m.title, m.reason, aiTracks(m))}
+      {#each app.aiMixes as m, i (m.title)}
+        {@render tile(m.title, m.reason, aiTracks(m), aiArt[i], m.lane)}
       {:else}
         {#if app.aiMixesState === "loading"}
           <p class="dj-note">The DJ is making today’s mixes…</p>
@@ -695,6 +711,16 @@
     line-height: 1.05;
     letter-spacing: -0.02em;
     color: var(--text);
+  }
+  .mix-lane {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    font-variation-settings: normal;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-2);
   }
   .mix-play {
     position: absolute;

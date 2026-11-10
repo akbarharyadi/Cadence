@@ -444,6 +444,14 @@ struct DjInput {
 }
 
 fn dj_input(state: &AppState, request: &str) -> DjInput {
+    let mut input = dj_library(state);
+    let all = std::mem::take(&mut input.candidates);
+    input.candidates = crate::ai::shortlist(all, request, &input.history, crate::history::now());
+    input
+}
+
+/// Everything the DJ could pick from: every song not skipped, with its sound words.
+fn dj_library(state: &AppState) -> DjInput {
     let rule = state.skip_rule();
     let history = state.history.lock().stats();
     let settings = state.settings.lock().ai.clone();
@@ -470,7 +478,6 @@ fn dj_input(state: &AppState, request: &str) -> DjInput {
             track: t.clone(),
         })
         .collect();
-    let candidates = crate::ai::shortlist(candidates, request, &history);
     DjInput {
         settings,
         taste,
@@ -554,13 +561,46 @@ pub fn ai_mixes(ctx: &Ctx, refresh: bool) -> Result<Vec<crate::ai::AiMix>, Strin
             return Err(cache.error);
         }
     }
-    let input = dj_input(state, "");
-    let result = crate::ai::daily_mixes(&input.settings, &input.taste, &input.candidates, &input.history);
+    let today = crate::ai::today();
+    let input = dj_library(state);
+    // Songs from the last week's mixes go to the back of the line.
+    let recent: Vec<(u64, Vec<String>)> = cache.recent.into_iter().filter(|(d, _)| d + 7 > today).collect();
+    let clusters: Vec<(String, Vec<String>)> = with_sonic(state, |items, _| crate::sonic::mixes(items))
+        .into_iter()
+        .map(|m| (m.name, m.track_ids))
+        .collect();
+    let now = crate::history::now();
+    let utc_hour = ((now / 3600) % 24) as i64;
+    let mut utc_offset = (crate::ai::local_hour() as i64 - utc_hour).rem_euclid(24);
+    if utc_offset > 12 {
+        utc_offset -= 24;
+    }
+    let pools = {
+        let history = state.history.lock();
+        crate::lanes::pools(crate::lanes::Input {
+            tracks: input.candidates,
+            events: &history.events,
+            now,
+            utc_offset,
+            clusters,
+            recent: recent.iter().flat_map(|(_, ids)| ids.iter().cloned()).collect(),
+            seed: now,
+            day: today,
+        })
+    };
+    // "New mixes": tell the DJ what it made last time so it doesn't make the same again.
+    let avoid = if refresh && cache.day == today { cache.mixes } else { Vec::new() };
+    let result = crate::ai::daily_mixes(&input.settings, &input.taste, &pools, &input.history, &avoid);
+    let mut recent = recent;
+    if let Ok(mixes) = &result {
+        recent.push((today, mixes.iter().flat_map(|m| m.track_ids.iter().cloned()).collect()));
+    }
     crate::state::write_json(
         &file,
         &crate::ai::DailyCache {
-            day: crate::ai::today(),
+            day: today,
             mixes: result.clone().unwrap_or_default(),
+            recent,
             error: result.as_ref().err().cloned().unwrap_or_default(),
         },
     );

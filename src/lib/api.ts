@@ -445,6 +445,8 @@ export interface AiMix {
   title: string;
   reason: string;
   trackIds: string[];
+  /** The part of the library a daily mix came from ("Rediscover"); empty for "Ask the DJ". */
+  lane?: string;
   /** Songs not in the library that fit. */
   discover?: NewSong[];
 }

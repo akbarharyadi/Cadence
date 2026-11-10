@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::history::HistoryStats;
+use crate::lanes::Pool;
 use crate::library::Track;
 
 pub const KEY_SECRET: &str = "ai-key";
@@ -327,6 +328,7 @@ fn extract_json(text: &str) -> Option<Value> {
 }
 
 /// One song as the model sees it.
+#[derive(Clone)]
 pub struct Candidate {
     pub track: Track,
     /// A few words about its sound ("fast, bright, minor"), if analysed.
@@ -368,8 +370,9 @@ pub fn taste<'a>(track: impl Fn(&str) -> Option<&'a Track>, h: &HistoryStats) ->
 }
 
 /// Chooses up to `SHORTLIST` songs to show the model: songs matching the request's words first,
-/// then favourites, then the rest spread across albums (so one big album can't fill the list).
-pub fn shortlist(all: Vec<Candidate>, request: &str, h: &HistoryStats) -> Vec<Candidate> {
+/// then a rotating handful of favourites, then the rest spread across artists (so one artist with many albums can't fill the list).
+/// `seed` picks which artists and songs come first, so each request sees a different slice.
+pub fn shortlist(all: Vec<Candidate>, request: &str, h: &HistoryStats, seed: u64) -> Vec<Candidate> {
     if all.len() <= SHORTLIST {
         return all;
     }
@@ -390,24 +393,34 @@ pub fn shortlist(all: Vec<Candidate>, request: &str, h: &HistoryStats) -> Vec<Ca
     };
     let mut scored: Vec<(f64, Candidate)> = all.into_iter().map(|c| (score(&c), c)).collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let (top, rest): (Vec<_>, Vec<_>) = scored.into_iter().enumerate().partition(|(i, (s, _))| *i < SHORTLIST / 2 && *s > 0.0);
-    let mut out: Vec<Candidate> = top.into_iter().map(|(_, (_, c))| c).collect();
-    // Round-robin over albums for the rest.
-    let mut by_album: Vec<(String, std::collections::VecDeque<Candidate>)> = Vec::new();
+    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    // Songs that match the request's words first.
+    let matched = scored.iter().take(SHORTLIST / 2).take_while(|(s, _)| *s >= 10.0).count();
+    let mut out: Vec<Candidate> = scored.drain(..matched).map(|(_, c)| c).collect();
+    // Then a different handful of favourites each time, not always the same most played.
+    let liked = scored.iter().take(SHORTLIST / 2).take_while(|(s, _)| *s > 0.0).count();
+    let mut favourites: Vec<_> = scored.drain(..liked).collect();
+    rng.shuffle(&mut favourites);
+    let rest_of_liked = favourites.split_off(favourites.len().min(SHORTLIST / 6));
+    out.extend(favourites.into_iter().map(|(_, c)| c));
+    let rest = rest_of_liked.into_iter().chain(scored).enumerate();
+    // Round-robin over artists, in a shuffled order, each artist's songs shuffled.
+    let mut by_artist: Vec<(String, Vec<Candidate>)> = Vec::new();
     for (_, (_, c)) in rest {
-        match by_album.iter_mut().find(|(a, _)| *a == c.track.album_id) {
-            Some((_, v)) => v.push_back(c),
-            None => by_album.push((c.track.album_id.clone(), [c].into())),
+        let key = c.track.artist.to_lowercase();
+        match by_artist.iter_mut().find(|(a, _)| *a == key) {
+            Some((_, v)) => v.push(c),
+            None => by_artist.push((key, vec![c])),
         }
     }
-    // Vary which albums come first from day to day.
-    if !by_album.is_empty() {
-        let k = today() as usize % by_album.len();
-        by_album.rotate_left(k);
+    rng.shuffle(&mut by_artist);
+    for (_, v) in by_artist.iter_mut() {
+        rng.shuffle(v);
     }
+    let mut queues: Vec<std::collections::VecDeque<Candidate>> = by_artist.into_iter().map(|(_, v)| v.into()).collect();
     while out.len() < SHORTLIST {
         let mut any = false;
-        for (_, v) in by_album.iter_mut() {
+        for v in queues.iter_mut() {
             if out.len() < SHORTLIST
                 && let Some(c) = v.pop_front() {
                     out.push(c);
@@ -421,8 +434,35 @@ pub fn shortlist(all: Vec<Candidate>, request: &str, h: &HistoryStats) -> Vec<Ca
     out
 }
 
+/// A small xorshift generator: enough to vary the shortlist, no extra crate.
+pub(crate) struct Rng(pub u64);
+
+impl Rng {
+    /// A number in [0, 1).
+    pub fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    pub fn shuffle<T>(&mut self, v: &mut [T]) {
+        for i in (1..v.len()).rev() {
+            let j = (self.next() % (i as u64 + 1)) as usize;
+            v.swap(i, j);
+        }
+    }
+}
+
 /// The song list as the model sees it: `id|title|artist|album|genre|year|plays|sound`.
 fn catalog(c: &[Candidate], h: &HistoryStats) -> String {
+    catalog_from(c, h, 0)
+}
+
+/// The same, numbered from `start + 1` (several lists sharing one set of ids).
+fn catalog_from(c: &[Candidate], h: &HistoryStats, start: usize) -> String {
     let clean = |s: &str| s.replace(['|', '\n'], " ");
     c.iter()
         .enumerate()
@@ -430,7 +470,7 @@ fn catalog(c: &[Candidate], h: &HistoryStats) -> String {
             let t = &c.track;
             format!(
                 "{}|{}|{}|{}|{}|{}|{}|{}",
-                i + 1,
+                start + i + 1,
                 clean(&t.title),
                 clean(&t.artist),
                 clean(&t.album),
@@ -460,15 +500,32 @@ Return JSON only: {{\"title\":\"\",\"reason\":\"\",\"ids\":[1,2,3],\"discover\":
     )
 }
 
-fn mixes_prompt(taste: &str, c: &[Candidate], h: &HistoryStats) -> String {
+fn mixes_prompt(taste: &str, pools: &[Pool], h: &HistoryStats, avoid: &[AiMix]) -> String {
+    let before = if avoid.is_empty() {
+        String::new()
+    } else {
+        let titles: Vec<_> = avoid.iter().map(|m| format!("\"{}\"", m.title)).collect();
+        format!(
+            "The listener already had these mixes today and wants new ones: {}. Don't reuse their titles or ideas.\n",
+            titles.join(", ")
+        )
+    };
+    let mut list = String::new();
+    let mut start = 0;
+    for (i, p) in pools.iter().enumerate() {
+        list.push_str(&format!("POOL {}: {}\n{}\n\n", i + 1, p.brief(), catalog_from(&p.songs, h, start)));
+        start += p.songs.len();
+    }
     format!(
-        "Now: {now}.\nLISTENER:\n{taste}\nSONGS (id|title|artist|album|genre|year|plays|sound):\n{list}\n\n\
-Make 3 mixes for today from SONGS, each 6–20 songs with a clearly different mood or moment. \
-Mix favourites with songs played rarely or never. Order each so it flows. \
-title: at most 4 words. reason: one short sentence.\n\
-Return JSON only: {{\"mixes\":[{{\"title\":\"\",\"reason\":\"\",\"ids\":[1,2,3]}}]}}",
+        "Now: {now}.\nLISTENER:\n{taste}\nSongs are listed as id|title|artist|album|genre|year|plays|sound.\n\n{list}\
+Make one mix from each POOL, in the same order, using only that pool's songs. \
+Each mix: 8–16 songs that belong together, ordered so they flow; leave out songs that don't fit the rest. \
+At most 3 songs by one artist. \
+title: at most 4 words, about the mood or the moment (not the pool's description); no two titles share a word. \
+reason: one short sentence saying what the mix is, naming two or three of its artists.\n\
+{before}\
+Return JSON only: {{\"mixes\":[{{\"pool\":1,\"title\":\"\",\"reason\":\"\",\"ids\":[1,2,3]}}]}}",
         now = now_words(),
-        list = catalog(c, h),
     )
 }
 
@@ -485,7 +542,7 @@ fn now_words() -> String {
 }
 
 /// The local hour, from Windows' local time.
-fn local_hour() -> u32 {
+pub fn local_hour() -> u32 {
     #[cfg(windows)]
     {
         #[repr(C)]
@@ -519,6 +576,9 @@ pub struct AiMix {
     pub title: String,
     pub reason: String,
     pub track_ids: Vec<String>,
+    /// Which part of the library a daily mix came from ("Rediscover"); empty for "Ask the DJ".
+    #[serde(default)]
+    pub lane: String,
     /// Songs not in the library the DJ thinks fit.
     #[serde(default)]
     pub discover: Vec<Discovery>,
@@ -710,6 +770,7 @@ fn to_mix(v: &Value, c: &[Candidate]) -> AiMix {
         title: text(v, "title"),
         reason: text(v, "reason"),
         track_ids,
+        lane: String::new(),
         discover,
     }
 }
@@ -726,19 +787,109 @@ pub fn ask(s: &AiSettings, request: &str, taste: &str, c: &[Candidate], h: &Hist
     Ok(mix)
 }
 
-pub fn daily_mixes(s: &AiSettings, taste: &str, c: &[Candidate], h: &HistoryStats) -> Result<Vec<AiMix>, String> {
-    let v = chat_json(s, &mixes_prompt(taste, c, h), false)?;
-    let mixes: Vec<AiMix> = v["mixes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .map(|m| to_mix(m, c))
-        .filter(|m| m.track_ids.len() >= 3 && !m.title.is_empty())
-        .collect();
+/// Today's mixes, one per pool. The model's picks are checked against its own pool (no song
+/// from elsewhere, at most 3 per artist); a pool it skipped or left too short is filled from the
+/// pool itself, so every lane still gets a mix.
+pub fn daily_mixes(
+    s: &AiSettings,
+    taste: &str,
+    pools: &[Pool],
+    h: &HistoryStats,
+    avoid: &[AiMix],
+) -> Result<Vec<AiMix>, String> {
+    if pools.is_empty() {
+        return Err("The library is too small for mixes yet.".into());
+    }
+    let v = chat_json(s, &mixes_prompt(taste, pools, h, avoid), false)?;
+    let answers: Vec<&Value> = v["mixes"].as_array().into_iter().flatten().collect();
+    let mixes = fit_to_pools(pools, &answers);
     if mixes.is_empty() {
         return Err("The DJ couldn’t make mixes this time. Try again.".into());
     }
+    log_variety(&mixes, pools);
     Ok(mixes)
+}
+
+fn fit_to_pools(pools: &[Pool], answers: &[&Value]) -> Vec<AiMix> {
+    let all: Vec<Candidate> = pools.iter().flat_map(|p| p.songs.iter().cloned()).collect();
+    let mut mixes = Vec::new();
+    for (i, p) in pools.iter().enumerate() {
+        let answer = answers
+            .iter()
+            .find(|a| a["pool"].as_u64() == Some(i as u64 + 1))
+            .or_else(|| answers.get(i).filter(|a| a["pool"].is_null()));
+        let mut m = answer.map(|a| to_mix(a, &all)).unwrap_or_else(|| to_mix(&Value::Null, &all));
+        let artist: HashMap<&str, String> = p.songs.iter().map(|c| (c.track.id.as_str(), crate::lanes::artist_key(c))).collect();
+        let mut per: HashMap<String, usize> = HashMap::new();
+        m.track_ids.retain(|id| {
+            artist.get(id.as_str()).is_some_and(|a| {
+                let n = per.entry(a.clone()).or_default();
+                *n += 1;
+                *n <= 3
+            })
+        });
+        if m.track_ids.len() < 6 {
+            for c in &p.songs {
+                if m.track_ids.len() >= 12 {
+                    break;
+                }
+                let n = per.entry(crate::lanes::artist_key(c)).or_default();
+                if *n < 3 && !m.track_ids.contains(&c.track.id) {
+                    *n += 1;
+                    m.track_ids.push(c.track.id.clone());
+                }
+            }
+        }
+        if m.title.is_empty() {
+            m.title = p.lane.label().to_string();
+        }
+        if m.reason.is_empty() {
+            let b = p.brief();
+            m.reason = format!("{}{}.", b[..1].to_uppercase(), &b[1..]);
+        }
+        m.lane = p.lane.label().to_string();
+        m.discover.clear();
+        mixes.push(m);
+    }
+    distinct_mixes(mixes)
+}
+
+/// One log line per day's mixes, so changes to the lanes can be compared by numbers, not by eye.
+fn log_variety(mixes: &[AiMix], pools: &[Pool]) {
+    let artist: HashMap<&str, String> = pools
+        .iter()
+        .flat_map(|p| p.songs.iter())
+        .map(|c| (c.track.id.as_str(), crate::lanes::artist_key(c)))
+        .collect();
+    let sets: Vec<HashSet<&String>> = mixes
+        .iter()
+        .map(|m| m.track_ids.iter().filter_map(|id| artist.get(id.as_str())).collect())
+        .collect();
+    let mut shared = 0;
+    for i in 0..sets.len() {
+        for j in i + 1..sets.len() {
+            shared += sets[i].intersection(&sets[j]).count();
+        }
+    }
+    let summary: Vec<String> = mixes
+        .iter()
+        .zip(&sets)
+        .map(|(m, s)| format!("{} ({}: {} songs, {} artists)", m.title, m.lane, m.track_ids.len(), s.len()))
+        .collect();
+    log::info!("AI mixes: {}; artists shared between mixes: {shared}", summary.join(", "));
+}
+
+/// Keeps each song in the first mix that has it, then drops mixes left too short or untitled.
+fn distinct_mixes(mixes: Vec<AiMix>) -> Vec<AiMix> {
+    let mut used = HashSet::new();
+    mixes
+        .into_iter()
+        .map(|mut m| {
+            m.track_ids.retain(|id| used.insert(id.clone()));
+            m
+        })
+        .filter(|m| m.track_ids.len() >= 3 && !m.title.is_empty())
+        .collect()
 }
 
 /// A quick check that the key, server and model work.
@@ -896,6 +1047,9 @@ fn read_singers(v: &Value, lines: usize) -> FoundSingers {
 pub struct DailyCache {
     pub day: u64,
     pub mixes: Vec<AiMix>,
+    /// Songs in the mixes of recent days (day, ids), so tomorrow's mixes don't repeat them.
+    #[serde(default)]
+    pub recent: Vec<(u64, Vec<String>)>,
     /// Why today's attempt failed; it isn't retried automatically until tomorrow.
     #[serde(default)]
     pub error: String,
@@ -909,6 +1063,65 @@ pub fn today() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortlist_spreads_and_varies() {
+        // One artist with 300 songs and 20 artists with 5 each: the big one can't take over.
+        let song = |artist: &str, n: usize| Candidate {
+            track: Track { id: format!("{artist}-{n}"), artist: artist.into(), ..Default::default() },
+            sound: None,
+        };
+        let all = || {
+            let mut v: Vec<_> = (0..300).map(|n| song("Aimer", n)).collect();
+            v.extend((0..20).flat_map(|a| (0..5).map(move |n| song(&format!("A{a}"), n))));
+            v
+        };
+        let h = HistoryStats::default();
+        let a = shortlist(all(), "", &h, 1);
+        assert_eq!(a.len(), SHORTLIST);
+        assert!(a.iter().filter(|c| c.track.artist == "Aimer").count() < 60);
+        let b = shortlist(all(), "", &h, 2);
+        let ids = |v: &[Candidate]| v.iter().map(|c| c.track.id.clone()).collect::<Vec<_>>();
+        assert_ne!(ids(&a), ids(&b));
+        // A song lands in one mix only; a mix left with fewer than 3 songs is dropped.
+        let mix = |t: &str, ids: &[&str]| AiMix {
+            title: t.into(),
+            reason: String::new(),
+            track_ids: ids.iter().map(|s| s.to_string()).collect(),
+            lane: String::new(),
+            discover: Vec::new(),
+        };
+        let out = distinct_mixes(vec![mix("A", &["1", "2", "3"]), mix("B", &["1", "2", "4"]), mix("C", &["3", "5", "6", "7"])]);
+        assert_eq!(out.iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), ["A", "C"]);
+        assert_eq!(out[1].track_ids, ["5", "6", "7"]);
+    }
+
+    #[test]
+    fn mixes_stay_in_their_pools() {
+        use crate::lanes::{Lane, Pool};
+        let song = |artist: &str, n: usize| Candidate {
+            track: Track { id: format!("{artist}-{n}"), artist: artist.into(), ..Default::default() },
+            sound: None,
+        };
+        let pool = |lane, artists: &[&str]| Pool {
+            lane,
+            note: String::new(),
+            songs: artists.iter().flat_map(|a| (0..4).map(|n| song(a, n))).collect(),
+        };
+        let pools = [pool(Lane::RightNow, &["A", "B", "C"]), pool(Lane::DeepCuts, &["D", "E", "F"])];
+        // Pool 1: five songs by A (ids 1–4 are A's four songs) plus one from pool 2 (id 13).
+        // Pool 2: missing from the answer.
+        let answer = json!({ "pool": 1, "title": "Morning", "reason": "r", "ids": [1, 2, 3, 4, 5, 6, 7, 13] });
+        let mixes = fit_to_pools(&pools, &[&answer]);
+        assert_eq!(mixes.len(), 2);
+        assert_eq!(mixes[0].lane, "Right now");
+        assert_eq!(mixes[0].track_ids.iter().filter(|id| id.starts_with("A-")).count(), 3);
+        assert!(mixes[0].track_ids.iter().all(|id| !id.starts_with("D-")));
+        // The missing pool still gets a mix, from its own songs, named after its lane.
+        assert_eq!(mixes[1].title, "Deep cuts");
+        assert!(mixes[1].track_ids.len() >= 8);
+        assert!(mixes[1].track_ids.iter().all(|id| ["D-", "E-", "F-"].iter().any(|p| id.starts_with(p))));
+    }
 
     #[test]
     fn singers_need_a_credit() {

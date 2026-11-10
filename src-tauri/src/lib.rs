@@ -1,4 +1,5 @@
 mod ai;
+mod lanes;
 mod api;
 mod attention;
 mod artists;
