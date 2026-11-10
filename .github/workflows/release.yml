@@ -130,13 +130,34 @@ jobs:
             Already have Cadence 0.2.2 or newer? It updates itself (Settings → Updates).
 
             More at https://cadence.akbarharyadi.com
-          releaseDraft: false
+          # A draft until every desktop build is attached (the publish job below): published at once,
+          # the first build to finish put out a latest.json for its platform only, and every other
+          # app's update check failed ("None of the fallback platforms ... were found") until the rest
+          # caught up.
+          releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
 
-  # Android: a signed APK for 64-bit ARM phones, added to the same release once the desktop builds made it.
-  android:
+  # Publishes the release (and with it latest.json, read by every installed app's updater) once the
+  # Windows, macOS and Linux builds are all attached. A failed desktop build leaves it a draft.
+  publish:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+          if [ -z "$tag" ]; then
+            tag=$(gh release list --limit 20 --json tagName,isDraft --jq '[.[] | select(.isDraft)][0].tagName')
+          fi
+          gh release edit "$tag" --draft=false --latest
+
+  # Android: a signed APK for 64-bit ARM phones, added to the same release once it's published.
+  android:
+    needs: publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -190,7 +211,13 @@ jobs:
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
           export CADENCE_KEYSTORE="$RUNNER_TEMP/release.jks"
-          pnpm tauri android build --apk --target aarch64
+          # Gradle's download server sometimes answers 504 (0.2.39 had no APK because of it): try again.
+          for attempt in 1 2 3; do
+            pnpm tauri android build --apk --target aarch64 && exit 0
+            echo "APK build failed (attempt $attempt); retrying in 30 s"
+            sleep 30
+          done
+          exit 1
 
       - name: Attach it to the release
         env:

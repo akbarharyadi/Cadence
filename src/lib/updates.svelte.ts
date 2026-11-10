@@ -63,7 +63,11 @@ class Updates {
       else await this.checkDesktop();
     } catch (e) {
       this.phase = quiet ? "idle" : "error";
-      this.message = `Couldn't check for updates: ${e}`;
+      // A release whose build for this computer isn't uploaded yet (older releases were published
+      // while still building): not a real problem, it'll be there on a later check.
+      this.message = /fallback platforms|platforms` object/.test(String(e))
+        ? "A new version is still being prepared for this computer. Try again in a few minutes."
+        : `Couldn't check for updates: ${e}`;
     }
   }
 
