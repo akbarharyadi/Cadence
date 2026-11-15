@@ -330,6 +330,40 @@ mod tests {
         assert_eq!(w.targets(false), Targets::Only(vec![MAIN]));
     }
 
+    /// A flip is only ever reported for the window it happened to, and `on_event` addresses every
+    /// step to that window's label: the other window gets neither the event nor the fresh status.
+    #[test]
+    fn main_minimized_with_the_mini_player_open_flips_only_the_main_window() {
+        let mut w = main_only();
+        assert_eq!(w.apply(MINI, WinEvent::Opened), None);
+        assert_eq!(w.apply(MAIN, WinEvent::Minimized(true)), Some(false), "addressed to main");
+        assert!(w.visible(MINI), "the mini player is not told it was hidden");
+        assert_eq!(w.targets(false), Targets::Only(vec![MINI]), "ticks go to the mini player only");
+        // The mini player's own (non-)events change nothing for it.
+        assert_eq!(w.apply(MINI, WinEvent::Minimized(false)), None);
+        assert_eq!(steps(false), [Step::TellPage(false), Step::Webview(false)]);
+        // Restoring main: one flip for main, with the fresh status before the page is told.
+        let flipped = w.apply(MAIN, WinEvent::Minimized(false));
+        assert_eq!(flipped, Some(true));
+        assert_eq!(steps(true), [Step::FreshStatus, Step::Webview(true), Step::TellPage(true)]);
+        assert_eq!(w.targets(false), Targets::All);
+    }
+
+    #[test]
+    fn the_mini_player_minimized_or_closed_leaves_main_showing() {
+        let mut w = main_only();
+        w.apply(MINI, WinEvent::Opened);
+        assert_eq!(w.apply(MINI, WinEvent::Minimized(true)), Some(false), "addressed to mini");
+        assert!(w.visible(MAIN));
+        assert_eq!(w.targets(false), Targets::Only(vec![MAIN]));
+        // Closing it while minimized: no flip, and main gets everything again.
+        assert_eq!(w.apply(MINI, WinEvent::Closed), None);
+        assert_eq!(w.targets(false), Targets::All);
+        // A reopened one starts visible and asks for its own status.
+        assert_eq!(w.apply(MINI, WinEvent::Opened), None);
+        assert!(w.visible(MINI));
+    }
+
     #[test]
     fn both_hidden_ticks_go_nowhere_but_changes_still_do() {
         let mut w = main_only();

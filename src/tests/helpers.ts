@@ -1,5 +1,5 @@
 // Fixtures and a fake backend, so a test reads as "given this library, when the user does that".
-import { mockIPC } from "@tauri-apps/api/mocks";
+import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import type { Album, Mix, Playlist, Status, Track } from "#lib/api.js";
 import { app } from "#lib/store.svelte.js";
 
@@ -118,7 +118,7 @@ export interface Call {
  * Installs Tauri's mockIPC (events included, so `listen` works) and records every command the page
  * invokes. `handlers` answer commands by name; anything else gets a harmless empty answer.
  */
-export function mockBackend(handlers: Record<string, Handler> = {}) {
+export function mockBackend(handlers: Record<string, Handler> = {}, windowLabel = "main") {
   const calls: Call[] = [];
   mockIPC(
     (cmd, payload) => {
@@ -133,6 +133,8 @@ export function mockBackend(handlers: Record<string, Handler> = {}) {
     },
     { shouldMockEvents: true },
   );
+  // The page's own window, which window-bound listeners ask for (the mini player passes "mini").
+  mockWindows(windowLabel);
   return {
     calls,
     /** Every call to one command, in order. */

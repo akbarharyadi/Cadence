@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { listenHere } from "./windowEvents";
 import { open } from "@tauri-apps/plugin-dialog";
 import { flushSync, tick } from "svelte";
 import { eqSync } from "./eq";
@@ -923,12 +924,12 @@ class AppState {
     await Promise.all([
       // The queue (thousands of ids) only comes when it changed; until this window has one (from
       // `api.status()` below, or an update that brings it) updates without it are left alone.
-      listen<Omit<Status, "queue"> & { queue?: string[] }>("player-status", (e) => {
+      listenHere<Omit<Status, "queue"> & { queue?: string[] }>("player-status", (e) => {
         const queue = e.payload.queue ?? this.status?.queue;
         if (queue) this.applyStatus({ ...e.payload, queue });
       }),
       // Hidden in the tray or minimized, or shown again (after a fresh "player-status").
-      listen<boolean>("window-visible", (e) => setWindowVisible(e.payload)),
+      listenHere<boolean>("window-visible", (e) => setWindowVisible(e.payload)),
       listen("library-changed", async () => {
         // The artists aren't asked for here: the app rebuilds them after a library change and says
         // so ("artist-identity-changed") only when they changed. The search keys are only marked
@@ -1092,12 +1093,12 @@ class AppState {
    */
   async initMini() {
     await Promise.all([
-      listen<Omit<Status, "queue"> & { queue?: string[] }>("player-status", (e) => {
+      listenHere<Omit<Status, "queue"> & { queue?: string[] }>("player-status", (e) => {
         const queue = e.payload.queue ?? this.status?.queue;
         if (queue) this.applyStatus({ ...e.payload, queue });
         this.miniFollow();
       }),
-      listen<boolean>("window-visible", (e) => setWindowVisible(e.payload)),
+      listenHere<boolean>("window-visible", (e) => setWindowVisible(e.payload)),
       listen("library-changed", () => this.miniFollow(true)),
     ]);
     window.addEventListener("storage", (e) => e.key === "cadence-theme" && (this.theme = savedTheme()));
