@@ -129,6 +129,11 @@
         <Toggle checked={s.webSearch} label="Web search" onchange={(v) => change({ webSearch: v })} />
         <span class="hint inline">{claude ? "Lets Claude search the web for new releases and lyrics." : "Lets the model look up new releases and lyrics."}</span>
       </div>
+      <span class="label">DJ ordering</span>
+      <div class="line">
+        <Toggle checked={s.djOrder !== false} label="Let the AI order Ask the DJ's songs" onchange={(v) => change({ djOrder: v })} />
+        <span class="hint inline">A second, short request names and orders the songs Cadence picked; off, Cadence orders them itself.</span>
+      </div>
     </div>
     {#if keyError}<p class="error">{keyError}</p>{/if}
 

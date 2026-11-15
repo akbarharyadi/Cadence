@@ -558,6 +558,7 @@ dependencies = [
  "lindera",
  "lofty",
  "log",
+ "memchr",
  "ndk",
  "ndk-context",
  "notify",

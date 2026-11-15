@@ -1,15 +1,21 @@
 <script lang="ts">
   import { api, khz } from "#lib/api.js";
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
   import { updates } from "#lib/updates.svelte.js";
   import AiSettings from "#lib/components/AiSettings.svelte";
+  import BackupSettings from "#lib/components/BackupSettings.svelte";
   import Icon from "#lib/components/Icon.svelte";
+  import ListenBrainzTools from "#lib/components/ListenBrainzTools.svelte";
   import Toggle from "#lib/components/Toggle.svelte";
   import Licenses from "#lib/components/Licenses.svelte";
   import Segmented from "#lib/components/Segmented.svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { android, app, isInstrumental, systemMixer } from "#lib/store.svelte.js";
+  import { openHelp } from "#lib/palette.svelte.js";
+  import { fold } from "#lib/searchIndex.js";
+  import { ALL_SHORTCUTS, MOD } from "#lib/shortcuts.js";
+  import { uiZoom, ZOOM_STEPS } from "#lib/uiZoom.svelte.js";
 
   let version = $state("");
   let showLicenses = $state(false);
@@ -20,6 +26,10 @@
   let playOnBluetooth = $state(droid?.getPlayOnBluetooth?.() ?? true);
   let lyricsOnline = $state(true);
   let fixTags = $state(true);
+  let artistNames = $state(true);
+  let newReleases = $state(true);
+  let names = $state<import("#lib/api.js").ArtistNamesStatus | null>(null);
+  const loadNames = () => api.artistNamesStatus().then((n) => (names = n ?? null)).catch(() => {});
   let lbUser = $state("");
   let lbToken = $state("");
   let lbBusy = $state(false);
@@ -30,7 +40,16 @@
     globalHotkeys = s.globalHotkeys;
     lyricsOnline = s.lyricsOnline;
     fixTags = s.fixTagsOnline;
+    artistNames = s.artistNamesOnline ?? true;
+    newReleases = s.newReleasesOnline ?? true;
+    loadNames();
     lbUser = s.listenbrainzUser;
+  });
+
+  // ListenBrainz refused the token while Cadence was open: the account was cleared in the backend.
+  $effect(() => {
+    if (!app.listenbrainzSignedOut) return;
+    api.appSettings().then((s) => (lbUser = s.listenbrainzUser)).catch(() => {});
   });
 
   async function connectLb() {
@@ -85,25 +104,130 @@
     app.folders = await api.removeFolder(path);
   }
 
-  const shortcuts: [string[], string][] = [
-    [["Space"], "Play or pause"],
-    [["Ctrl", "→"], "Next song"],
-    [["Ctrl", "←"], "Previous song"],
-    [["→"], "Forward 10 seconds"],
-    [["←"], "Back 10 seconds"],
-    [["Ctrl", "S"], "Shuffle on or off"],
-    [["Ctrl", "R"], "Repeat: off, all, this song"],
-    [["Ctrl", "U"], "Show or hide Up Next"],
-    [["Ctrl", "L"], "Lyrics"],
-    [["Ctrl", "K"], "Search"],
-    [["Alt", "←"], "Go back"],
-    [["Esc"], "Close Now Playing"],
-    [["Media keys"], "Play, pause, next and previous, even when Cadence is in the background"],
+  const shortcuts: [string[], string][] = ALL_SHORTCUTS.map((s) => [s.keys, s.action]);
+
+  // ---------- search: hides the sections (or, in Appearance, the rows) that don't match ----------
+  // Done on the page's own elements (the `hidden` attribute), not by re-rendering the sections: they
+  // keep their state, and a key press costs one pass over the text of ~20 sections. A section
+  // matches when every typed word is in its title, description or hints.
+  let pageEl = $state<HTMLElement>();
+  let filter = $state("");
+  /** The typed words, folded, ~80 ms after the last key. */
+  let needle = $state("");
+  let anyShown = $state(true);
+  let filterTimer: ReturnType<typeof setTimeout> | undefined;
+  function onFilter(value: string) {
+    filter = value;
+    clearTimeout(filterTimer);
+    const next = fold(value.trim()).replace(/\s+/g, " ");
+    if (!next) needle = "";
+    else filterTimer = setTimeout(() => (needle = next), 80);
+  }
+  const hits = (el: Element, words: string[]) => {
+    const text = fold(el.textContent ?? "");
+    return words.every((w) => text.includes(w));
+  };
+  function applyFilter(root: HTMLElement, text: string) {
+    const words = text ? text.split(" ") : [];
+    let shown = 0;
+    for (const sec of Array.from(root.children)) {
+      if (sec.tagName !== "SECTION" || sec.hasAttribute("data-keep")) continue;
+      const rows = Array.from(sec.children).filter((c) => c.classList.contains("title-row"));
+      let show = true;
+      if (words.length) {
+        if (rows.length > 1) {
+          // A section of several settings (Appearance): each row on its own.
+          show = false;
+          for (const r of rows) {
+            const hit = hits(r, words);
+            r.toggleAttribute("hidden", !hit);
+            show ||= hit;
+          }
+        } else show = hits(sec, words);
+      } else for (const r of rows) r.removeAttribute("hidden");
+      sec.toggleAttribute("hidden", !show);
+      if (show) shown++;
+    }
+    anyShown = shown > 0;
+  }
+  $effect(() => {
+    const el = pageEl;
+    const text = needle;
+    if (!el) return;
+    applyFilter(el, text);
+    if (!text) return;
+    // A section that appears later (voice models found, a phone's settings) is filtered too.
+    const watch = new MutationObserver(() => applyFilter(el, text));
+    watch.observe(el, { childList: true });
+    return () => watch.disconnect();
+  });
+  onDestroy(() => clearTimeout(filterTimer));
+
+  /** The Sound page's settings: findable here too, each opening that page. */
+  const SOUND: { title: string; about: string }[] = [
+    { title: "Direct output", about: "Straight to the device, bit-perfect, exclusive mode, USB DAC" },
+    { title: "Sound Check", about: "Same loudness for every song, ReplayGain, leveling" },
+    { title: "Tone per song", about: "Automatic adjustments for each song" },
+    { title: "Equalizer", about: "EQ, bass, treble, presets, parametric" },
+    { title: "Crossfade", about: "Blend songs, gapless" },
+    { title: "Headphone crossfeed", about: "Headphones, channels, stereo" },
   ];
+  const soundHits = $derived.by(() => {
+    if (!needle) return [];
+    const words = needle.split(" ");
+    return SOUND.filter((s) => {
+      const text = fold(`${s.title} ${s.about} sound`);
+      return words.every((w) => text.includes(w));
+    });
+  });
+
+  function onFilterKey(e: KeyboardEvent) {
+    if (e.key !== "Escape") return;
+    // Empty the box first; a second Escape leaves it.
+    if (filter) {
+      e.preventDefault();
+      e.stopPropagation();
+      onFilter("");
+    } else (e.currentTarget as HTMLInputElement).blur();
+  }
 </script>
 
-<div class="page">
+<div class="page" bind:this={pageEl}>
   <h1 class="page-title">Settings</h1>
+
+  <div class="find" data-keep>
+    <Icon name="search" size={15} />
+    <input
+      type="search"
+      placeholder="Search settings"
+      aria-label="Search settings"
+      value={filter}
+      oninput={(e) => onFilter(e.currentTarget.value)}
+      onkeydown={onFilterKey}
+      spellcheck="false"
+      autocomplete="off"
+    />
+  </div>
+  {#if needle && !anyShown && !soundHits.length}
+    <p class="no-match secondary" role="status">No matching settings. Try another word.</p>
+  {/if}
+  {#if soundHits.length}
+    <section data-keep class="sound-hits">
+      <h2 class="section-title">On the Sound page</h2>
+      <ul>
+        {#each soundHits as s (s.title)}
+          <li>
+            <button onclick={() => app.go({ name: "sound" })}>
+              <Icon name="eq" size={18} />
+              <span class="name">{s.title}</span>
+              <span class="about">{s.about}</span>
+              <Icon name="chevron" size={15} />
+            </button>
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
 
   <section>
     <div class="title-row">
@@ -215,6 +339,27 @@
         onchange={(v) => app.setTheme(v)}
       />
     </div>
+    <div class="title-row">
+      <div>
+        <h2 class="section-title">Waveform seek bar</h2>
+        <p class="desc">
+          Now Playing’s seek bar shows the shape of the song. Each song’s waveform is drawn once, in the background, when its loudness
+          is measured or the first time it plays.
+        </p>
+        {#if app.waveformSeek}
+          <p class="hint">
+            {#if app.waveJob}
+              {app.waveJob.paused ? "Paused at" : "Preparing"} {app.waveJob.done} of {app.waveJob.total} songs{app.waveJob.paused ? "." : "…"}
+              <button class="link" onclick={() => api.waveformsPause(!app.waveJob?.paused)}>{app.waveJob.paused ? "Resume" : "Pause"}</button>
+              <button class="link" onclick={() => api.waveformsStop()}>Stop</button>
+            {:else}
+              <button class="link small" onclick={() => api.waveformsPrepare()}>Prepare waveforms for all songs</button>
+            {/if}
+          </p>
+        {/if}
+      </div>
+      <Toggle checked={app.waveformSeek} label="Waveform seek bar" onchange={(v) => app.setWaveformSeek(v)} />
+    </div>
     {#if !droid}
       <div class="title-row">
         <div>
@@ -232,6 +377,18 @@
           ]}
           value={app.playerPosition}
           onchange={(v) => app.setPlayerPosition(v)}
+        />
+      </div>
+      <div class="title-row">
+        <div>
+          <h2 class="section-title">Interface size</h2>
+          <p class="desc">Makes text and controls larger or smaller. {MOD} + = and {MOD} + - change it from anywhere, {MOD} + 0 puts it back to 100%.</p>
+        </div>
+        <Segmented
+          label="Interface size"
+          options={ZOOM_STEPS.map((z) => ({ value: String(z), label: `${Math.round(z * 100)}%` }))}
+          value={String(uiZoom.value)}
+          onchange={(v) => uiZoom.set(parseFloat(v))}
         />
       </div>
     {/if}
@@ -370,6 +527,50 @@
   <section>
     <div class="title-row">
       <div>
+        <h2 class="section-title">Look for new releases online</h2>
+        <p class="desc">
+          Once a day, when Discover opens, ask ListenBrainz which albums, EPs and singles came out lately, and show those by artists in
+          your library. It needs no account, and nothing about you or your library is sent: it’s the same list everyone gets, and
+          Cadence picks out your artists itself.
+        </p>
+      </div>
+      <Toggle checked={newReleases} label="Look for new releases online" onchange={(v) => { newReleases = v; void api.setNewReleasesOnline(v); }} />
+    </div>
+  </section>
+
+  <section>
+    <div class="title-row">
+      <div>
+        <h2 class="section-title">Learn artist names online</h2>
+        <p class="desc">
+          Ask MusicBrainz, a free music database, what else each artist in your library is called (米津玄師 is also Kenshi Yonezu), so
+          an artist written two ways is one artist, and search finds them by any name. Only artist names are sent, one about every
+          second, once each. Your files aren’t changed.
+        </p>
+      </div>
+      <Toggle checked={artistNames} label="Learn artist names online" onchange={(v) => { artistNames = v; void api.setArtistNamesOnline(v).then(loadNames); }} />
+    </div>
+    {#if artistNames && (app.namesJob ?? names)}
+      {@const n = app.namesJob ?? names}
+      <p class="hint">
+        {#if n?.running}
+          Checking {n.done} of {n.total} names…
+          <button class="link" onclick={() => api.artistNamesPause(true).then(loadNames)}>Pause</button>
+          <button class="link" onclick={() => api.artistNamesStop().then(loadNames)}>Stop</button>
+        {:else if n?.paused}
+          Paused{n.waiting ? `, ${n.waiting} ${n.waiting === 1 ? "name" : "names"} to go` : ""}.
+          <button class="link" onclick={() => api.artistNamesPause(false).then(loadNames)}>Resume</button>
+        {:else if n}
+          {n.known} {n.known === 1 ? "artist" : "artists"} found{n.waiting ? `, ${n.waiting} ${n.waiting === 1 ? "name" : "names"} to check` : ""}.
+          {#if n.waiting}<button class="link" onclick={() => api.artistNamesPause(false).then(loadNames)}>Check now</button>{/if}
+        {/if}
+      </p>
+    {/if}
+  </section>
+
+  <section>
+    <div class="title-row">
+      <div>
         <h2 class="section-title">Skipped songs</h2>
         <p class="desc">
           Left out when an album, playlist, mix or shuffle plays. They stay in your library, and play when you pick them yourself.
@@ -402,18 +603,31 @@
         <span>Sending your listens to ListenBrainz as <b>{lbUser}</b></span>
         <button class="pill ghost" onclick={disconnectLb}>Disconnect</button>
       </div>
+      <ListenBrainzTools />
     {:else}
       <form class="connect" onsubmit={(e) => { e.preventDefault(); connectLb(); }}>
         <input class="field" type="password" bind:value={lbToken} placeholder="Paste your ListenBrainz user token" aria-label="ListenBrainz user token" autocomplete="off" />
         <button class="pill" type="submit" disabled={!lbToken.trim() || lbBusy}>{lbBusy ? "Checking…" : "Connect"}</button>
       </form>
+      {#if app.listenbrainzSignedOut}<p class="error">ListenBrainz no longer accepts the saved token. Paste a token to connect again.</p>{/if}
       <p class="hint">Find your token at listenbrainz.org, under your account settings. It’s stored in {tokenStore}, not in Cadence’s files.</p>
       {#if lbError}<p class="error">{lbError}</p>{/if}
     {/if}
   </section>
 
+  <!-- One title row: the search box matches the whole section (backup, restore, snapshots). -->
   <section>
-    <h2 class="section-title">Keyboard shortcuts</h2>
+    <BackupSettings />
+  </section>
+
+  <section>
+    <div class="title-row">
+      <div>
+        <h2 class="section-title">Keyboard shortcuts</h2>
+        <p class="desc">Press <kbd>?</kbd> anywhere to see them in a window, or <kbd>{MOD}</kbd> <kbd>K</kbd> to find any page or action.</p>
+      </div>
+      <button class="pill ghost" onclick={openHelp}><Icon name="settings" size={15} />Show shortcuts</button>
+    </div>
     <dl class="keys">
       {#each shortcuts as [keys, action]}
         <dt>{#each keys as k}<kbd>{k}</kbd>{/each}</dt>
@@ -486,6 +700,74 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: 24px;
+  }
+  /* A setting the search box above filtered out: a row's own display would show it anyway. */
+  .page :global(.title-row[hidden]) {
+    display: none;
+  }
+  .find {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 38px;
+    max-width: 420px;
+    padding: 0 12px;
+    margin-top: 6px;
+    border-radius: var(--r-sm);
+    background: var(--hover);
+    box-shadow: inset 0 0 0 1px var(--line);
+    color: var(--text-3);
+  }
+  .find:focus-within {
+    box-shadow: inset 0 0 0 1px var(--accent);
+    color: var(--text-2);
+  }
+  .find input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: none;
+    font-size: 14px;
+    user-select: text;
+  }
+  .find input:focus-visible {
+    outline: none;
+  }
+  .no-match {
+    margin-top: 22px;
+  }
+  .sound-hits ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .sound-hits button {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: var(--r-sm);
+    text-align: left;
+    color: var(--text-2);
+  }
+  .sound-hits button:hover {
+    background: var(--active);
+    color: var(--text);
+  }
+  .sound-hits .name {
+    color: var(--text);
+    font-weight: 500;
+  }
+  .sound-hits .about {
+    flex: 1;
+    min-width: 0;
+    font-size: 12.5px;
+    color: var(--text-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .title-row + .title-row {
     margin-top: 22px;

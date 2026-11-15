@@ -314,6 +314,9 @@ pub enum Backend {
     /// Android USB exclusive: Cadence's own driver streams to the DAC (see `usb_dac`).
     #[cfg(target_os = "android")]
     Usb(#[allow(dead_code)] super::usb_dac::UsbStream),
+    /// Tests: no device; the test reads the ring buffer itself.
+    #[cfg(test)]
+    Null,
 }
 
 pub struct Output {
@@ -381,12 +384,20 @@ fn device_name(device: &cpal::Device) -> String {
         .unwrap_or_else(|_| "Speakers".into())
 }
 
-/// Opens the default device in shared mode (through the system mixer) at its own rate.
-pub fn open_shared(shared: Arc<Shared>) -> Result<Output> {
+/// The device with this id (see `devices`), or the system default (None).
+fn device_or_default(host: &cpal::Host, device: Option<&str>) -> Result<cpal::Device> {
+    match device {
+        Some(id) => super::devices::find(host, id).ok_or_else(|| anyhow!("the output device isn’t connected")),
+        None => host.default_output_device().ok_or_else(|| anyhow!("no output device")),
+    }
+}
+
+/// Opens a device in shared mode (through the system mixer) at its own rate: the one with this id
+/// (see `devices`), or the system default. (On Windows the engine always names the device, also
+/// the default: see `devices` for why.)
+pub fn open_shared(shared: Arc<Shared>, device: Option<&str>) -> Result<Output> {
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| anyhow!("no output device"))?;
+    let device = device_or_default(&host, device)?;
     let supported = best_config(&device)?;
     log::info!("shared output format: {} at {} Hz", supported.sample_format(), supported.sample_rate());
     let (stream, prod, rate, channels) = start(&device, supported, shared)?;
@@ -427,15 +438,19 @@ pub fn open_shared_at(shared: Arc<Shared>, rate: u32) -> Result<Output> {
 ///   would), in the device's most precise format. Other apps share that rate meanwhile.
 /// - Linux: plays to the sound card's ALSA `hw:` device, around PulseAudio/PipeWire. That needs the
 ///   card free; while the sound server holds it, opening fails and Cadence falls back to shared mode.
+///
+/// `device`: the device chosen in Cadence (its id), else (None) the system default on macOS and the
+/// best sound card on Linux.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub fn open_direct(shared: Arc<Shared>, rate: u32) -> Result<Output> {
+pub fn open_direct(shared: Arc<Shared>, rate: u32, device: Option<&str>) -> Result<Output> {
     let host = cpal::default_host();
     #[cfg(target_os = "macos")]
-    let device = host
-        .default_output_device()
-        .ok_or_else(|| anyhow!("no output device"))?;
+    let device = device_or_default(&host, device)?;
     #[cfg(target_os = "linux")]
-    let device = hardware_device(&host, rate)?;
+    let device = match device {
+        Some(id) => super::devices::find(&host, id).ok_or_else(|| anyhow!("the output device isn’t connected"))?,
+        None => hardware_device(&host, rate)?,
+    };
     let channels = device.default_output_config().map(|c| c.channels()).unwrap_or(2);
     let supported = config_at(&device, rate, channels)
         .or_else(|| config_at(&device, rate, 2))

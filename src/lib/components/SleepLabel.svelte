@@ -1,10 +1,11 @@
 <script lang="ts">
   import { app } from "#lib/store.svelte.js";
 
-  // Counts down once a second, only while this is on screen (it's only shown with a timer set).
+  // Counts down once a second, only while this is on screen (it's only shown with a timer set) and
+  // the window can be seen (hidden in the tray: no timer; shown again: right at once).
   let now = $state(Math.floor(Date.now() / 1000));
   $effect(() => {
-    if (app.sleepEndsAt == null) return;
+    if (app.sleepEndsAt == null || !app.showing) return;
     now = Math.floor(Date.now() / 1000);
     const timer = setInterval(() => (now = Math.floor(Date.now() / 1000)), 1000);
     return () => clearInterval(timer);

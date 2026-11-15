@@ -70,6 +70,13 @@ pub struct AiSettings {
     pub claude_model: String,
     /// Let the model search the web (new music, lyrics).
     pub web_search: bool,
+    /// "Ask the DJ": let the AI order and name the songs Cadence picked (a second, short request).
+    #[serde(default = "yes")]
+    pub dj_order: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for AiSettings {
@@ -82,6 +89,7 @@ impl Default for AiSettings {
             cloud_url: "https://api.z.ai/api/coding/paas/v4".into(),
             cloud_model: "glm-5.3-flash".into(),
             claude_model: CLAUDE_MODEL.into(),
+            dj_order: true,
         }
     }
 }
@@ -164,6 +172,207 @@ fn is_local_url(url: &str) -> bool {
     host == "localhost"
         || [".localhost", ".local", ".lan", ".home.arpa", ".internal"].iter().any(|s| host.ends_with(s))
         || !host.contains('.')
+}
+
+/// Whether the AI is set up to answer: on, with a key (or a server on this computer or the home
+/// network, which may need none).
+pub fn ready(s: &AiSettings) -> bool {
+    endpoint(s).is_ok()
+}
+
+const TRANSLATOR: &str = "You translate song lyrics for Cadence, a personal music player. Answer with strict JSON only: no markdown, no commentary.";
+
+/// One JSON answer for a lyrics translation (`crate::translate`): no web search, little thinking,
+/// a translator's instructions instead of the DJ's.
+pub fn translate_json(s: &AiSettings, prompt: &str) -> Result<Value, String> {
+    let ep = endpoint(s)?;
+    if s.service == Service::Claude {
+        let http = client(120)?;
+        let messages = [json!({ "role": "user", "content": prompt })];
+        let (mut body, fallbacks) = claude_body(&ep.model, &messages, false);
+        body["system"] = json!(TRANSLATOR);
+        if body.get("output_config").is_some() {
+            body["output_config"] = json!({ "effort": "low" });
+        }
+        return claude_answer(&claude_send(&http, &ep, &body, fallbacks)?);
+    }
+    let http = client(120)?;
+    let mut body = json!({
+        "model": ep.model,
+        "temperature": 0.3,
+        "messages": [
+            { "role": "system", "content": TRANSLATOR },
+            { "role": "user", "content": prompt },
+        ],
+        "response_format": { "type": "json_object" },
+    });
+    let send = |body: &Value| {
+        let mut req = http.post(format!("{}/chat/completions", ep.url)).json(body);
+        if let Some(k) = &ep.key {
+            req = req.bearer_auth(k);
+        }
+        req.send()
+    };
+    let mut r = send(&body).map_err(|e| unreachable_message(s, &e))?;
+    // A service without JSON mode: asked again without it.
+    if r.status() == reqwest::StatusCode::BAD_REQUEST {
+        body.as_object_mut().map(|o| o.remove("response_format"));
+        r = send(&body).map_err(|e| unreachable_message(s, &e))?;
+    }
+    let status = r.status();
+    let v: Value = r.json().map_err(|e| format!("Unexpected answer from the AI service: {e}"))?;
+    if !status.is_success() {
+        return Err(match status.as_u16() {
+            401 | 403 => "The AI service didn’t accept the API key. Check it in Settings.".into(),
+            404 => format!("The AI service doesn’t know the model “{}”. Check it in Settings.", ep.model),
+            429 => "The AI service is busy or your free limit is used up. Try again later.".into(),
+            _ => format!("The AI service answered {status}"),
+        });
+    }
+    let text = v["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    extract_json(text).ok_or_else(|| "The AI answer wasn’t in the expected format. Try again.".into())
+}
+
+/// Claude models that take a JSON schema for the answer (`output_config.format`).
+fn claude_structured(model: &str) -> bool {
+    ["claude-fable", "claude-mythos", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-5", "claude-haiku-4-5", "claude-opus-4-5", "claude-opus-4-1"]
+        .iter()
+        .any(|m| model.starts_with(m))
+}
+
+/// The shortest prefix (tokens) a Claude model caches; shorter ones are silently not cached.
+fn claude_cache_minimum(model: &str) -> usize {
+    if ["claude-opus-5", "claude-fable", "claude-mythos", "claude-sonnet-5-5", "claude-haiku-5"].iter().any(|m| model.starts_with(m)) {
+        512
+    } else if model.starts_with("claude-opus-4-7") {
+        2048
+    } else if ["claude-opus-4-6", "claude-opus-4-5", "claude-haiku-4-5"].iter().any(|m| model.starts_with(m)) {
+        4096
+    } else {
+        1024
+    }
+}
+
+/// A low guess of a text's tokens (about 4 characters a token for English; other scripts take
+/// more tokens per character, so this errs on the short side).
+pub fn rough_tokens(text: &str) -> usize {
+    text.len() / 4
+}
+
+/// One JSON answer for "Ask the DJ" (`crate::dj`): no web search, little thinking, the answer held
+/// to `schema` where the service takes one (Claude's structured outputs, OpenAI-style
+/// `json_schema`; services that don't are asked again with plain JSON mode, then without).
+/// `system` never changes and `context` changes only with the library: both go first, and on
+/// Claude they're marked for the prompt cache when together they're long enough to be cached.
+/// `name`: what the request is for (the schema's name, and the log line with the token counts).
+pub fn dj_json(s: &AiSettings, name: &str, system: &str, context: &str, prompt: &str, schema: &Value) -> Result<Value, String> {
+    let ep = endpoint(s)?;
+    let http = client(120)?;
+    if s.service == Service::Claude {
+        let (mut body, fallbacks) = claude_body(&ep.model, &[json!({ "role": "user", "content": prompt })], false);
+        let mut blocks = vec![json!({ "type": "text", "text": system })];
+        if !context.is_empty() {
+            blocks.push(json!({ "type": "text", "text": context }));
+        }
+        if rough_tokens(system) + rough_tokens(context) + rough_tokens(&schema.to_string()) >= claude_cache_minimum(&ep.model) + 64
+            && let Some(last) = blocks.last_mut()
+        {
+            last["cache_control"] = json!({ "type": "ephemeral" });
+        }
+        body["system"] = json!(blocks);
+        body["max_tokens"] = json!(8000);
+        let mut config = serde_json::Map::new();
+        if body.get("output_config").is_some() {
+            config.insert("effort".into(), json!("low"));
+        }
+        if claude_structured(&ep.model) {
+            config.insert("format".into(), json!({ "type": "json_schema", "schema": schema }));
+        }
+        if config.is_empty() {
+            body.as_object_mut().map(|o| o.remove("output_config"));
+        } else {
+            body["output_config"] = Value::Object(config);
+        }
+        let v = match claude_send(&http, &ep, &body, fallbacks) {
+            Err(e) if e.starts_with("Claude answered 400") && body["output_config"].get("format").is_some() => {
+                log::info!("Claude refused the answer's schema ({e}); asking without it");
+                body["output_config"].as_object_mut().map(|o| o.remove("format"));
+                claude_send(&http, &ep, &body, fallbacks)?
+            }
+            other => other?,
+        };
+        let u = &v["usage"];
+        log::info!(
+            "DJ {name}: {} tokens in ({} from the cache, {} cached now), {} out",
+            u["input_tokens"].as_u64().unwrap_or(0),
+            u["cache_read_input_tokens"].as_u64().unwrap_or(0),
+            u["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+            u["output_tokens"].as_u64().unwrap_or(0)
+        );
+        return claude_answer(&v);
+    }
+    let system_text = if context.is_empty() { system.to_string() } else { format!("{system}\n\n{context}") };
+    let mut body = json!({
+        "model": ep.model,
+        "temperature": 0.4,
+        "messages": [
+            { "role": "system", "content": system_text },
+            { "role": "user", "content": prompt },
+        ],
+        "response_format": { "type": "json_schema", "json_schema": { "name": format!("cadence_{name}"), "strict": true, "schema": schema } },
+    });
+    let send = |body: &Value| {
+        let mut req = http.post(format!("{}/chat/completions", ep.url)).json(body);
+        if let Some(k) = &ep.key {
+            req = req.bearer_auth(k);
+        }
+        req.send()
+    };
+    let mut r = send(&body).map_err(|e| unreachable_message(s, &e))?;
+    // No JSON schemas: JSON mode; no JSON mode either: plain (the answer is still checked).
+    for fallback in [Some(json!({ "type": "json_object" })), None] {
+        if r.status() != reqwest::StatusCode::BAD_REQUEST && r.status() != reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            break;
+        }
+        match fallback {
+            Some(f) => body["response_format"] = f,
+            None => {
+                body.as_object_mut().map(|o| o.remove("response_format"));
+            }
+        }
+        r = send(&body).map_err(|e| unreachable_message(s, &e))?;
+    }
+    let status = r.status();
+    let v: Value = r.json().map_err(|e| format!("Unexpected answer from the AI service: {e}"))?;
+    if !status.is_success() {
+        return Err(match status.as_u16() {
+            401 | 403 => "The AI service didn’t accept the API key. Check it in Settings.".into(),
+            404 => format!("The AI service doesn’t know the model “{}”. Check it in Settings.", ep.model),
+            429 => "The AI service is busy or your free limit is used up. Try again later.".into(),
+            _ => format!("The AI service answered {status}"),
+        });
+    }
+    let u = &v["usage"];
+    log::info!(
+        "DJ {name}: {} tokens in ({} cached), {} out",
+        u["prompt_tokens"].as_u64().unwrap_or(0),
+        u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0),
+        u["completion_tokens"].as_u64().unwrap_or(0)
+    );
+    let text = v["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    extract_json(text).ok_or_else(|| "The AI answer wasn’t in the expected format. Try again.".into())
+}
+
+/// The date and time for the DJ's plan ("Sunday 15 November 2026, evening (20:00)").
+pub fn date_and_time_words() -> String {
+    let local = crate::history::now() as i64 + crate::stats::local_offset();
+    let day = local.div_euclid(86_400);
+    let (y, m, d) = crate::stats::civil(day);
+    const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const DAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    // 1970-01-01 was a Thursday.
+    let weekday = DAYS[(day + 3).rem_euclid(7) as usize];
+    format!("{weekday} {d} {} {y}, {}", MONTHS[(m as usize).saturating_sub(1).min(11)], now_words())
 }
 
 /// Claude answers one request (Messages API). With `search`, Claude searches the web itself (its
@@ -506,12 +715,8 @@ impl Rng {
     }
 }
 
-/// The song list as the model sees it: `id|title|artist|album|genre|year|plays|sound`.
-fn catalog(c: &[Candidate], h: &HistoryStats) -> String {
-    catalog_from(c, h, 0)
-}
-
-/// The same, numbered from `start + 1` (several lists sharing one set of ids).
+/// The song list as the model sees it (`id|title|artist|album|genre|year|plays|sound`), numbered
+/// from `start + 1` (several lists sharing one set of ids).
 fn catalog_from(c: &[Candidate], h: &HistoryStats, start: usize) -> String {
     let clean = |s: &str| s.replace(['|', '\n'], " ");
     c.iter()
@@ -532,22 +737,6 @@ fn catalog_from(c: &[Candidate], h: &HistoryStats, start: usize) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// What the model is told, so it can be shown in Settings before anything is sent.
-pub fn ask_prompt(request: &str, taste: &str, c: &[Candidate], h: &HistoryStats) -> String {
-    format!(
-        "Now: {now}.\nLISTENER:\n{taste}\nSONGS (id|title|artist|album|genre|year|plays|sound):\n{list}\n\n\
-The listener asks: \"{req}\"\n\
-Pick 8–25 songs from SONGS that fit the request (use the listener's taste when the request is vague). \
-Order them so they flow. title: at most 5 words. reason: one short sentence.\n\
-Also suggest up to 6 real songs that are NOT in SONGS and fit the request and the listener's taste \
-(search the web for recent releases if you can). why: at most 12 words.\n\
-Return JSON only: {{\"title\":\"\",\"reason\":\"\",\"ids\":[1,2,3],\"discover\":[{{\"artist\":\"\",\"title\":\"\",\"why\":\"\"}}]}}",
-        now = now_words(),
-        list = catalog(c, h),
-        req = request.replace('"', "'"),
-    )
 }
 
 fn mixes_prompt(taste: &str, pools: &[Pool], h: &HistoryStats, avoid: &[AiMix]) -> String {
@@ -620,7 +809,7 @@ pub fn local_hour() -> u32 {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiMix {
     pub title: String,
@@ -632,6 +821,15 @@ pub struct AiMix {
     /// Songs not in the library the DJ thinks fit.
     #[serde(default)]
     pub discover: Vec<Discovery>,
+    /// "Ask the DJ": what was understood ("Indonesian · calm · not played in 3 months · 25 songs").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub understood: String,
+    /// "Ask the DJ": a constraint relaxed or not met, in one sentence ("" when none).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notice: String,
+    /// "Ask the DJ": why (and that) it was picked without the AI ("" when the AI did its part).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub without_ai: String,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -847,19 +1045,8 @@ fn to_mix(v: &Value, c: &[Candidate]) -> AiMix {
         track_ids,
         lane: String::new(),
         discover: distinct_picks(discover),
+        ..Default::default()
     }
-}
-
-pub fn ask(s: &AiSettings, request: &str, taste: &str, c: &[Candidate], h: &HistoryStats) -> Result<AiMix, String> {
-    let v = chat_json(s, &ask_prompt(request, taste, c, h), true)?;
-    let mut mix = to_mix(&v, c);
-    if mix.track_ids.is_empty() {
-        return Err("The DJ didn’t find songs for that. Try asking another way.".into());
-    }
-    if mix.title.is_empty() {
-        mix.title = request.chars().take(40).collect();
-    }
-    Ok(mix)
 }
 
 /// Today's mixes, one per pool. The model's picks are checked against its own pool (no song
@@ -1153,6 +1340,7 @@ mod tests {
             track_ids: ids.iter().map(|s| s.to_string()).collect(),
             lane: String::new(),
             discover: Vec::new(),
+            ..Default::default()
         };
         let mixes = distinct_mixes(vec![mix("Night Drive", &["a", "b", "c"]), mix("night drive", &["d", "e", "f"]), mix("Night Drive", &["g", "h", "i"])]);
         assert_eq!(mixes.iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), ["Night Drive", "night drive 2", "Night Drive 3"]);
@@ -1196,6 +1384,7 @@ mod tests {
             track_ids: ids.iter().map(|s| s.to_string()).collect(),
             lane: String::new(),
             discover: Vec::new(),
+            ..Default::default()
         };
         let out = distinct_mixes(vec![mix("A", &["1", "2", "3"]), mix("B", &["1", "2", "4"]), mix("C", &["3", "5", "6", "7"])]);
         assert_eq!(out.iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), ["A", "C"]);

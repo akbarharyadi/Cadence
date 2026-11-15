@@ -58,8 +58,12 @@ kakasi = "0.1"
 lindera = { version = "6.2", default-features = false, features = ["embed-ipadic"] }
 pinyin = "0.11"
 unicode-normalization = "0.1"
+# Finding a song by a line of its lyrics: SIMD substring search (already used by other crates here).
+memchr = "2"
 # Saves: a unique temporary file beside the real one, synced, then put in its place in one step.
 tempfile = "3"
+# Backups of the user data (one zip file); also unpacks the voice models' ONNX Runtime on Windows.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 # Desktop only: one running window at a time (phones manage that themselves).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
@@ -79,7 +83,6 @@ keyring = { version = "3", features = ["windows-native"] }
 # Follow the singer on the graphics card (the downloaded ONNX Runtime is the DirectML build).
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["directml"] }
 wasapi = "0.26.0"
-zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

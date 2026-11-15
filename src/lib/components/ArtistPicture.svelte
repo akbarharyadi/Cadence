@@ -8,7 +8,7 @@
   import Modal from "./Modal.svelte";
 
   const name = $derived(app.artistEditing!);
-  const artist = $derived(app.artists.find((a) => a.name.toLowerCase() === name.toLowerCase()));
+  const artist = $derived(app.artistByName(name));
   const covers = $derived((artist?.albums ?? []).filter((a) => a.art));
   const custom = $derived(!!app.artistImages[name.toLowerCase()]);
   const isAndroid = navigator.userAgent.includes("Android");

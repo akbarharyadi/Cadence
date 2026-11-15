@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use crate::ctx::Ctx;
 
-use crate::audio::{Cmd, measure_album};
+use crate::audio::Cmd;
 use crate::library;
 
 /// Files written in the last few seconds are probably still being copied: measuring them now
@@ -168,31 +168,32 @@ pub fn start_scan(ctx: Ctx) {
             lib.scanning = false;
             std::mem::take(&mut lib.rescan_pending)
         };
-        let found = state.remap_queue(&queued);
-        if found > 0 {
-            log::info!("{found} queued songs moved; the queue follows them");
+        // The artists of the new library (the moved songs below are matched by them).
+        crate::identity::rebuild_now(&ctx);
+        // The queue, the playlists and the favourites and ratings follow songs whose files moved
+        // (only where it's certain which song is theirs now; the others keep their old ids).
+        let followed = state.follow_moved(&queued, &listed);
+        // Songs of a restored backup not found yet (nothing to do without any).
+        crate::backup::retry_pending(&ctx);
+        if followed.queue > 0 {
+            log::info!("{} queued songs moved; the queue follows them", followed.queue);
         }
-        // Playlists follow them too (songs that can't be found stay, under their old ids).
-        let followed = state.remap_playlists(&listed);
-        if followed > 0 {
-            log::info!("{followed} playlist entries moved; the playlists follow them");
+        if followed.playlists > 0 {
+            log::info!("{} playlist entries moved; the playlists follow them", followed.playlists);
             ctx.emit("playlists-changed", ());
         }
-        // Favourites and ratings follow songs whose files moved.
-        let relinked = {
-            let lib = state.library.lock();
-            state.marks.lock().relink(&lib.snapshot.tracks)
-        };
-        if relinked > 0 {
-            log::info!("{relinked} rated or favourite songs moved; their marks follow them");
-            state.save_marks();
+        if followed.marks > 0 {
+            log::info!("{} rated or favourite songs moved; their marks follow them", followed.marks);
         }
-        if unchanged && found == 0 && relinked == 0 && followed == 0 {
+        let (found, relinked) = (followed.queue, followed.marks);
+        if unchanged && found == 0 && relinked == 0 && followed.playlists == 0 {
             log::info!("rescan found no changes");
             ctx.emit("library-scanned", ());
         } else {
             state.save_library();
             ctx.emit("library-changed", ());
+            // Waveforms of songs no longer in the library.
+            crate::waveform::prune_later(&ctx);
         }
         if WATCH_AFTER_SCAN.swap(false, Ordering::SeqCst) {
             watch_folders(ctx.clone());
@@ -204,6 +205,8 @@ pub fn start_scan(ctx: Ctx) {
             if state.settings.lock().fix_tags_online {
                 crate::libfix::artist_check_auto(&ctx);
             }
+            // Names MusicBrainz hasn't been asked about (it waits for the jobs above).
+            crate::musicbrainz::auto(&ctx);
             start_analysis(ctx);
         }
     });
@@ -214,6 +217,9 @@ pub fn start_scan(ctx: Ctx) {
 pub fn start_analysis(ctx: Ctx) {
     let state = ctx.state.clone();
     let mut waiting = false;
+    // Songs whose seek-bar waveform can be drawn from the same decode (`waveform`). Not CUE-sheet
+    // songs: their path is the whole album's file; they're drawn span by span when needed.
+    let waves: std::collections::HashMap<String, crate::waveform::Stamp>;
     let todo: Vec<(String, Vec<(String, String)>)> = {
         let mut lib = state.library.lock();
         if lib.analyzing {
@@ -255,6 +261,13 @@ pub fn start_analysis(ctx: Ctx) {
             return;
         }
         lib.analyzing = true;
+        waves = missing
+            .iter()
+            .flat_map(|(_, tracks)| tracks)
+            .filter_map(|(id, _)| lib.by_id.get(id).map(|&i| &lib.snapshot.tracks[i]))
+            .filter(|t| t.cue.is_none())
+            .map(|t| (t.id.clone(), crate::waveform::Stamp::of(t)))
+            .collect();
         missing
     };
     if waiting {
@@ -267,11 +280,23 @@ pub fn start_analysis(ctx: Ctx) {
         // The background threads only measure; this thread files the results, so they never hold
         // a lock the UI or playback is waiting for.
         let (tx, rx) = crossbeam_channel::unbounded();
+        let data_dir = state.data_dir.clone();
         background_pool().spawn(move || {
             todo.into_par_iter().for_each_with(tx, |tx, (_, tracks)| {
                 let paths: Vec<&Path> = tracks.iter().map(|(_, p)| Path::new(p.as_str())).collect();
-                let measured = measure_album(&paths);
-                let _ = tx.send((tracks, measured));
+                let want: Vec<bool> = tracks
+                    .iter()
+                    .map(|(id, _)| waves.get(id).is_some_and(|&s| !crate::waveform::has(&data_dir, id, s)))
+                    .collect();
+                let (per_track, album, envelopes) = crate::audio::loudness::measure_album_with(&paths, &want);
+                for ((id, _), e) in tracks.iter().zip(&envelopes) {
+                    if let (Some(e), Some(&s)) = (e, waves.get(id))
+                        && let Err(err) = crate::waveform::save(&data_dir, id, s, e)
+                    {
+                        log::warn!("can't save the waveform of {id}: {err}");
+                    }
+                }
+                let _ = tx.send((tracks, (per_track, album)));
             });
         });
         let mut done = 0;

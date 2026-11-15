@@ -538,7 +538,7 @@ const UNTAGGED_SAME_LENGTH: f64 = 15.0;
 /// it's written in Japanese, Chinese or Korean ones (りりあ。 → "riria").
 fn artist_keys(credit: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for name in crate::autotag::split_credit(&credit.replace('×', "/")) {
+    for name in crate::identity::split_names(credit) {
         if crate::autotag::cjk(&name) {
             let latin = crate::romanize::lines(std::slice::from_ref(&name));
             if let Some(l) = latin.first().map(|l| match_key(l)).filter(|l| !l.is_empty()) {
@@ -553,7 +553,8 @@ fn artist_keys(credit: &str) -> Vec<String> {
 
 /// Whether two artist credits share an artist (across scripts: りりあ。 and Riria.).
 pub(crate) fn same_artist_credit(a: &str, b: &str) -> bool {
-    shares_artist(&artist_keys(a), &artist_keys(b))
+    // One artist under two spellings (`identity`), then the looser checks for untagged copies.
+    crate::identity::current().same_artist(a, b) || shares_artist(&artist_keys(a), &artist_keys(b))
 }
 
 fn shares_artist(a: &[String], b: &[String]) -> bool {
@@ -762,6 +763,9 @@ pub fn remove(ctx: &Ctx, ids: &[String]) -> Removed {
                 out.deleted += 1;
                 out.freed += t.size;
                 rec.removed(&t.path);
+                // The queue and playlists follow it to the copy that stayed, for sure (the rescan
+                // after this doesn't have to guess).
+                crate::state::remember_moves([(t.id.as_str(), copy.id.as_str())]);
                 // Kept with the change, so Undo gives the mark back to the file.
                 let passed = state.marks.lock().pass_on(&t.id, &copy);
                 if let Some(p) = passed {

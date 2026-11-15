@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import AlbumCard from "#lib/components/AlbumCard.svelte";
+  import Icon from "#lib/components/Icon.svelte";
   import Select from "#lib/components/Select.svelte";
   import { app } from "#lib/store.svelte.js";
   import type { Album } from "#lib/api.js";
@@ -70,7 +71,8 @@
     const out: { label: string; albums: Album[] }[] = [];
     for (const a of shown) {
       const l = label(a.added);
-      if (out.at(-1)?.label === l) out.at(-1)!.albums.push(a);
+      const prev = out[out.length - 1];
+      if (prev?.label === l) prev.albums.push(a);
       else out.push({ label: l, albums: [a] });
     }
     return out;
@@ -84,7 +86,15 @@
       <p class="secondary count">{app.albums.length} albums</p>
     </div>
     {#if !recent}
-      <label class="sort"><span>Sort by</span><Select label="Sort albums" options={sorts} value={sort} onchange={(v) => (sort = v)} width="190px" /></label>
+      <div class="tools">
+        <button class="pill ghost" onclick={() => app.shuffleAlbums(app.albums)} disabled={!app.albums.length} title="A random album, whole and in order, then another: every album once">
+          <Icon name="shuffle" size={15} />Shuffle albums
+        </button>
+        <button class="pill ghost" onclick={() => app.surpriseAlbum(app.albums)} disabled={!app.albums.length} title="Play one album, picked at random">
+          <Icon name="sparkle" size={15} />Surprise me
+        </button>
+        <label class="sort"><span>Sort by</span><Select label="Sort albums" options={sorts} value={sort} onchange={(v) => (sort = v)} width="190px" /></label>
+      </div>
     {/if}
   </header>
 
@@ -113,6 +123,13 @@
   .count {
     margin: 6px 0 0;
     font-size: 13px;
+  }
+  .tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
   }
   .sort {
     display: flex;

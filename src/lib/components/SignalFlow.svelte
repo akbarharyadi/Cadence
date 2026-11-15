@@ -1,6 +1,7 @@
 <script lang="ts">
   // What happens to the music on its way to the speakers, as a row of stages.
   import { db, khz } from "#lib/api.js";
+  import { shortDeviceName } from "#lib/devices.js";
   import { app, signalPath, systemMixer } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
 
@@ -20,6 +21,8 @@
     active: boolean;
     /** Changes the samples (vs. a pass-through). */
     alters: boolean;
+    /** Tooltip, when it isn't the value. */
+    title?: string;
   }
 
   const stages = $derived.by<Stage[]>(() => {
@@ -64,7 +67,9 @@
         id: "output",
         icon: "speaker",
         name: o.mode === "exclusive" ? `Direct, ${o.bits ?? 24}-bit/${khz(o.sampleRate)}` : systemMixer[0].toUpperCase() + systemMixer.slice(1),
-        value: o.device.replace(/\s*\(.*\)\s*$/, ""),
+        // The device itself ("Speakers (FiiO K7)" → "FiiO K7"); the full name is its tooltip.
+        value: shortDeviceName(o.device || s?.device?.name),
+        title: o.device || s?.device?.name || "",
         active: true,
         alters: false,
       },
@@ -94,7 +99,7 @@
           <button class="stage" class:active={st.active} class:alters={st.alters} onclick={() => onstage?.(st.id)} disabled={!onstage || st.id === "file" || st.id === "output"}>
             <span class="ico"><Icon name={st.icon} size={18} /></span>
             <span class="name">{st.name}</span>
-            <span class="value" title={st.value}>{st.value}</span>
+            <span class="value" title={st.title || st.value}>{st.value}</span>
           </button>
         </li>
       {/each}

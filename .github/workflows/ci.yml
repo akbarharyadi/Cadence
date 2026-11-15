@@ -1,0 +1,92 @@
+# Checks every push to main and every pull request: the frontend (type check + tests) and the Rust unit tests.
+# The release workflow (release.yml) only runs on version tags; this one tells you a change is broken first.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # Website and documentation edits can't break the app.
+    paths-ignore:
+      - "site/**"
+      - "docs/**"
+      - "*.md"
+      - "**/*.md"
+  pull_request:
+    paths-ignore:
+      - "site/**"
+      - "docs/**"
+      - "*.md"
+      - "**/*.md"
+
+permissions:
+  contents: read
+
+# A newer push to the same branch (or pull request) replaces the run that is still going.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (check and tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+        with:
+          version: 10
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # svelte-kit sync + svelte-check: must end with 0 errors and 0 warnings.
+      - run: pnpm check
+
+      # Vitest in jsdom: no webview, no Rust (the backend is mocked with Tauri's mockIPC).
+      - run: pnpm test
+
+  rust:
+    name: Rust unit tests
+    # The same image as the Linux release build, so the system packages match.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            libasound2-dev libdbus-1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          # Pinned to a commit, the action can't tell the toolchain from its ref: name it.
+          toolchain: stable
+
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      # The Japanese dictionary (lindera IPADIC), downloaded and built once: see src-tauri/.cargo/config.toml.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: src-tauri/lindera-cache
+          key: lindera-ipadic-6.2
+
+      # tauri.conf.json points frontendDist at ../build; the app's build script wants the folder to
+      # exist, and the unit tests don't use the page, so an empty one is enough (no pnpm build).
+      - name: Placeholder for the built frontend
+        run: |
+          mkdir -p build
+          echo '<!doctype html>' > build/index.html
+
+      - name: cargo test --lib
+        working-directory: src-tauri
+        run: cargo test --lib --locked

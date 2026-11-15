@@ -42,21 +42,31 @@ function text(v: unknown): string {
 
 /** Takes out what looks like a place on the disk (folder and file names say a lot about a
  *  person's music): "D:\Music\Artist\01 Song.flac" becomes "<path>.flac". */
-// Folders (names may have spaces), then the last part: up to its extension, or the next space.
-const REST = String.raw`(?:[^\\/\r\n"'“”<>|]*[\\/])*(?:[^\\/\r\n"'“”<>|]*?\.[A-Za-z0-9]{2,5}\b|[^\\/\r\n"'“”<>|:;,()]*)`;
+// No lookbehind anywhere in here: WebKit before Safari 16.4 can't even parse one, and this file
+// loads before anything can catch the error.
+// Folders (names may have spaces; a name can't hold ":"), then the last part: either a file name
+// (dots allowed, a few words at most) ending in an extension, which is kept, or, for a folder
+// with no extension, up to four words, never the rest of the message.
+const NAME = String.raw`[^\\/\r\n"'“”<>|:]`;
+const WORD = String.raw`[^\\/\s"'“”<>|:;,()]`;
+const REST =
+  String.raw`(?:${NAME}*[\\/])*(?:${NAME}{0,120}?(\.[A-Za-z0-9]{2,5})(?![A-Za-z0-9]|\.[A-Za-z0-9])|${WORD}+(?:[ \t]+${WORD}+){0,3})`;
 const WINDOWS_PATH = new RegExp(String.raw`(?:\b[A-Za-z]:[\\/]|\\\\[^\\\s]+\\)` + REST, "g");
-const UNIX_PATH = new RegExp(String.raw`(?<![:/\w])/(?:storage|sdcard|home|Users|mnt|media|Volumes|run|data|tmp|var)/` + REST, "g");
+// Any root: "/" + a folder + "/" + the rest. Not after a letter, digit, ":", "/" or "." (so not
+// inside a URL or a date); the character before is captured and kept.
+const UNIX_PATH = new RegExp(String.raw`(^|[^:/\w.\\])/[^\\/\s"'“”<>|:]+/` + REST, "g");
 
 export function scrubPaths(s: string): string {
-  const ext = (p: string) => p.match(/\.[A-Za-z0-9]{2,5}$/)?.[0] ?? "";
   return (
     s
       // Files shown through Tauri's asset protocol (the path is in the URL, encoded).
       .replace(/\b(?:https?:\/\/asset\.localhost|asset:\/\/localhost)\/[^\s"')]+/gi, "<file>")
+      // file:///C:/… and Android's content://… URIs.
+      .replace(/\b(?:file:\/\/\/?|content:\/\/)[^\s"')]+/gi, "<file>")
       // Windows: C:\…, C:/…, \\server\share\…
-      .replace(WINDOWS_PATH, (p) => `<path>${ext(p)}`)
-      // Android, Linux, macOS: the usual places music is kept.
-      .replace(UNIX_PATH, (p) => `<path>${ext(p)}`)
+      .replace(WINDOWS_PATH, (_p, ext?: string) => `<path>${ext ?? ""}`)
+      // Android, Linux, macOS: under any root.
+      .replace(UNIX_PATH, (_p, pre: string, ext?: string) => `${pre}<path>${ext ?? ""}`)
   );
 }
 

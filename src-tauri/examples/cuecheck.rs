@@ -25,6 +25,7 @@ fn main() {
             tone: None,
             start: t.cue.unwrap().start,
             end: t.cue.unwrap().end,
+            ..Default::default()
         })
         .collect();
     let engine = Engine::start(0.03, DspSettings::default(), Repeat::Off, false, |_| {});

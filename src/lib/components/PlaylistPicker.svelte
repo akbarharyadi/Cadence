@@ -28,11 +28,24 @@
     }
   }
 
-  async function add(p: Playlist) {
+  /** Songs the playlist already has: ask before adding them again (another version of a song is a
+   *  fine reason to). Nothing is remembered: the question comes every time. */
+  let confirm = $state<{ p: Playlist; dup: number; total: number } | null>(null);
+  function ask(p: Playlist) {
     if (busy) return;
+    const ids = new Set(tracks.map((t) => t.id));
+    const have = new Set(p.trackIds);
+    const dup = [...ids].filter((id) => have.has(id)).length;
+    if (dup === 0) add(p, "skip");
+    else confirm = { p, dup, total: ids.size };
+  }
+
+  async function add(p: Playlist, dupes: "skip" | "add") {
+    if (busy) return;
+    confirm = null;
     busy = true;
     try {
-      await app.addToPlaylist(p, tracks);
+      await app.addToPlaylist(p, tracks, dupes);
       close();
     } catch (e) {
       error = `Couldn’t add to “${p.name}”: ${e}`;
@@ -55,7 +68,7 @@
     <ul>
       {#each lists as p (p.id)}
         <li>
-          <button onclick={() => add(p)} disabled={busy}>
+          <button onclick={() => ask(p)} disabled={busy}>
             <Icon name="playlist" size={18} />
             <span class="name">{p.name}</span>
             <span class="count">{countOf(p)} {countOf(p) === 1 ? "song" : "songs"}</span>
@@ -67,6 +80,22 @@
     <p class="empty">You don’t have any playlists yet. Name one above to start it with {tracks.length === 1 ? "this song" : "these songs"}.</p>
   {/if}
 </Modal>
+
+{#if confirm}
+  {@const c = confirm}
+  <Modal title="Already in this playlist" onclose={() => (confirm = null)} width="440px">
+    <p class="ask">
+      {#if c.total === 1}“{tracks[0]?.title}” is already in “{c.p.name}”.
+      {:else if c.dup === c.total}All {c.total} songs are already in “{c.p.name}”.
+      {:else}{c.dup} of {c.total} songs are already in this playlist.{/if}
+    </p>
+    {#snippet footer()}
+      <button class="pill ghost" onclick={() => (confirm = null)}>Cancel</button>
+      {#if c.dup < c.total}<button class="pill ghost" onclick={() => add(c.p, "skip")}>Skip duplicates</button>{/if}
+      <button class="pill" onclick={() => add(c.p, "add")}>Add anyway</button>
+    {/snippet}
+  </Modal>
+{/if}
 
 <style>
   .new {
@@ -117,5 +146,9 @@
   .empty {
     color: var(--text-2);
     font-size: 13px;
+  }
+  .ask {
+    margin: 4px 0 6px;
+    color: var(--text-2);
   }
 </style>

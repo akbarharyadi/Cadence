@@ -173,7 +173,7 @@ pub fn pools(input: Input) -> Vec<Pool> {
                 if p.total >= 2 && now.saturating_sub(p.last) >= 60 * DAY { p.total as f64 } else { 0.0 }
             }),
             Lane::DeepCuts => {
-                let artist_plays = by_artist.get(&artist_key(c)).copied().unwrap_or(0);
+                let artist_plays = artist_of.get(c.track.id.as_str()).and_then(|a| by_artist.get(a)).copied().unwrap_or(0);
                 if p.map_or(0, |p| p.total) <= 1 && artist_plays >= 3 { 1.0 } else { 0.0 }
             }
             Lane::Elsewhere => match &quiet {
@@ -210,7 +210,8 @@ pub fn pools(input: Input) -> Vec<Pool> {
         let mut per_artist: HashMap<String, usize> = HashMap::new();
         let mut songs = Vec::new();
         for (_, c) in order {
-            let a = artist_key(c);
+            // (Worked out once per song above, not for every pool.)
+            let a = artist_of.get(c.track.id.as_str()).cloned().unwrap_or_else(|| artist_key(c));
             let cap = if leads.contains(&a) { 1 } else { PER_ARTIST };
             let n = per_artist.entry(a).or_default();
             if *n < cap {
@@ -261,8 +262,10 @@ pub fn pools(input: Input) -> Vec<Pool> {
     out
 }
 
+/// Who leads the song's credit, one key for every spelling of an artist (`identity`): the
+/// per-artist caps and the lanes' artist rules count 米津玄師 and Kenshi Yonezu as one.
 pub fn artist_key(c: &Candidate) -> String {
-    c.track.artist.trim().to_lowercase()
+    crate::identity::current().primary_key(&c.track.artist)
 }
 
 #[cfg(test)]
@@ -342,6 +345,26 @@ mod tests {
             // A different lane leads off each day.
             assert_eq!(pools[0].lane, Lane::DAILY[day as usize], "day {day}");
         }
+    }
+
+    #[test]
+    fn one_artist_under_two_spellings_is_capped_once() {
+        crate::identity::set_for_test(Some(crate::identity::Identity::from_pairs(&[("米津玄師", "Kenshi Yonezu")])));
+        let mut tracks: Vec<Candidate> = (0..20).map(|n| song("米津玄師", n)).collect();
+        tracks.extend((0..20).map(|n| song("Kenshi Yonezu", n)));
+        tracks.extend((0..20).map(|n| song("Kenshi Yonezu feat. DAOKO", n)));
+        for a in 0..12 {
+            tracks.extend((0..4).map(|n| song(&format!("B{a}"), n)));
+        }
+        assert_eq!(artist_key(&tracks[0]), artist_key(&tracks[20]));
+        assert_eq!(artist_key(&tracks[0]), artist_key(&tracks[40]));
+        let pools = pools(Input { tracks, events: &[], now: 400 * DAY, utc_offset: 0, clusters: Vec::new(), recent: HashSet::new(), seed: 3, day: 0 });
+        assert!(!pools.is_empty());
+        for p in &pools {
+            let yonezu = p.songs.iter().filter(|c| c.track.artist.contains("Yonezu") || c.track.artist == "米津玄師").count();
+            assert!(yonezu <= PER_ARTIST, "{yonezu} songs of one artist in a pool");
+        }
+        crate::identity::set_for_test(None);
     }
 
     /// Run by hand: today's pools from the real library (CADENCE_DATA=...\com.cadence.player).

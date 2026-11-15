@@ -595,7 +595,8 @@ fn has_lyrics(cache: &Path, track: &Track) -> bool {
         .or_else(|| crate::lyrics::saved(cache, &track.id, &track.title))
         // (Lyrics in the file or beside it belong to the whole album file, not to one of its songs.)
         .or_else(|| if track.cue.is_some() { None } else { crate::lyrics::local(Path::new(&track.path)) })
-        .is_some_and(|l| !l.instrumental && !l.is_empty())
+        // Word timings from the source already (LRCLIB word by word, enhanced LRC): nothing to listen for.
+        .is_some_and(|l| !l.instrumental && !l.is_empty() && crate::lyrics::needs_alignment(&l))
 }
 
 /// The songs a batch listens to: with lyrics, not listened to yet, not skipped; most-played and

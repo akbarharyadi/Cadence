@@ -69,8 +69,9 @@ pub fn lines(lines: &[String]) -> Vec<String> {
 
 // ---------- Japanese ----------
 
+static SEG: OnceLock<Option<Segmenter>> = OnceLock::new();
+
 fn segmenter() -> Option<&'static Segmenter> {
-    static SEG: OnceLock<Option<Segmenter>> = OnceLock::new();
     SEG.get_or_init(|| match load_dictionary("embedded://ipadic") {
         Ok(d) => Some(Segmenter::new(Mode::Normal, d, None)),
         Err(e) => {
@@ -96,7 +97,10 @@ struct Word {
 }
 
 fn words(line: &str) -> Option<Vec<Word>> {
-    let seg = segmenter()?;
+    words_with(segmenter()?, line)
+}
+
+fn words_with(seg: &Segmenter, line: &str) -> Option<Vec<Word>> {
     let mut tokens = seg.segment(Cow::Borrowed(line)).ok()?;
     // The word before was a prefix (薄 in 薄明かり): this one joins it.
     let mut after_prefix = false;
@@ -148,6 +152,64 @@ pub(crate) fn reading(text: &str) -> String {
             .collect(),
         None => kakasi::convert(text).hiragana,
     }
+}
+
+/// How each piece of Japanese is read, in Latin letters (Hepburn, folded later by the caller),
+/// for search: one dictionary for the whole batch. The lyrics view's dictionary is used when it's
+/// loaded already; otherwise one is loaded for the batch and let go after it (it's large).
+pub(crate) fn readings_for_search(texts: &[String]) -> Vec<String> {
+    let local;
+    let seg = match SEG.get().and_then(Option::as_ref) {
+        Some(s) => s,
+        None => match load_dictionary("embedded://ipadic") {
+            Ok(d) => {
+                local = Segmenter::new(Mode::Normal, d, None);
+                &local
+            }
+            Err(e) => {
+                log::warn!("no Japanese dictionary: {e}");
+                return texts.iter().map(|t| kana_romaji(&kakasi::convert(t).hiragana)).collect();
+            }
+        },
+    };
+    texts
+        .iter()
+        .map(|t| {
+            let kana: String = match words_with(seg, t) {
+                Some(ws) => ws
+                    .iter()
+                    .map(|w| match &w.reading {
+                        Some(r) => to_hiragana(r),
+                        None if w.surface.chars().any(|c| is_han(c) || is_kana(c)) => kakasi::convert(&w.surface).hiragana,
+                        None => format!(" {} ", w.surface),
+                    })
+                    .collect(),
+                None => kakasi::convert(t).hiragana,
+            };
+            kana_romaji(&kana)
+        })
+        .collect()
+}
+
+/// Hanzi as toneless pinyin, a space between syllables ("东京" → "dong jing"); None without hanzi.
+pub(crate) fn pinyin_plain(s: &str) -> Option<String> {
+    if !s.chars().any(is_han) {
+        return None;
+    }
+    let mut out = String::new();
+    for c in s.chars() {
+        match c.to_pinyin() {
+            Some(p) => {
+                if !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                out.push_str(p.plain());
+                out.push(' ');
+            }
+            None => out.push(c),
+        }
+    }
+    Some(out.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 fn japanese(line: &str) -> String {
@@ -470,5 +532,263 @@ fn dump_song() {
         v["lyrics"]["synced"].as_array().unwrap().iter().map(|l| l["text"].as_str().unwrap_or("").to_string()).filter(|l| !l.is_empty()).collect();
     for (l, r) in text.iter().zip(lines(&text)) {
         println!("{l}\n   {r}");
+    }
+}
+
+// ---------- readings above the characters (furigana, pinyin) ----------
+
+/// A piece of a line: its text, and the reading shown above it (None: nothing above). A line's
+/// pieces together are the line, character for character.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct RubyPart {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ruby: Option<String>,
+}
+
+fn part(text: &str, ruby: Option<String>) -> RubyPart {
+    RubyPart { text: text.to_string(), ruby }
+}
+
+/// Kanji for this purpose, with the repeat mark 々 and the counter ヶ written between them.
+fn kanji_like(c: char) -> bool {
+    is_han(c) || c == '々' || c == '〆'
+}
+
+/// Readings above the characters of each line: in Japanese, hiragana above the kanji of each word
+/// as the dictionary reads it in context (only the kanji: 優しく is 優(やさ)しく); in Chinese, each
+/// hanzi's pinyin. An empty list for a line that needs none (kana, Latin letters, digits, Korean).
+pub fn ruby(lines: &[String]) -> Vec<Vec<RubyPart>> {
+    match script(lines) {
+        Some(Script::Japanese) => {
+            let seg = segmenter();
+            lines.iter().map(|l| if l.chars().any(kanji_like) { japanese_ruby(seg, l) } else { Vec::new() }).collect()
+        }
+        Some(Script::Chinese) => lines.iter().map(|l| chinese_ruby(l)).collect(),
+        _ => vec![Vec::new(); lines.len()],
+    }
+}
+
+fn chinese_ruby(line: &str) -> Vec<RubyPart> {
+    if !line.chars().any(is_han) {
+        return Vec::new();
+    }
+    let mut out: Vec<RubyPart> = Vec::new();
+    for c in line.chars() {
+        match c.to_pinyin() {
+            Some(p) => out.push(RubyPart { text: c.to_string(), ruby: Some(p.with_tone().to_string()) }),
+            None => match out.last_mut() {
+                Some(last) if last.ruby.is_none() => last.text.push(c),
+                _ => out.push(RubyPart { text: c.to_string(), ruby: None }),
+            },
+        }
+    }
+    out
+}
+
+fn japanese_ruby(seg: Option<&Segmenter>, line: &str) -> Vec<RubyPart> {
+    let mut out: Vec<RubyPart> = Vec::new();
+    let mut push = |p: RubyPart| match (out.last_mut(), &p.ruby) {
+        (Some(last), None) if last.ruby.is_none() => last.text.push_str(&p.text),
+        _ => out.push(p),
+    };
+    let tokens = seg.and_then(|s| s.segment(Cow::Borrowed(line)).ok());
+    let Some(mut tokens) = tokens else {
+        // No dictionary: kakasi's reading of the whole line can't be split up safely.
+        push(part(line, None));
+        return out;
+    };
+    let mut at = 0;
+    for t in tokens.iter_mut() {
+        let (start, end) = (t.byte_start, t.byte_end);
+        if start < at || end > line.len() || !line.is_char_boundary(start) || !line.is_char_boundary(end) {
+            continue;
+        }
+        if start > at {
+            push(part(&line[at..start], None));
+        }
+        let surface = &line[start..end];
+        at = end;
+        if !surface.chars().any(kanji_like) {
+            push(part(surface, None));
+            continue;
+        }
+        let d = t.details();
+        let reading = d.get(7).copied().filter(|r| !r.is_empty() && *r != "*").map(to_hiragana).or_else(|| {
+            let k = kakasi::convert(surface).hiragana;
+            (!k.chars().any(kanji_like)).then_some(k)
+        });
+        match reading {
+            Some(r) => {
+                for p in split_okurigana(surface, &r) {
+                    push(p);
+                }
+            }
+            None => push(part(surface, None)),
+        }
+    }
+    if at < line.len() {
+        push(part(&line[at..], None));
+    }
+    out
+}
+
+/// A word and its reading, with the reading over the kanji only: the kana written in the word
+/// (okurigana and the like) match the same kana in the reading, and the kanji between them take
+/// the rest (取り扱い とりあつかい: 取(と)り扱(あつか)い). When they can't be matched up, the
+/// whole word carries the reading.
+pub(crate) fn split_okurigana(surface: &str, reading: &str) -> Vec<RubyPart> {
+    let reading: Vec<char> = to_hiragana(reading).chars().collect();
+    // Runs of kanji and of everything else.
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    for c in surface.chars() {
+        let k = kanji_like(c);
+        match runs.last_mut() {
+            Some((kk, s)) if *kk == k => s.push(c),
+            _ => runs.push((k, c.to_string())),
+        }
+    }
+    if to_hiragana(surface).chars().eq(reading.iter().copied()) {
+        return vec![part(surface, None)];
+    }
+    fn fit(runs: &[(bool, String)], reading: &[char], out: &mut Vec<(usize, usize)>) -> bool {
+        let Some(((kanji, text), rest)) = runs.split_first() else { return reading.is_empty() };
+        if !kanji {
+            let kana: Vec<char> = to_hiragana(text).chars().collect();
+            if reading.len() >= kana.len() && reading[..kana.len()] == kana[..] {
+                out.push((0, kana.len()));
+                if fit(rest, &reading[kana.len()..], out) {
+                    return true;
+                }
+                out.pop();
+            }
+            return false;
+        }
+        // At least one kana per kanji run, leaving one for each later run.
+        let later = rest.len();
+        for n in 1..=reading.len().saturating_sub(later) {
+            out.push((0, n));
+            if fit(rest, &reading[n..], out) {
+                return true;
+            }
+            out.pop();
+        }
+        false
+    }
+    let mut spans = Vec::new();
+    if !fit(&runs, &reading, &mut spans) {
+        return vec![part(surface, Some(reading.iter().collect()))];
+    }
+    let mut pos = 0;
+    runs.iter()
+        .zip(spans)
+        .map(|((kanji, text), (_, n))| {
+            let r: String = reading[pos..pos + n].iter().collect();
+            pos += n;
+            part(text, kanji.then_some(r))
+        })
+        .collect()
+}
+
+/// Each song's lines read in Latin letters, for finding a song by its lyrics (`lyricindex`):
+/// Japanese with one dictionary for the whole batch (the lyrics view's when it's loaded already,
+/// else one let go after the batch), Chinese as toneless pinyin, Korean romanized; "" for lines
+/// that need none.
+pub(crate) fn readings_for_index(songs: &[Vec<String>]) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = songs.iter().map(|s| vec![String::new(); s.len()]).collect();
+    let mut japanese_lines: Vec<String> = Vec::new();
+    let mut japanese_at: Vec<(usize, usize)> = Vec::new();
+    for (si, lines) in songs.iter().enumerate() {
+        let script = script(lines);
+        for (li, l) in lines.iter().enumerate() {
+            if !l.chars().any(|c| is_kana(c) || is_han(c) || is_hangul(c)) {
+                continue;
+            }
+            match script {
+                Some(Script::Japanese) => {
+                    japanese_lines.push(l.clone());
+                    japanese_at.push((si, li));
+                }
+                Some(Script::Chinese) => out[si][li] = pinyin_plain(l).unwrap_or_default(),
+                Some(Script::Korean) => out[si][li] = tidy(&korean(l)),
+                None => {}
+            }
+        }
+    }
+    if !japanese_lines.is_empty() {
+        for ((si, li), r) in japanese_at.into_iter().zip(readings_for_search(&japanese_lines)) {
+            out[si][li] = r;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod ruby_tests {
+    use super::*;
+
+    fn r(line: &str) -> Vec<(String, Option<String>)> {
+        ruby(&[line.to_string()]).remove(0).into_iter().map(|p| (p.text, p.ruby)).collect()
+    }
+    fn s(t: &str, r: Option<&str>) -> (String, Option<String>) {
+        (t.to_string(), r.map(str::to_string))
+    }
+
+    // Invented lines (no real lyrics in fixtures).
+    #[test]
+    fn kanji_with_okurigana() {
+        assert_eq!(split_okurigana("優しく", "ヤサシク").into_iter().map(|p| (p.text, p.ruby)).collect::<Vec<_>>(), [s("優", Some("やさ")), s("しく", None)]);
+        assert_eq!(
+            split_okurigana("取り扱い", "トリアツカイ").into_iter().map(|p| (p.text, p.ruby)).collect::<Vec<_>>(),
+            [s("取", Some("と")), s("り", None), s("扱", Some("あつか")), s("い", None)]
+        );
+        assert_eq!(split_okurigana("お酒", "オサケ").into_iter().map(|p| (p.text, p.ruby)).collect::<Vec<_>>(), [s("お", None), s("酒", Some("さけ"))]);
+        // Can't be matched up: the whole word carries the reading.
+        assert_eq!(split_okurigana("今日", "キョウ").into_iter().map(|p| (p.text, p.ruby)).collect::<Vec<_>>(), [s("今日", Some("きょう"))]);
+        assert_eq!(split_okurigana("見え", "ミル").into_iter().map(|p| (p.text, p.ruby)).collect::<Vec<_>>(), [s("見え", Some("みる"))]);
+    }
+
+    #[test]
+    fn readings_go_above_kanji_only() {
+        let parts = r("今日は雨が降る");
+        let joined: String = parts.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(joined, "今日は雨が降る", "the pieces are the line");
+        assert!(parts.contains(&s("今日", Some("きょう"))), "{parts:?}");
+        assert!(parts.contains(&s("雨", Some("あめ"))), "{parts:?}");
+        assert!(parts.contains(&s("降", Some("ふ"))), "{parts:?}");
+        // Kana between them carry nothing.
+        assert!(parts.iter().filter(|(_, r)| r.is_none()).all(|(t, _)| !t.chars().any(is_han)));
+        // Mixed with Latin letters and digits: only the kanji.
+        let parts = r("Test 2024 青い空を見上げた");
+        assert_eq!(parts.iter().map(|(t, _)| t.as_str()).collect::<String>(), "Test 2024 青い空を見上げた");
+        assert_eq!(parts[0], s("Test 2024 ", None));
+        assert!(parts.contains(&s("空", Some("そら"))), "{parts:?}");
+    }
+
+    #[test]
+    fn kana_latin_and_numbers_need_nothing() {
+        let lines: Vec<String> = ["ひらがなだけ", "カタカナ", "Hello 123", "青い空"].iter().map(|s| s.to_string()).collect();
+        let out = ruby(&lines);
+        assert!(out[0].is_empty() && out[1].is_empty() && out[2].is_empty());
+        assert!(!out[3].is_empty());
+        assert!(ruby(&["오늘은 비가 온다".to_string()])[0].is_empty());
+    }
+
+    #[test]
+    fn pinyin_above_hanzi() {
+        let out = ruby(&["今天下雨了 ok".to_string()]).remove(0);
+        assert_eq!(out[0], RubyPart { text: "今".into(), ruby: Some("jīn".into()) });
+        assert_eq!(out.last().unwrap(), &RubyPart { text: " ok".into(), ruby: None });
+        assert_eq!(out.iter().map(|p| p.text.as_str()).collect::<String>(), "今天下雨了 ok");
+    }
+
+    #[test]
+    fn index_readings_per_script() {
+        let songs = vec![vec!["今日は雨が降る".to_string(), "rain".to_string()], vec!["今天下雨了".to_string()], vec!["오늘은 비가 온다".to_string()]];
+        let out = readings_for_index(&songs);
+        assert!(out[0][0].contains("ame"), "{:?}", out[0]);
+        assert_eq!(out[0][1], "");
+        assert_eq!(out[1][0], "jin tian xia yu le");
+        assert_eq!(out[2][0], "oneuleun biga onda");
     }
 }

@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from "#lib/components/Icon.svelte";
   import TrackList from "#lib/components/TrackList.svelte";
-  import { app, shuffled } from "#lib/store.svelte.js";
+  import { app } from "#lib/store.svelte.js";
 
   const songs = $derived(app.favorites);
 </script>
@@ -15,7 +15,7 @@
     {#if songs.length}
       <div class="actions">
         <button class="pill" onclick={() => app.playTracks(songs)}><Icon name="play" size={15} />Play</button>
-        <button class="pill ghost" onclick={() => app.playTracks(shuffled(songs))}><Icon name="shuffle" size={15} />Shuffle</button>
+        <button class="pill ghost" onclick={() => app.shuffleTracks(songs)}><Icon name="shuffle" size={15} />Shuffle</button>
       </div>
     {/if}
   </header>

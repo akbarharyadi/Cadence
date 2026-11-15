@@ -83,7 +83,7 @@
       found = f;
       // Sure ones ticked, the rest left for the listener to look at.
       foundOff = new Set(f.filter((x) => !x.sure).map((x) => x.trackId));
-    });
+    }).catch(() => {});
   });
   let covers = $state<{ found: CoverFound[]; missed: string[] }>({ found: [], missed: [] });
   let coversOff = $state<Set<string>>(new Set());
@@ -93,7 +93,7 @@
     api.coversList().then((c) => {
       covers = c;
       coversOff = new Set(c.found.filter((x) => !x.sure).map((x) => x.albumId));
-    });
+    }).catch(() => {});
   });
 
   // Copies to remove: the sure ones ticked, but only where Undo can bring them back. Where removal
@@ -231,6 +231,22 @@
     await api.artistPairDismiss(native, latin);
     loadPairs();
   }
+  /** One artist from now on (one page, counted once), without changing any file. */
+  async function sameArtist(native: string, latin: string) {
+    busy = `same|${native}`;
+    try {
+      await api.artistMarkSame(native, latin);
+      app.showToast(`${native} and ${latin} are shown as one artist (the files keep their names)`, {
+        label: "Undo",
+        run: () => void api.artistForget([[native, latin]]).then(loadPairs).catch((e) => app.showToast(String(e))),
+      });
+    } catch (e) {
+      app.showToast(String(e));
+    } finally {
+      busy = null;
+      loadPairs();
+    }
+  }
 
   async function fixAll() {
     if (!(await api.fixAllStart())) app.showToast("Already looking up songs without info");
@@ -298,7 +314,7 @@
   let changesOpen = $state(false);
   $effect(() => {
     void app.changesVersion;
-    api.recentChanges().then((c) => (changes = c));
+    api.recentChanges().then((c) => (changes = c)).catch(() => {});
   });
   const when = (at: number) => {
     const m = Math.round((Date.now() / 1000 - at) / 60);
@@ -525,7 +541,8 @@
       <section>
         <p class="secondary about">
           Some songs name the artist in Japanese or Chinese letters and others in Latin ones, so the artist shows up twice. Pick the name all
-          their songs should have. (New names are checked with the catalogue after each scan.)
+          their songs should have, or treat them as the same artist without changing the files. (New names are checked with the catalogue
+          after each scan.)
         </p>
         {#each pairs as p (p.native + p.latin)}
           <div class="row" tabindex="-1" data-row>
@@ -543,6 +560,7 @@
               {:else}
                 <button class="pill ghost small" data-primary disabled={busy !== null} onclick={() => (confirming = { from: p.native, to: p.latin, songs: p.nativeSongs })}>Use {p.latin}</button>
                 <button class="pill ghost small" disabled={busy !== null} onclick={() => (confirming = { from: p.latin, to: p.native, songs: p.latinSongs })}>Use {p.native}</button>
+                <button class="pill ghost small" disabled={busy !== null} onclick={() => sameArtist(p.native, p.latin)} title="Show them as one artist without changing the files">Treat as the same artist</button>
                 <button class="pill ghost small" data-ignore disabled={busy !== null} onclick={() => notSame(p.native, p.latin)} title="They're different artists: don't suggest this again">Not the same</button>
               {/if}
             </div>

@@ -3,6 +3,7 @@
   import Icon from "#lib/components/Icon.svelte";
   import TrackList from "#lib/components/TrackList.svelte";
   import { app } from "#lib/store.svelte.js";
+  import { untrack } from "svelte";
 
   let { id }: { id: string } = $props();
   const seed = $derived(app.trackById.get(id));
@@ -14,7 +15,9 @@
     const current = id;
     // Look again when analysis finishes, in case this song wasn't analysed yet.
     void app.sonic?.analyzed;
-    if (!app.trackById.has(current)) return;
+    void app.loaded; // the library arriving (once) starts it when the page opened first
+    // Untracked: the library reloads often (downloads landing); only a new seed song asks again.
+    if (!untrack(() => app.trackById.has(current))) return;
     api
       .similarTracks(current, 40)
       .then((r) => {

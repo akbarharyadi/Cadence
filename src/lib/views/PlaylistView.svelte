@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { artUrl, formatDuration, type Playlist, type Track } from "#lib/api.js";
+  import { artUrl, formatDuration, type Album, type Playlist, type Track } from "#lib/api.js";
   import Icon from "#lib/components/Icon.svelte";
   import Modal from "#lib/components/Modal.svelte";
   import TrackList from "#lib/components/TrackList.svelte";
+  import { startExport } from "#lib/playlistTransfer.svelte.js";
   import { describe, evaluate } from "#lib/smart.js";
-  import { app, shuffled } from "#lib/store.svelte.js";
+  import { app } from "#lib/store.svelte.js";
 
   let { id }: { id: string } = $props();
   const p = $derived(app.playlists.find((x) => x.id === id));
@@ -21,6 +22,8 @@
   const missing = $derived(!p || p.smart ? 0 : p.trackIds.length - rows.length);
   const covers = $derived([...new Set(tracks.map((t) => app.albumById.get(t.albumId)?.artSmall).filter(Boolean))].slice(0, 4) as string[]);
   const time = $derived(tracks.reduce((s, t) => s + t.duration, 0));
+  /** The albums the playlist's songs come from (for "Shuffle albums": each played whole). */
+  const albums = $derived([...new Set(tracks.map((t) => t.albumId))].map((id) => app.albumById.get(id)).filter((a): a is Album => !!a));
 
   let renaming = $state(false);
   let nameInput = $state("");
@@ -42,15 +45,29 @@
     }
   }
 
-  /** `from` and `to` are row numbers in what's shown; the splice uses their real places in the list. */
-  async function reorder(from: number, to: number) {
+  /** `from` and `to` are row numbers in what's shown; the splice uses their real places in the list.
+   *  `picked`: several selected rows dragged together; they land as a block, in their order, before
+   *  the drop row when dragged up and after it when dragged down (like one row does). */
+  async function reorder(from: number, to: number, picked?: number[]) {
     if (!p || p.smart) return;
     const a = rows[from]?.pos;
     const b = rows[to]?.pos;
     if (a === undefined || b === undefined || a === b) return;
-    const ids = [...p.trackIds];
-    const [moved] = ids.splice(a, 1);
-    ids.splice(b, 0, moved);
+    let ids = [...p.trackIds];
+    if (picked && picked.length > 1) {
+      const moving = new Set(picked.flatMap((r) => (rows[r] ? [rows[r].pos] : [])));
+      if (moving.has(b)) return;
+      const block = ids.filter((_, k) => moving.has(k));
+      // Ids the library doesn't have aren't rows: they stay where they are among the rest.
+      const rest = ids.filter((_, k) => !moving.has(k));
+      let at = b;
+      for (const k of moving) if (k < b) at--;
+      rest.splice(to > from ? at + 1 : at, 0, ...block);
+      ids = rest;
+    } else {
+      const [moved] = ids.splice(a, 1);
+      ids.splice(b, 0, moved);
+    }
     try {
       await app.savePlaylist({ ...p, trackIds: ids });
     } catch (e) {
@@ -58,18 +75,30 @@
     }
   }
 
-  async function removeAt(i: number) {
+  /** Takes rows (numbers in what's shown) out of the playlist, by their real places; Undo puts the list back. */
+  async function removeRows(picked: number[]) {
     if (!p || p.smart) return;
-    const pos = rows[i]?.pos;
-    if (pos === undefined) return;
-    const ids = [...p.trackIds];
-    ids.splice(pos, 1);
+    const gone = new Set(picked.flatMap((r) => (rows[r] ? [rows[r].pos] : [])));
+    if (!gone.size) return;
+    const before = [...p.trackIds];
+    const one = gone.size === 1 ? app.trackById.get(before[[...gone][0]]) : undefined;
+    const ids = before.filter((_, k) => !gone.has(k));
     try {
-      await app.savePlaylist({ ...p, trackIds: ids });
+      const saved = await app.savePlaylist({ ...p, trackIds: ids });
+      app.showToast(one ? `Removed “${one.title}” from “${saved.name}”` : `Removed ${gone.size} songs from “${saved.name}”`, {
+        label: "Undo",
+        run: () => {
+          app.toast = app.toastAction = null;
+          const now = app.playlists.find((x) => x.id === saved.id);
+          if (now) void app.savePlaylist({ ...now, trackIds: before }).catch((e) => app.showToast(`Couldn’t put them back: ${e}`));
+        },
+      });
     } catch (e) {
-      app.showToast(`Couldn’t remove the song: ${e}`);
+      app.showToast(`Couldn’t remove ${gone.size === 1 ? "the song" : "the songs"}: ${e}`);
     }
   }
+
+  const removeAt = (i: number) => removeRows([i]);
 
   function deleteList() {
     if (!p) return;
@@ -108,11 +137,17 @@
         <p class="facts">{tracks.length} {tracks.length === 1 ? "song" : "songs"}{time ? `, ${formatDuration(time)}` : ""}{#if missing}<span title="These songs aren’t in your library right now. They stay in the playlist in case the files come back."> · {missing} {missing === 1 ? "song" : "songs"} missing</span>{/if}</p>
         <div class="actions">
           <button class="pill" onclick={() => app.playTracks(tracks)} disabled={!tracks.length}><Icon name="play" size={15} />Play</button>
-          <button class="pill ghost" onclick={() => app.playTracks(shuffled(tracks))} disabled={!tracks.length}><Icon name="shuffle" size={15} />Shuffle</button>
+          <button class="pill ghost" onclick={() => app.shuffleTracks(tracks)} disabled={!tracks.length}><Icon name="shuffle" size={15} />Shuffle</button>
+          {#if albums.length > 1}
+            <button class="pill ghost" onclick={() => app.shuffleAlbums(albums)} title="The albums these songs are from, each played whole and in order, in a random order">
+              <Icon name="album" size={15} />Shuffle albums
+            </button>
+          {/if}
           {#if p.smart}
             <button class="pill ghost" onclick={() => (app.smartEditing = structuredClone($state.snapshot(p)))}><Icon name="edit" size={15} />Edit rules</button>
           {/if}
           <button class="icon-btn" onclick={startRename} aria-label="Rename" title="Rename"><Icon name="edit" size={17} /></button>
+          <button class="icon-btn" onclick={() => startExport(p)} aria-label="Export playlist" title="Export…"><Icon name="download" size={17} /></button>
           <button class="icon-btn" onclick={() => (confirming = true)} aria-label="Delete playlist" title="Delete playlist"><Icon name="trash" size={17} /></button>
         </div>
       </div>
@@ -125,6 +160,7 @@
           showArt
           showAlbum
           onreorder={p.smart ? undefined : reorder}
+          onremove={p.smart ? undefined : removeRows}
           extraMenu={p.smart ? undefined : (_t, i) => [{ label: "Remove from this playlist", icon: "trash", action: () => removeAt(i) }]}
         />
         {#if !p.smart}<p class="hint">Drag songs to change the order.</p>{/if}

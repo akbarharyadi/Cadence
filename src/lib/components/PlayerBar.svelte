@@ -2,7 +2,7 @@
   import { fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { api, artUrl, formatTime, khz, qualityOf, type Album, type Track } from "#lib/api.js";
-  import { app, shuffled, signalPath, type MenuItem } from "#lib/store.svelte.js";
+  import { app, signalPath, type MenuItem } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import QualityBadge from "./QualityBadge.svelte";
   import SleepLabel from "./SleepLabel.svelte";
@@ -118,7 +118,7 @@
     ]);
   }
   function shuffleLibrary() {
-    if (app.tracks.length) app.playTracks(shuffled(app.tracks));
+    if (app.tracks.length) app.shuffleTracks(app.tracks);
   }
 
   const detail = $derived(s?.source ? `${s.source.bits ? `${s.source.bits}-bit/` : ""}${khz(s.source.sampleRate)}` : "");

@@ -2,11 +2,12 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
-  import { api, db, EQ_BANDS, type Filter, type FilterKind, type LevelingMode, type Preset } from "#lib/api.js";
+  import { api, db, EQ_BANDS, type Filter, type FilterKind, type LevelingMode, type Preset, type QueueOptions } from "#lib/api.js";
   import { autoHeadroom, formatHz } from "#lib/dsp.js";
   import { app } from "#lib/store.svelte.js";
   import EqGraph from "#lib/components/EqGraph.svelte";
   import Icon from "#lib/components/Icon.svelte";
+  import OutputDevice from "#lib/components/OutputDevice.svelte";
   import Segmented from "#lib/components/Segmented.svelte";
   import Select from "#lib/components/Select.svelte";
   import SignalFlow from "#lib/components/SignalFlow.svelte";
@@ -22,6 +23,17 @@
   onMount(async () => {
     presets = await api.eqPresets();
   });
+
+  // Shuffle and the end of the queue (saved with the settings).
+  let queueOptions = $state<QueueOptions | null>(null);
+  onMount(() => {
+    api.queueOptions().then((o) => (queueOptions = o ?? null)).catch(() => {});
+  });
+  function setQueueOptions(change: Partial<QueueOptions>) {
+    if (!queueOptions) return;
+    queueOptions = { ...queueOptions, ...change };
+    api.setQueueOptions(queueOptions);
+  }
 
   const dsp = $derived(app.dsp);
   const eq = $derived(dsp?.eq);
@@ -172,6 +184,13 @@
 
   <SignalFlow onstage={scrollTo} />
 
+  <!-- Output device (Android routes to its devices itself) -->
+  {#if platform !== "android" && platform !== "other"}
+    <section id="sound-device">
+      <OutputDevice windows={platform === "windows"} />
+    </section>
+  {/if}
+
   {#if dsp && eq}
     <!-- Direct output -->
     {#if platform !== "other"}
@@ -252,6 +271,8 @@
               <input type="range" class="slider" min="-6" max="6" step="0.5" value={boost}
                 style="--pct: {((boost + 6) / 12) * 100}%; width: 260px"
                 oninput={(e) => (boostDraft = +e.currentTarget.value)}
+                onpointercancel={() => (boostDraft = null)}
+                onblur={() => (boostDraft = null)}
                 onchange={(e) => {
                   const v = +e.currentTarget.value;
                   boostDraft = null;
@@ -417,6 +438,40 @@
         </div>
       {/if}
     </section>
+
+    <!-- Shuffle and the end of the queue -->
+    {#if queueOptions}
+      <section id="sound-queue">
+        <h2 class="section-title">Shuffle and the end of the queue</h2>
+        <div class="opt">
+          <span class="opt-label">Shuffle</span>
+          <Segmented
+            label="Shuffle"
+            options={[{ value: "balanced", label: "Balanced" }, { value: "random", label: "Fully random" }]}
+            value={queueOptions.shuffleMode}
+            onchange={(v) => setQueueOptions({ shuffleMode: v })}
+          />
+        </div>
+        <p class="hint">
+          {queueOptions.shuffleMode === "balanced"
+            ? "Spreads each artist’s songs out, keeps songs from one album apart, and plays songs you heard recently later."
+            : "Every order is as likely as any other, so an artist can come up several times in a row."}
+        </p>
+        <div class="opt">
+          <span class="opt-label">When the queue ends</span>
+          <Segmented
+            label="When the queue ends"
+            options={[{ value: "stop", label: "Stop" }, { value: "similar", label: "Keep playing similar songs" }]}
+            value={queueOptions.autoplay ? "similar" : "stop"}
+            onchange={(v) => setQueueOptions({ autoplay: v === "similar" })}
+          />
+        </div>
+        <p class="hint">
+          Similar songs are ones that sound like the last few you played, or by the same artists and genres until the sound analysis has reached them.
+          Songs you skip, and songs played in this session or the last few hours, are left out. Not when a song repeats, the sleep timer stopped playback, or you paused.
+        </p>
+      </section>
+    {/if}
 
     <!-- Crossfeed -->
     <section id="sound-crossfeed">

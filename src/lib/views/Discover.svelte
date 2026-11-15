@@ -6,6 +6,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { STORES, type DiscoverBasis, type NewSong, type PlayCount } from "#lib/api.js";
   import Icon from "#lib/components/Icon.svelte";
+  import NewReleases from "#lib/components/NewReleases.svelte";
   import Segmented from "#lib/components/Segmented.svelte";
   import { app } from "#lib/store.svelte.js";
 
@@ -88,6 +89,8 @@
 <div class="page discover">
   <h1 class="page-title">Discover</h1>
   <p class="sub">New songs for you, found on the web by the AI DJ: how close each one is to what you asked for, and where to buy it.</p>
+
+  <NewReleases />
 
   {#if !app.aiReady}
     <div class="setup">

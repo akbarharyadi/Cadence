@@ -1,6 +1,14 @@
 <script lang="ts" module>
   /** The dialogs open now, the newest (top-most) last: Escape closes only that one. */
-  const open: symbol[] = [];
+  const open: { id: symbol; close: () => void }[] = [];
+
+  /** Closes the top-most open dialog (Android Back). False when none is open. */
+  export function closeTopModal(): boolean {
+    const top = open[open.length - 1];
+    if (!top) return false;
+    top.close();
+    return true;
+  }
 </script>
 
 <script lang="ts">
@@ -12,9 +20,9 @@
 
   const me = Symbol("dialog");
   onMount(() => {
-    open.push(me);
+    open.push({ id: me, close: () => onclose() });
     return () => {
-      const i = open.indexOf(me);
+      const i = open.findIndex((m) => m.id === me);
       if (i >= 0) open.splice(i, 1);
     };
   });
@@ -22,7 +30,7 @@
   /** Escape closes the dialog, unless something inside it (an open dropdown, a menu) already
    *  used the key, or another dialog is open on top of it. */
   function onKey(e: KeyboardEvent) {
-    if (e.key !== "Escape" || e.defaultPrevented || open[open.length - 1] !== me) return;
+    if (e.key !== "Escape" || e.defaultPrevented || open[open.length - 1]?.id !== me) return;
     e.preventDefault();
     onclose();
   }

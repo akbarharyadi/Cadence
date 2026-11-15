@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from "#lib/components/Icon.svelte";
   import TrackList from "#lib/components/TrackList.svelte";
-  import { app, shuffled } from "#lib/store.svelte.js";
+  import { app } from "#lib/store.svelte.js";
 
   const songs = $derived([...app.tracks].sort((a, b) => a.title.localeCompare(b.title)));
   const skipped = $derived(songs.filter((t) => app.isSkipped(t)).length);
@@ -16,7 +16,7 @@
     <div class="actions">
       <button class="pill ghost" onclick={() => app.go({ name: "favorites" })}><Icon name="heart" size={15} />Favorites</button>
       <button class="pill" onclick={() => app.playTracks(songs)}><Icon name="play" size={15} />Play</button>
-      <button class="pill ghost" onclick={() => app.playTracks(shuffled(songs))}><Icon name="shuffle" size={15} />Shuffle</button>
+      <button class="pill ghost" onclick={() => app.shuffleTracks(songs)}><Icon name="shuffle" size={15} />Shuffle</button>
     </div>
   </header>
   <TrackList tracks={songs} showArt showAlbum />

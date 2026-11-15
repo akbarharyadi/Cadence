@@ -33,6 +33,8 @@ class Updates {
   next = $state("");
   progress = $state(0);
   message = $state("");
+  /** What the failure in the "error" phase was about: looking for an update, or getting it. */
+  failed = $state<"check" | "install">("check");
   /** The banner was closed for this version. */
   dismissed = $state(false);
   auto = $state(typeof localStorage === "undefined" || localStorage.getItem("cadence-auto-update") !== "off");
@@ -67,6 +69,7 @@ class Updates {
       else await this.checkDesktop();
     } catch (e) {
       this.phase = quiet ? "idle" : "error";
+      this.failed = "check";
       // A release whose build for this computer isn't uploaded yet (older releases were published
       // while still building): not a real problem, it'll be there on a later check.
       this.message = /fallback platforms|platforms` object/.test(String(e))
@@ -159,6 +162,7 @@ class Updates {
           : "Android's installer is open: tap Update there.";
     } catch (e) {
       this.phase = "error";
+      this.failed = "install";
       this.message = `The update didn't download: ${e}`;
     } finally {
       off();

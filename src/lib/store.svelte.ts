@@ -2,6 +2,9 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { flushSync, tick } from "svelte";
 import { eqSync } from "./eq";
+import { pageShowing, setWindowVisible } from "./showing.svelte.js";
+import { closeTopModal } from "./components/Modal.svelte";
+import { leaveSelection } from "./selection";
 
 /** Top-level places (tabs and sidebar): switching between them crossfades instead of sliding. */
 const TOP_LEVEL = new Set(["home", "discover", "stats", "albums", "artists", "songs", "favorites", "health", "recent", "search", "sound", "settings", "library"]);
@@ -100,7 +103,8 @@ function animate(kind: "forward" | "back" | "tab", change: () => void, after?: (
     if (run === transitions) delete root.dataset.nav;
   });
 }
-import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type AttentionState, type DspSettings, type DupGroup, type HealthProgress, type HealthReport, type HistoryStats, type JobProgress, type Mark, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track, type VoiceBatch, type VoiceJob, type VoiceStatus } from "./api";
+import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type AttentionState, type DspSettings, type DupGroup, type HealthProgress, type HealthReport, type HistoryStats, type JobProgress, type Mark, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track, type VoiceBatch, type VoiceJob, type VoiceStatus, type ArtistGroup, type ArtistIdentity, type ArtistNamesStatus, type SearchKeys, type WaveformJob } from "./api";
+import { deviceName } from "./devices";
 
 /** One album (same name, same folder) shown as several: its songs have different album artists. */
 export interface SplitAlbum {
@@ -144,6 +148,8 @@ export interface Artist {
   name: string;
   albums: Album[];
   trackCount: number;
+  /** The artist's other spellings in the library (米津玄師 for Kenshi Yonezu): one artist, one page. */
+  also?: string[];
 }
 
 class AppState {
@@ -151,6 +157,13 @@ class AppState {
   albums = $state<Album[]>([]);
   /** Replaced whole on every update (four times a second while playing), never changed in place. */
   status = $state.raw<Status | null>(null);
+  /**
+   * Whether this window's page can be seen (not hidden in the tray, minimized, or behind another
+   * app on a phone): timers and animations run only while it is (see showing.svelte.ts).
+   */
+  get showing(): boolean {
+    return pageShowing();
+  }
   folders = $state<string[]>([]);
   scan = $state<{ done: number; total: number } | null>(null);
   /** Folders were just added (or looked at again) and the scan hasn't reported yet: Welcome says
@@ -197,7 +210,7 @@ class AppState {
   /** The last song finished listening to (lyrics views reload when it's theirs), with any error. */
   voiceDone = $state<{ trackId: string; error: string; at: number } | null>(null);
   /** AI DJ settings, and whether an API key is saved. */
-  ai = $state<{ settings: AiSettings; hasKey: boolean } | null>(null);
+  ai = $state<{ settings: AiSettings; hasKey: boolean; ready?: boolean } | null>(null);
   aiReady = $derived(!!this.ai && this.ai.settings.provider === "cloud" && this.ai.hasKey);
   /** Today's AI mixes, and whether they're being made or failed. */
   aiMixes = $state<AiMix[]>([]);
@@ -220,6 +233,8 @@ class AppState {
   mixes = $state<Mix[]>([]);
   menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
   playlists = $state<Playlist[]>([]);
+  /** Counts the times ListenBrainz refused Cadence's token (Settings reads the account again). */
+  listenbrainzSignedOut = $state(0);
   /** Songs waiting for the "Add to playlist" picker. */
   picker = $state<Track[] | null>(null);
   /** Songs whose info (tags) is being edited. */
@@ -235,6 +250,15 @@ class AppState {
     this.playerPosition = p;
     localStorage.setItem("cadence-player-position", p);
   }
+
+  /** Settings > Appearance: Now Playing's seek bar shows the song's waveform (on unless turned off). */
+  waveformSeek = $state(typeof localStorage === "undefined" || localStorage.getItem("cadence-waveform-seek") !== "off");
+  setWaveformSeek(on: boolean) {
+    this.waveformSeek = on;
+    localStorage.setItem("cadence-waveform-seek", on ? "on" : "off");
+  }
+  /** "Prepare waveforms for all songs", while it runs. */
+  waveJob = $state<WaveformJob | null>(null);
 
   setTheme(theme: Theme) {
     this.theme = theme;
@@ -393,7 +417,28 @@ class AppState {
   /** Album-artist credit → the artists it's listed under (see `artistIndex`). */
   creditIndex = $derived(artistIndex(this.albums.map((a) => a.artist)));
 
-  /** One entry per artist; albums credited to "A & B" appear under each real artist. */
+  /** Artists the library writes in more than one way (from the app: one artist across scripts). */
+  identity = $state.raw<ArtistIdentity | null>(null);
+  /** Extra search words (other spellings, aliases, readings), from the app. */
+  searchKeys = $state.raw<SearchKeys | null>(null);
+  /** Learning artist names from MusicBrainz, while it runs. */
+  namesJob = $state<ArtistNamesStatus | null>(null);
+  /** Reading the listening history from ListenBrainz, while it runs. */
+  lbImportJob = $state<import("./api").LbImportStatus | null>(null);
+  /** Making the lyrics search's index (the first lyric search, then songs whose lyrics changed). */
+  lyricIndexJob = $state<{ done: number; total: number } | null>(null);
+  /** Bumped when the lyrics index is ready or updated (Search asks again). */
+  lyricIndexAt = $state(0);
+  /** Lower-case spelling → its artist's group in `identity`. */
+  private groupOf = $derived.by(() => {
+    const m = new Map<string, ArtistGroup>();
+    for (const g of this.identity?.groups ?? []) for (const n of g.names ?? []) m.set(n.toLowerCase(), g);
+    return m;
+  });
+
+  /** One entry per artist; albums credited to "A & B" appear under each real artist, and an
+   *  artist written several ways (米津玄師, Kenshi Yonezu) is one entry under the spelling on most
+   *  songs, with the others in `also`. */
   artists = $derived.by(() => {
     const map = new Map<string, Artist>();
     for (const a of this.albums) {
@@ -405,8 +450,35 @@ class AppState {
         map.set(key, entry);
       }
     }
-    return [...map.values()].sort((x, y) => x.name.localeCompare(y.name));
+    const merged = mergeSpellings([...map.values()], this.groupOf);
+    return merged.sort((x, y) => x.name.localeCompare(y.name));
   });
+
+  /** Any spelling (lower case) → its artist. */
+  private artistIndexByName = $derived.by(() => {
+    const m = new Map<string, Artist>();
+    for (const a of this.artists) {
+      m.set(a.name.toLowerCase(), a);
+      for (const n of a.also ?? []) if (!m.has(n.toLowerCase())) m.set(n.toLowerCase(), a);
+    }
+    return m;
+  });
+
+  /** The artist written `name`, under any of its spellings. */
+  artistByName(name: string): Artist | undefined {
+    return this.artistIndexByName.get((name ?? "").toLowerCase());
+  }
+
+  /** The artists and the search words, after the library changed (or the artists did). */
+  async loadIdentity() {
+    try {
+      const [identity, keys] = await Promise.all([api.artistIdentity(), api.searchKeys()]);
+      this.identity = identity ?? null;
+      this.searchKeys = keys ?? null;
+    } catch {
+      // Search and the artist pages work without them (by the names as written).
+    }
+  }
 
   /** The artist page for a credit: its lead artist. */
   artistOf(credit: string): string {
@@ -515,7 +587,8 @@ class AppState {
 
   /** An artist's picture: the one chosen for them, else their latest album's cover. */
   artistPicture(artist: Artist, size: "large" | "small"): string | null {
-    const own = this.artistImages[artist.name.toLowerCase()];
+    // The picture chosen for the shown spelling, else one chosen for another spelling of the artist.
+    const own = [artist.name, ...(artist.also ?? [])].map((n) => this.artistImages[n.toLowerCase()]).find(Boolean);
     if (own) return size === "large" ? own.large : own.small;
     const latest = [...artist.albums].filter((a) => a.art).sort((a, b) => (b.year ?? 0) - (a.year ?? 0))[0];
     return (size === "large" ? latest?.art : latest?.artSmall) ?? null;
@@ -571,6 +644,8 @@ class AppState {
   health = $state<HealthReport | null>(null);
   /** The file check that's running (quality or integrity), while one is. */
   healthJob = $state<HealthProgress | null>(null);
+  /** The day's snapshot of your data is being made (a second or so, at startup). */
+  backupRunning = $state(false);
 
   async loadHealth() {
     this.health = await api.healthReport();
@@ -593,7 +668,9 @@ class AppState {
           ? `Sleep timer: pausing in ${amount} minutes`
           : kind === "album"
             ? "Sleep timer: pausing when this album ends"
-            : "Sleep timer: pausing when this song ends",
+            : (amount ?? 1) > 1
+              ? `Sleep timer: pausing after ${amount} songs`
+              : "Sleep timer: pausing when this song ends",
     );
   }
 
@@ -603,6 +680,7 @@ class AppState {
       ...(this.sleepActive ? [{ label: "Turn Off Sleep Timer", icon: "close", action: () => this.setSleep("off") }] : []),
       ...[15, 30, 45, 60].map((m) => ({ label: `In ${m} minutes`, icon: "moon", action: () => this.setSleep("minutes", m) })),
       { label: "At the end of this song", icon: "moon", action: () => this.setSleep("songs", 1) },
+      ...[3, 5, 10].map((n) => ({ label: `After ${n} songs`, icon: "moon", action: () => this.setSleep("songs", n) })),
       { label: "At the end of this album", icon: "moon", action: () => this.setSleep("album") },
     ];
   }
@@ -640,6 +718,49 @@ class AppState {
         this.toast = this.toastAction = null;
       },
     });
+  }
+
+  /** "Stop after this song" on the song at queue position `index`, or off again (one at a time). */
+  toggleStopAfter(index: number) {
+    const s = this.status;
+    if (!s) return;
+    const off = s.stopMark === index;
+    api.stopAfterSong(off ? null : index);
+    const t = this.trackById.get(s.queue[index] ?? "");
+    this.showToast(off ? "Won’t stop after that song" : `Playback will stop after ${t ? `“${t.title}”` : "that song"}`);
+  }
+
+  /** Takes the songs Autoplay added out of Up Next. */
+  clearAutoplay() {
+    api.clearAutoplay();
+    this.showToast("Cleared Autoplay’s songs");
+  }
+
+  /** The right-click menu of a song in Up Next (queue position `index`; the playing song too). */
+  queueMenu(e: MouseEvent, index: number) {
+    const s = this.status;
+    const t = s ? this.trackById.get(s.queue[index] ?? "") : undefined;
+    if (!s || !t) return;
+    const current = index === s.index;
+    const marked = s.stopMark === index;
+    this.openMenu(e, [
+      ...(current
+        ? []
+        : [
+            { label: "Play Now", icon: "play", action: () => api.jump(index) },
+            ...(s.index != null && index > s.index + 1 ? [{ label: "Play Next", icon: "playNext", action: () => api.moveInQueue(index, s.index! + 1) }] : []),
+            { label: "Remove from Up Next", icon: "close", action: () => this.removeFromQueue(index) },
+          ]),
+      marked
+        ? { label: "Don’t Stop After This Song", icon: "moon", action: () => this.toggleStopAfter(index) }
+        : { label: "Stop After This Song", icon: "moon", action: () => this.toggleStopAfter(index) },
+      { label: "Go to Album", icon: "album", action: () => this.go({ name: "album", id: t.albumId }) },
+      { label: "Go to Artist", icon: "artist", action: () => this.go({ name: "artist", artist: this.artistOf(t.albumArtist) }) },
+      { label: "Add to Playlist…", icon: "playlist", action: () => (this.picker = [t]) },
+      this.isLoved(t)
+        ? { label: "Remove from Favorites", icon: "heartFill", action: () => this.setLoved([t], false) }
+        : { label: "Add to Favorites", icon: "heart", action: () => this.setLoved([t], true) },
+    ]);
   }
 
   /** Saves the whole queue (played, playing and waiting songs) as a playlist. */
@@ -701,6 +822,8 @@ class AppState {
         const queue = e.payload.queue ?? this.status?.queue;
         if (queue) this.applyStatus({ ...e.payload, queue });
       }),
+      // Hidden in the tray or minimized, or shown again (after a fresh "player-status").
+      listen<boolean>("window-visible", (e) => setWindowVisible(e.payload)),
       listen("library-changed", async () => {
         await Promise.all([this.loadLibrary(), this.loadMarks()]);
         this.scan = null;
@@ -732,6 +855,7 @@ class AppState {
       listen("history-changed", async () => (this.listening = await api.history())),
       listen("marks-changed", () => this.loadMarks()),
       listen<HealthProgress>("health-progress", (e) => (this.healthJob = e.payload.running ? e.payload : null)),
+      listen<{ running: boolean }>("backup-progress", (e) => (this.backupRunning = !!e.payload?.running)),
       listen("health-done", () => this.loadHealth()),
       listen<JobProgress>("fix-all-progress", (e) => {
         this.fixAllJob = e.payload.running ? e.payload : null;
@@ -746,6 +870,15 @@ class AppState {
         }
       }),
       listen("changes-changed", () => this.changesVersion++),
+      // Files were replaced and the playlists follow them.
+      listen("playlists-changed", () =>
+        api.playlists().then((p) => (this.playlists = p)).catch(() => {}),
+      ),
+      // The token stopped working: Settings shows ListenBrainz as needing to be connected again.
+      listen("listenbrainz-signed-out", () => {
+        this.listenbrainzSignedOut++;
+        this.showToast("ListenBrainz signed you out. Connect it again in Settings to keep sending your listens.", null, 8000);
+      }),
       listen<JobProgress>("artist-check-progress", (e) => {
         this.artistJob = e.payload.running ? e.payload : null;
         if (e.payload.running) return;
@@ -753,6 +886,14 @@ class AppState {
         this.loadArtistPairsCount();
       }),
       listen<number | null>("sleep-timer", (e) => (this.sleepEndsAt = e.payload)),
+      // The artists changed (MusicBrainz learned names, or a "same" / "not the same" decision).
+      listen("artist-identity-changed", () => this.loadIdentity()),
+      listen("search-keys-changed", () => api.searchKeys().then((k) => (this.searchKeys = k ?? null)).catch(() => {})),
+      listen<ArtistNamesStatus>("artist-names-progress", (e) => (this.namesJob = e.payload?.running ? e.payload : null)),
+      listen<import("./api").LbImportStatus>("listenbrainz-import-progress", (e) => (this.lbImportJob = e.payload?.phase === "scanning" ? e.payload : null)),
+      listen<{ done: number; total: number; running: boolean }>("lyric-index-progress", (e) => (this.lyricIndexJob = e.payload?.running && e.payload.total > 0 ? e.payload : null)),
+      listen("lyric-index-ready", () => (this.lyricIndexAt = Date.now())),
+      listen<WaveformJob>("waveform-progress", (e) => (this.waveJob = e.payload?.running ? e.payload : null)),
       listen<{ done: number; total: number }>("analysis-progress", (e) => {
         this.analysis = e.payload.done >= e.payload.total ? null : e.payload;
       }),
@@ -778,23 +919,25 @@ class AppState {
       }),
     ]);
     this.loadSonic();
-    api.voiceStatus().then((v) => (this.voice = v));
+    api.voiceStatus().then((v) => (this.voice = v)).catch(() => {});
     api.aiSettings().then((a) => {
       this.ai = a;
       if (this.aiReady) {
         this.loadAiMixes(false);
         this.loadAiNew(false);
       }
-    });
-    api.artistImages().then((m) => (this.artistImages = m));
+    }).catch(() => {});
+    api.artistImages().then((m) => (this.artistImages = m)).catch(() => {});
     // The mini player is another window: follow a theme changed in the main one.
     window.addEventListener("storage", (e) => e.key === "cadence-theme" && (this.theme = savedTheme()));
     this.loadMarks();
-    api.sleepTimer().then((t) => (this.sleepEndsAt = t));
+    api.sleepTimer().then((t) => (this.sleepEndsAt = t)).catch(() => {});
+    // The day's snapshot may have started before this window was listening.
+    api.backupInfo().then((b) => b?.running && (this.backupRunning = true)).catch(() => {});
     api.skips().then((s) => {
       this.skipped = s.ids;
       this.skipInstrumentals = s.instrumentals;
-    });
+    }).catch(() => {});
     const [lib, folders, status, dsp, history, playlists] = await Promise.all([
       api.library(),
       api.folders(),
@@ -806,6 +949,7 @@ class AppState {
     this.playlists = playlists;
     this.listening = history;
     this.setLibrary(lib);
+    void this.loadIdentity();
     this.folders = folders;
     // An update that came in meanwhile is newer.
     if (!this.status) this.applyStatus(status);
@@ -831,6 +975,7 @@ class AppState {
         const queue = e.payload.queue ?? this.status?.queue;
         if (queue) this.applyStatus({ ...e.payload, queue });
       }),
+      listen<boolean>("window-visible", (e) => setWindowVisible(e.payload)),
       listen("library-changed", () => this.loadLibrary().catch(() => {})),
     ]);
     window.addEventListener("storage", (e) => e.key === "cadence-theme" && (this.theme = savedTheme()));
@@ -849,11 +994,38 @@ class AppState {
     eqSync();
     if (s.error && s.error !== this.lastError) this.showToast(s.error);
     this.lastError = s.error;
+    this.followDevice(s);
   }
   private lastError: string | null = null;
 
+  /**
+   * The output device's own sound settings came into use (another device, or Cadence started on
+   * one): the Sound page shows them. The chosen device went missing: said once.
+   */
+  private followDevice(s: Status) {
+    const profile = s.device ? `${s.device.id}\n${s.device.profile}` : null;
+    if (profile !== this.lastProfile) {
+      const first = this.lastProfile === undefined;
+      this.lastProfile = profile;
+      if (!first && this.dsp) api.dsp().then((d) => d && (this.dsp = d)).catch(() => {});
+    }
+    const missing = s.deviceMissing?.name ?? null;
+    if (missing && missing !== this.lastMissing) {
+      const fallback = s.deviceMissing?.fallback;
+      this.showToast(
+        `${deviceName(missing)} isn’t connected, so playback is paused`,
+        fallback ? { label: `Play on ${deviceName(fallback)}`, run: () => api.outputUseDefault().catch(() => {}) } : null,
+        10000,
+      );
+    }
+    this.lastMissing = missing;
+  }
+  private lastProfile: string | null | undefined = undefined;
+  private lastMissing: string | null = null;
+
   async loadLibrary() {
     this.setLibrary(await api.library());
+    void this.loadIdentity();
   }
 
   async loadSonic() {
@@ -987,12 +1159,18 @@ class AppState {
     return this.section;
   }
 
-  /** Shows a page; the sidebar's search box only keeps its text on the search page. */
+  /** Shows a page. Leaving the search page empties the sidebar's search box; the box is never
+   *  written here otherwise, so text typed while a page change was waiting for a frame survives
+   *  (back() and forward() set it from the history entry). */
   private setView(view: View) {
+    const leavingSearch = this.view.name === "search" && view.name !== "search";
     this.view = view;
-    const q = view.name === "search" ? view.query : "";
-    if (this.search !== q) this.search = q;
+    if (leavingSearch && this.search !== "") this.search = "";
   }
+
+  /** A page change started by typing in the search box that hasn't run yet (view transitions
+   *  wait a frame): more keystrokes in that time only update it, never push history again. */
+  private pendingSearch = false;
 
   private remember(stack: View[], meta: Omit<HistoryEntry, "view">[], entry: HistoryEntry) {
     stack.push(entry.view);
@@ -1006,7 +1184,12 @@ class AppState {
   /** Puts a page back where it was scrolled to once it has rendered (its lists can take a moment
    *  to reach that height; gives up after half a second, or when another page is opened). */
   private restoreScroll(top: number) {
-    if (top <= 0) return;
+    if (top <= 0) {
+      // The page was at its top: don't keep the previous page's offset.
+      const el = document.querySelector<HTMLElement>(".content");
+      if (el) el.scrollTop = 0;
+      return;
+    }
     const seq = this.navSeq;
     let tries = 0;
     const attempt = () => {
@@ -1033,9 +1216,19 @@ class AppState {
       document.querySelector(".content")?.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
+    const fromTyping = view.name === "search";
+    if (fromTyping) {
+      if (this.pendingSearch) return; // the waiting page change reads the box when it runs
+      this.pendingSearch = true;
+    }
     const kind = TOP_LEVEL.has(view.name) ? "tab" : "forward";
     const here: HistoryEntry = { view: this.view, scroll: contentScroll(), section: this.section };
     animate(kind, () => {
+      if (fromTyping) {
+        this.pendingSearch = false;
+        // Letters typed while waiting are in the box, not in `view`.
+        if (this.search.trim()) view = { name: "search", query: this.search };
+      }
       this.remember(this.history, this.backMeta, here);
       this.forwardHistory = [];
       this.forwardMeta = [];
@@ -1059,6 +1252,7 @@ class AppState {
         this.remember(this.forwardHistory, this.forwardMeta, here);
         this.section = meta.section;
         this.setView(prev);
+        if (prev.name === "search") this.search = prev.query;
         this.navKind = "back";
         this.navSeq++;
         this.nowPlayingOpen = false;
@@ -1080,6 +1274,7 @@ class AppState {
         this.remember(this.history, this.backMeta, here);
         this.section = meta.section;
         this.setView(next);
+        if (next.name === "search") this.search = next.query;
         this.navKind = kind;
         this.navSeq++;
         this.nowPlayingOpen = false;
@@ -1107,7 +1302,9 @@ class AppState {
     this.toast = message;
     this.toastAction = action;
     clearTimeout(this.toastTimer);
-    this.toastTimer = setTimeout(() => (this.toast = this.toastAction = null), ms ?? (action ? 6000 : 4000));
+    // Long messages stay long enough to read (about 60 ms a character, at most 15 s).
+    const read = Math.min(15_000, message.length * 60);
+    this.toastTimer = setTimeout(() => (this.toast = this.toastAction = null), ms ?? Math.max(action ? 6000 : 4000, read));
   }
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -1121,14 +1318,35 @@ class AppState {
     api.play(tracks.map((t) => t.id), start, picked);
   }
 
+  /** Plays a list shuffled by the player (the balanced shuffle, or fully random, as set in Sound). */
+  shuffleTracks(tracks: Track[]) {
+    if (tracks.length === 0) return;
+    api.playShuffled(tracks.map((t) => t.id));
+  }
+
+  /** Album shuffle: a random album, whole and in order, then another, each once. */
+  async shuffleAlbums(albums: Album[]) {
+    if (!albums.length) return;
+    const ok = await api.shuffleAlbums(albums.map((a) => a.id)).catch(() => false);
+    this.showToast(ok ? `Shuffling ${albums.length} ${albums.length === 1 ? "album" : "albums"}, one whole album at a time` : "Nothing to play in these albums");
+  }
+
+  /** Plays one of `albums`, picked at random. */
+  async surpriseAlbum(albums: Album[]) {
+    if (!albums.length) return;
+    const id = await api.surpriseAlbum(albums.map((a) => a.id)).catch(() => null);
+    const album = id ? this.albumById.get(id) : undefined;
+    this.showToast(album ? `Playing “${album.title}” by ${album.artist}` : "Nothing to play in these albums");
+  }
+
   togglePlay() {
     api.player("toggle");
   }
 
   playAlbum(album: Album, shuffle = false) {
-    let tracks = this.albumTracks(album);
-    if (shuffle) tracks = shuffled(tracks);
-    this.playTracks(tracks);
+    const tracks = this.albumTracks(album);
+    if (shuffle) this.shuffleTracks(tracks);
+    else this.playTracks(tracks);
   }
 
   openMenu(e: MouseEvent, items: MenuItem[]) {
@@ -1163,6 +1381,33 @@ class AppState {
       this.skippedSet.has(t.id)
         ? { label: "Stop Skipping", icon: "skip", action: () => this.setSkipped([t], false) }
         : { label: "Skip This Song", icon: "skip", action: () => this.setSkipped([t], true) },
+    ]);
+  }
+
+  /** The right-click menu for several selected songs (`tracks` in list order; a song listed twice
+   *  plays and queues twice, but is rated, tagged and favourited once). */
+  songsMenu(e: MouseEvent, tracks: Track[], extra: MenuItem[] = []) {
+    if (!tracks.length) return;
+    const unique = [...new Map(tracks.map((t) => [t.id, t])).values()];
+    const loved = unique.every((t) => this.isLoved(t));
+    const skipped = unique.every((t) => this.skippedSet.has(t.id));
+    const r = this.ratingOf(unique[0]);
+    const rating = unique.every((t) => this.ratingOf(t) === r) ? r : 0;
+    const n = tracks.length;
+    this.openMenu(e, [
+      { label: `Play ${n} ${n === 1 ? "Song" : "Songs"}`, icon: "play", action: () => this.playTracks(tracks, 0, true) },
+      ...extra,
+      { label: "Play Next", icon: "playNext", action: () => this.enqueue(tracks, true) },
+      { label: "Add to Queue", icon: "queue", action: () => this.enqueue(tracks, false) },
+      { label: "Add to Playlist…", icon: "playlist", action: () => (this.picker = tracks) },
+      loved
+        ? { label: "Remove from Favorites", icon: "heartFill", action: () => this.setLoved(unique, false) }
+        : { label: "Add to Favorites", icon: "heart", action: () => this.setLoved(unique, true) },
+      { label: "Rating", rating: { value: rating, set: (stars) => this.setRating(unique, stars) }, action: () => {} },
+      ...(unique.some((t) => t.cue) ? [] : [{ label: "Edit Info…", icon: "edit", action: () => (this.tagEditing = unique) }]),
+      skipped
+        ? { label: "Stop Skipping", icon: "skip", action: () => this.setSkipped(unique, false) }
+        : { label: "Skip These Songs", icon: "skip", action: () => this.setSkipped(unique, true) },
     ]);
   }
 
@@ -1229,20 +1474,12 @@ class AppState {
   /** Android's Back button: closes what's on top, else goes back a page. False when there's nothing to go back to. */
   handleBack(): boolean {
     if (this.menu) this.menu = null;
-    else if (this.picker) this.picker = null;
-    else if (this.tagEditing) this.tagEditing = null;
-    else if (this.fixing) this.fixing = null;
-    else if (this.fixingAlbum) this.fixingAlbum = null;
-    else if (this.artistEditing) this.artistEditing = null;
-    else if (this.skippedOpen) this.skippedOpen = false;
-    else if (this.coverEditing) this.coverEditing = null;
-    else if (this.smartEditing) this.smartEditing = null;
-    else if (this.folderBrowser) {
-      this.folderBrowser(null);
-      this.folderBrowser = null;
-    }
+    // Every dialog (the store's and the pages' own) is a Modal: the top-most one closes itself.
+    else if (closeTopModal()) return true;
     else if (this.nowPlayingOpen) this.nowPlayingOpen = false;
     else if (this.queueOpen) this.queueOpen = false;
+    // A song list in selection mode leaves it before the page goes back.
+    else if (leaveSelection()) return true;
     else if (this.history.length > 0) this.back();
     else return false;
     return true;
@@ -1262,8 +1499,10 @@ class AppState {
     return this.savePlaylist({ id: "", name, trackIds: tracks.map((t) => t.id), smart: null, created: 0, updated: 0 });
   }
 
-  async addToPlaylist(p: Playlist, tracks: Track[]) {
-    const ids = [...new Set(tracks.map((t) => t.id).filter((id) => !p.trackIds.includes(id)))];
+  /** `dupes`: "skip" leaves out songs already in the playlist; "add" puts them in again (another
+   *  version, on purpose: the picker asks first). */
+  async addToPlaylist(p: Playlist, tracks: Track[], dupes: "skip" | "add" = "skip") {
+    const ids = [...new Set(tracks.map((t) => t.id).filter((id) => dupes === "add" || !p.trackIds.includes(id)))];
     // Nothing new: the playlist isn't saved (or moved up as just changed).
     if (!ids.length) {
       this.showToast(`Already in “${p.name}”`);
@@ -1313,6 +1552,39 @@ function label(tracks: Track[], quoted = false) {
 }
 
 /** "Song (Instrumental)", "Song - Off Vocal", "Song (Karaoke Ver.)"… (matches the engine's rule). */
+/**
+ * Artist entries written several ways (one `ArtistGroup` of `groupOf`) merged into one: shown
+ * under the spelling with most songs (ties: the order the app lists the spellings in), with every
+ * album once and the other spellings in `also`.
+ */
+export function mergeSpellings(entries: Artist[], groupOf: Map<string, ArtistGroup>): Artist[] {
+  if (!groupOf.size) return entries;
+  const out: Artist[] = [];
+  const byGroup = new Map<ArtistGroup, Artist[]>();
+  for (const e of entries) {
+    const g = groupOf.get(e.name.toLowerCase());
+    if (!g) out.push(e);
+    else byGroup.set(g, [...(byGroup.get(g) ?? []), e]);
+  }
+  for (const [g, list] of byGroup) {
+    const rank = (n: string) => {
+      const i = g.names.findIndex((x) => x.toLowerCase() === n.toLowerCase());
+      return i < 0 ? Infinity : i;
+    };
+    const best = [...list].sort((a, b) => b.trackCount - a.trackCount || rank(a.name) - rank(b.name))[0];
+    const seen = new Set<string>();
+    const albums: Album[] = [];
+    for (const e of list) for (const al of e.albums) if (!seen.has(al.id)) (seen.add(al.id), albums.push(al));
+    const also: string[] = [];
+    for (const n of g.names) {
+      const k = n.toLowerCase();
+      if (k !== best.name.toLowerCase() && !also.some((x) => x.toLowerCase() === k)) also.push(n);
+    }
+    out.push({ name: best.name, albums, trackCount: albums.reduce((s, a) => s + a.trackIds.length, 0), also });
+  }
+  return out;
+}
+
 export function isInstrumental(title: string): boolean {
   const t = title.toLowerCase();
   return ["instrumental", "off vocal", "off-vocal", "offvocal", "karaoke", "backing track", "(inst", "[inst", "- inst", "inst.)", "inst.]"].some((w) => t.includes(w));

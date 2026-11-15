@@ -4,8 +4,9 @@
 // See: https://v2.tauri.app/start/frontend/sveltekit/ for more info
 import adapter from "@sveltejs/adapter-static";
 import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import { sveltekit } from "@sveltejs/kit/vite";
+import { svelteTesting } from "@testing-library/svelte/vite";
 import process from "node:process";
 const host = process.env.TAURI_DEV_HOST;
 
@@ -16,7 +17,20 @@ export default defineConfig(() => ({
       preprocess: vitePreprocess(),
       adapter: adapter({ fallback: "index.html" }),
     }),
+    // Only does anything under Vitest (it checks process.env.VITEST): cleans the DOM after each test.
+    svelteTesting(),
   ],
+
+  // `pnpm test`: the components run in jsdom, with no webview and no Rust (the backend is mocked
+  // with Tauri's mockIPC, see src/tests/helpers.ts). The `browser` condition makes Svelte (and its
+  // `mount`) resolve to the client build, not the server one.
+  resolve: process.env.VITEST ? { conditions: ["browser"] } : undefined,
+  test: {
+    environment: "jsdom",
+    include: ["src/tests/**/*.test.ts"],
+    setupFiles: ["./src/tests/setup.ts"],
+    restoreMocks: true,
+  },
 
   // The build runs SvelteKit's server code once (route analysis). Bundle Kit's `cookie` (v2) into
   // it: left external, Node looks for `cookie` from the project folder upwards and can pick up an

@@ -63,6 +63,13 @@ pub struct Lyrics {
     /// their voices), or "" when there are none.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub singers_from: String,
+    /// A translation that came with the lyrics (LRC files that give each line twice, with the same
+    /// time: the line, then its translation): one per timed line, "" where a line has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub translation: Vec<String>,
+    /// Its language ("en", "id", "ja", "ko", "zh"), "" when not known.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub translation_lang: String,
 }
 
 impl Lyrics {
@@ -71,8 +78,14 @@ impl Lyrics {
         if text.is_empty() {
             return None;
         }
-        let mut synced = parse_lrc(text);
+        Self::from_lines(parse_lrc(text), text, source)
+    }
+
+    /// Lyrics from parsed timed lines (`text`: the whole text, for untimed lyrics).
+    fn from_lines(mut synced: Vec<Line>, text: &str, source: &str) -> Option<Self> {
         let singers = mark_singers(&mut synced);
+        let translation = split_translation(&mut synced);
+        let translation_lang = if translation.is_empty() { String::new() } else { crate::translate::lang_of(&translation).unwrap_or("").to_string() };
         let plain = if synced.is_empty() {
             text.to_string()
         } else {
@@ -91,12 +104,71 @@ impl Lyrics {
             voice: String::new(),
             singers_from: if singers.is_empty() { String::new() } else { "lyrics".into() },
             singers,
+            translation,
+            translation_lang,
         })
     }
 
     pub fn is_empty(&self) -> bool {
         self.synced.is_empty() && self.plain.trim().is_empty()
     }
+}
+
+/// Whether following the singer would add anything: timed lyrics whose words have no timings of
+/// their own (LRCLIB's word-by-word lyrics and enhanced LRC already have them).
+pub fn needs_alignment(l: &Lyrics) -> bool {
+    !l.synced.iter().any(|x| !x.words.is_empty())
+}
+
+/// Lyrics files that carry a translation give each line twice, with the same time: the line,
+/// then the translation, in another script (Japanese, then Chinese or English). When most timed
+/// lines come in such pairs, the second of each is taken out as the line's translation. A duet's
+/// two singers on one time are in the same script, so they stay. Returns one entry per remaining
+/// line ("" where a line has none), or nothing.
+fn split_translation(lines: &mut Vec<Line>) -> Vec<String> {
+    let mut pairs: Vec<usize> = Vec::new();
+    let mut slots = 0;
+    let mut i = 0;
+    while i < lines.len() {
+        let mut j = i + 1;
+        while j < lines.len() && (lines[j].time - lines[i].time).abs() < 0.001 {
+            j += 1;
+        }
+        if !lines[i].text.trim().is_empty() {
+            slots += 1;
+            if j - i == 2 && !lines[i + 1].text.trim().is_empty() {
+                let (a, b) = (script_of(&lines[i].text), script_of(&lines[i + 1].text));
+                if a.is_some() && b.is_some() && a != b {
+                    pairs.push(i);
+                }
+            }
+        }
+        i = j;
+    }
+    if pairs.len() < 3 || pairs.len() * 10 < slots * 6 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(lines.len() - pairs.len());
+    let mut kept = Vec::with_capacity(lines.len() - pairs.len());
+    let mut next_pair = pairs.into_iter().peekable();
+    let mut k = 0;
+    let old = std::mem::take(lines);
+    let mut it = old.into_iter();
+    while let Some(line) = it.next() {
+        if next_pair.peek() == Some(&k) {
+            next_pair.next();
+            let tr = it.next().map(|t| t.text.trim().to_string()).unwrap_or_default();
+            k += 2;
+            kept.push(line);
+            out.push(tr);
+        } else {
+            k += 1;
+            kept.push(line);
+            out.push(String::new());
+        }
+    }
+    *lines = kept;
+    out
 }
 
 /// Parses LRC: `[mm:ss.xx] text`, several timestamps per line, and an `[offset:±ms]` tag.
@@ -374,6 +446,63 @@ struct LrclibResponse {
     plain_lyrics: Option<String>,
     #[serde(default)]
     instrumental: bool,
+    /// The record's Lyricsfile has word timings (`lyricsfile`, see `crate::lyricsfile`).
+    #[serde(default)]
+    has_word_sync: bool,
+    #[serde(default)]
+    lyricsfile: Option<String>,
+    #[serde(default)]
+    track_name: Option<String>,
+    #[serde(default)]
+    artist_name: Option<String>,
+    #[serde(default)]
+    album_name: Option<String>,
+    #[serde(default)]
+    duration: Option<f64>,
+}
+
+impl LrclibResponse {
+    /// The record's lyrics: word by word when it has word timings (`words`: allowed, it is this
+    /// song's), else its timed LRC, else plain text.
+    fn lyrics(&self, words: bool) -> Option<Lyrics> {
+        if self.instrumental {
+            return Some(Lyrics { source: "lrclib".into(), instrumental: true, ..Default::default() });
+        }
+        let line_timed = || {
+            self.synced_lyrics
+                .as_deref()
+                .and_then(|t| Lyrics::from_text(t, "lrclib"))
+                .or_else(|| self.plain_lyrics.as_deref().and_then(|t| Lyrics::from_text(t, "lrclib")))
+        };
+        if words && self.has_word_sync
+            && let Some(lines) = self.lyricsfile.as_deref().and_then(crate::lyricsfile::word_lines)
+        {
+            // The line-timed LRC's translation pairs, if any, still apply to the same lines.
+            let text = lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+            if let Some(mut l) = Lyrics::from_lines(lines, &text, "lrclib") {
+                if let Some(lrc) = line_timed().filter(|x| x.translation.len() == l.synced.len()) {
+                    l.translation = lrc.translation;
+                    l.translation_lang = lrc.translation_lang;
+                }
+                return Some(l);
+            }
+        }
+        line_timed()
+    }
+
+    /// As a search result, to check it with the same rules as one (`best_hit`).
+    fn as_hit(&self) -> Hit {
+        Hit {
+            id: 0,
+            title: self.track_name.clone().unwrap_or_default(),
+            artist: self.artist_name.clone().unwrap_or_default(),
+            album: self.album_name.clone().unwrap_or_default(),
+            duration: self.duration.unwrap_or(0.0),
+            instrumental: self.instrumental,
+            synced: self.synced_lyrics.as_deref().is_some_and(|s| !s.trim().is_empty()),
+            preview: self.plain_lyrics.as_deref().unwrap_or("").lines().filter(|l| !l.trim().is_empty()).take(2).collect::<Vec<_>>().join(" / "),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -457,6 +586,7 @@ pub fn pick(cache_dir: &Path, track_id: &str, lyrics: &Lyrics) {
         })
         .unwrap_or_default(),
     );
+    crate::lyricindex::touched(track_id);
 }
 
 /// Marks a song's lyrics as wrong: none are shown (not even the file's) until the listener picks some.
@@ -473,6 +603,7 @@ pub fn hide(cache_dir: &Path, track_id: &str) {
         })
         .unwrap_or_default(),
     );
+    crate::lyricindex::touched(track_id);
 }
 
 pub fn is_hidden(cache_dir: &Path, track_id: &str) -> bool {
@@ -628,23 +759,13 @@ pub fn search_song(title: &str, artist: &str, album: &str) -> Result<Vec<Hit>, S
     Ok(hits)
 }
 
-/// Downloads one LRCLIB entry.
+/// Downloads one LRCLIB entry (one the listener chose, or `best_hit` matched to the song: word
+/// by word when it has word timings).
 pub fn fetch(id: u64) -> Result<Lyrics, String> {
     let r: LrclibResponse = get(&http()?, &format!("https://lrclib.net/api/get/{id}"))?
         .json()
         .map_err(|e| e.to_string())?;
-    if r.instrumental {
-        return Ok(Lyrics {
-            source: "lrclib".into(),
-            instrumental: true,
-            ..Default::default()
-        });
-    }
-    r.synced_lyrics
-        .as_deref()
-        .and_then(|t| Lyrics::from_text(t, "lrclib"))
-        .or_else(|| r.plain_lyrics.as_deref().and_then(|t| Lyrics::from_text(t, "lrclib")))
-        .ok_or_else(|| "That result has no lyrics.".into())
+    r.lyrics(true).ok_or_else(|| "That result has no lyrics.".into())
 }
 
 /// The writing system of a song's language, as far as lyrics are concerned.
@@ -825,6 +946,10 @@ pub fn artist_fit(ours: &str, theirs: &str) -> Fit {
     if unknown_artist(ours) || unknown_artist(theirs) {
         return Fit::Unsure;
     }
+    // Known to be one artist (米津玄師 is Kenshi Yonezu, `identity`).
+    if crate::identity::current().same_artist(ours, theirs) {
+        return Fit::Same;
+    }
     let (a, b) = (spellings(ours), spellings(theirs));
     let shared = a.iter().any(|x| {
         b.iter().any(|y| {
@@ -983,21 +1108,10 @@ pub fn online(
     let response = get(&client, &url).map_err(|_| "unavailable")?;
     let lyrics = if response.status().is_success() {
         let direct = response.json::<LrclibResponse>().ok().and_then(|r| {
-            if r.instrumental {
-                return Some(Lyrics {
-                    source: "lrclib".into(),
-                    instrumental: true,
-                    ..Default::default()
-                });
-            }
-            r.synced_lyrics
-                .as_deref()
-                .and_then(|t| Lyrics::from_text(t, "lrclib"))
-                .or_else(|| {
-                    r.plain_lyrics
-                        .as_deref()
-                        .and_then(|t| Lyrics::from_text(t, "lrclib"))
-                })
+            // LRCLIB's own match: its timed lines as before; its word timings only when the
+            // record also passes Cadence's strict match (credits, title's language, length).
+            let w = Wanted { title, artist, album, duration };
+            r.lyrics(direct_words_fit(&r, &w))
         });
         match direct {
             Some(l) if l.instrumental || fits(title, &l.plain) => Some(l),
@@ -1023,7 +1137,101 @@ pub fn online(
         })
         .unwrap_or_default(),
     );
+    crate::lyricindex::touched(track_id);
     lyrics.ok_or("missing")
+}
+
+/// Whether the word timings of LRCLIB's direct answer may be used: the record has to pass the
+/// same strict match a search result does (`best_hit`: within 4 s, credited like the song, in
+/// the title's language). Word timings never come from another song's record.
+fn direct_words_fit(r: &LrclibResponse, w: &Wanted) -> bool {
+    r.has_word_sync && best_hit(std::slice::from_ref(&r.as_hit()), w).is_some()
+}
+
+#[cfg(test)]
+mod word_tests {
+    use super::*;
+
+    // Invented lines, title and artists throughout (no real lyrics in fixtures).
+    fn record(artist: &str, duration: f64) -> LrclibResponse {
+        LrclibResponse {
+            synced_lyrics: Some("[00:01.00]the rain is falling\n[00:03.00]the sky is blue".into()),
+            plain_lyrics: Some("the rain is falling\nthe sky is blue".into()),
+            instrumental: false,
+            has_word_sync: true,
+            lyricsfile: Some("lines:\n- text: the rain is falling\n  start_ms: 1000\n  words:\n  - text: 'the rain '\n    start_ms: 1000\n  - text: is falling\n    start_ms: 1600\n- text: the sky is blue\n  start_ms: 3000\n".into()),
+            track_name: Some("Test Song".into()),
+            artist_name: Some(artist.into()),
+            album_name: Some("Odd".into()),
+            duration: Some(duration),
+        }
+    }
+
+    #[test]
+    fn word_timings_from_lrclib_when_the_record_is_this_song() {
+        let w = Wanted { title: "Test Song", artist: "Example Artist", album: "Example Album", duration: 295.0 };
+        let r = record("Example Artist", 295.4);
+        assert!(direct_words_fit(&r, &w));
+        let l = r.lyrics(direct_words_fit(&r, &w)).unwrap();
+        assert_eq!(l.synced[0].words.len(), 2);
+        assert_eq!(l.synced[0].words[1].time, 1.6);
+        // Words from the source: following the singer isn't needed.
+        assert!(!needs_alignment(&l));
+    }
+
+    #[test]
+    fn another_songs_word_timings_are_never_used() {
+        let w = Wanted { title: "Test Song", artist: "Example Artist", album: "Example Album", duration: 295.0 };
+        // Another artist's song of that title, or ours 30 s longer (another version): the line
+        // timings stay as LRCLIB matched them, the word timings are left out.
+        for r in [record("Other Artist", 295.0), record("Example Artist", 325.0)] {
+            assert!(!direct_words_fit(&r, &w));
+            let l = r.lyrics(false).unwrap();
+            assert!(l.synced.iter().all(|x| x.words.is_empty()));
+            assert!(needs_alignment(&l));
+        }
+        // No word timings in the record: as before.
+        let mut r = record("Example Artist", 295.0);
+        r.has_word_sync = false;
+        assert!(r.lyrics(true).unwrap().synced.iter().all(|x| x.words.is_empty()));
+        // A Lyricsfile that can't be read: the LRC, silently.
+        let mut r = record("Example Artist", 295.0);
+        r.lyricsfile = Some("lines: [broken".into());
+        let l = r.lyrics(true).unwrap();
+        assert_eq!(l.synced.len(), 2);
+        assert!(needs_alignment(&l));
+    }
+
+    #[test]
+    fn search_picks_by_the_strict_match_before_word_timings() {
+        // `fetch` (words included) only ever gets the id `best_hit` chose: a word-synced record of
+        // another artist is never the one taken.
+        let hit = |id, artist: &str, duration| Hit { id, title: "Test Song".into(), artist: artist.into(), album: String::new(), duration, instrumental: false, synced: true, preview: String::new() };
+        let w = Wanted { title: "Test Song", artist: "Example Artist", album: "", duration: 295.0 };
+        let hits = [hit(1, "Other Artist", 295.0), hit(2, "Example Artist", 296.0)];
+        assert_eq!(best_hit(&hits, &w).map(|h| h.id), Some(2));
+        assert!(best_hit(&hits[..1], &w).is_none());
+    }
+
+    #[test]
+    fn translations_that_come_with_the_lyrics() {
+        let l = Lyrics::from_text(
+            "[00:01.00]青い空を見上げた\n[00:01.00]I looked up at the blue sky\n[00:03.00]今日は雨が降る\n[00:03.00]it is raining today\n[00:05.00]窓を開けた\n[00:05.00]I opened the window\n[00:07.00]ラララ\n[00:09.00]朝ごはんを食べる\n[00:09.00]I eat breakfast",
+            "lrclib",
+        )
+        .unwrap();
+        assert_eq!(l.synced.iter().map(|x| x.text.as_str()).collect::<Vec<_>>(), ["青い空を見上げた", "今日は雨が降る", "窓を開けた", "ラララ", "朝ごはんを食べる"]);
+        assert_eq!(l.translation, ["I looked up at the blue sky", "it is raining today", "I opened the window", "", "I eat breakfast"]);
+        assert_eq!(l.translation_lang, "en");
+        assert!(!l.plain.contains("window"));
+        // Two singers on the same times, in one script: both lines stay, no translation.
+        let l = Lyrics::from_text("[00:01.00]the rain is falling\n[00:01.00]the sky is blue\n[00:03.00]I opened the window\n[00:03.00]I closed the door\n[00:05.00]we walk to school\n[00:05.00]they ride the bus", "file").unwrap();
+        assert_eq!(l.synced.len(), 6);
+        assert!(l.translation.is_empty());
+        // Old cached lyrics (no translation field) still load.
+        let old: Lyrics = serde_json::from_str(r#"{"source":"lrclib","synced":[{"time":1.0,"text":"a"}],"plain":"a","instrumental":false,"lookup":""}"#).unwrap();
+        assert!(old.translation.is_empty() && old.translation_lang.is_empty());
+    }
 }
 
 #[cfg(test)]

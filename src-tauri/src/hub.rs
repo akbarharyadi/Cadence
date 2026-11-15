@@ -18,6 +18,14 @@ use crate::{autotag, history, jobs, media, scrobble, voice};
 pub fn open(data_dir: PathBuf, local_dir: &Path, host: Arc<dyn Host>) -> (Ctx, Receiver<Status>) {
     let started = std::time::Instant::now();
     let _ = std::fs::create_dir_all(data_dir.join("art"));
+    // Temporary files of saves a crash or power cut interrupted (on a thread: startup doesn't wait).
+    {
+        let dir = data_dir.clone();
+        let _ = std::thread::Builder::new().name("cadence-tidy".into()).spawn(move || {
+            jobs::background_priority();
+            crate::state::clear_temp_files(&dir);
+        });
+    }
     let settings: Settings = read_json(&data_dir.join("settings.json"));
     let cache: LibraryCache = read_json(&data_dir.join("library.json"));
     let history: History = read_json(&data_dir.join("history.json"));
@@ -28,9 +36,13 @@ pub fn open(data_dir: PathBuf, local_dir: &Path, host: Arc<dyn Host>) -> (Ctx, R
     crate::tagedit::write_leftovers(&data_dir);
 
     let (status_tx, status_rx) = crossbeam_channel::unbounded::<Status>();
-    let engine = Engine::start(settings.volume, settings.dsp.clone(), settings.repeat, settings.shuffle, move |s| {
+    // On the chosen output device from the start (not the default first).
+    let engine = Engine::start_on(settings.output_device.clone(), settings.volume, settings.dsp.clone(), settings.repeat, settings.shuffle, move |s| {
         let _ = status_tx.send(s.clone());
     });
+    // (Before the session is put back: its queue was shuffled this way.)
+    engine.send(crate::audio::Cmd::SetShuffleMode(settings.shuffle_mode));
+    engine.send(crate::audio::Cmd::SetAutoplay(settings.autoplay));
 
     let read = started.elapsed();
     // Show the cached library immediately; a background rescan picks up changes.
@@ -53,6 +65,8 @@ pub fn open(data_dir: PathBuf, local_dir: &Path, host: Arc<dyn Host>) -> (Ctx, R
         watcher: Mutex::new(None),
     });
     let voice = Arc::new(voice::Voice::new(&state.data_dir, local_dir));
+    // Sound settings per output device (the engine asks when it moves to another device).
+    state.engine.send(crate::audio::Cmd::SetProfiles(Some(crate::profiles::source(Arc::downgrade(&state)))));
     // Carry on where the last session left off (paused).
     state.restore_session();
     log::info!("core opened in {:?} (saved data read by {read:?}, albums built by {built:?})", started.elapsed());
@@ -107,8 +121,12 @@ fn record_play(ctx: &Ctx, scrobbler: Option<&scrobble::Scrobbler>, event: histor
 }
 
 fn listen_of(state: &AppState, id: &str, at: u64) -> Option<scrobble::Listen> {
-    let lib = state.library.lock();
-    let t = &lib.snapshot.tracks[*lib.by_id.get(id)?];
+    let t = {
+        let lib = state.library.lock();
+        lib.snapshot.tracks[*lib.by_id.get(id)?].clone()
+    };
+    // The ids in the song's tags (a small read, kept for the song's second use: it ends after it starts).
+    let ids = crate::tagids::of_track(&t);
     Some(scrobble::Listen {
         artist: t.artist.clone(),
         title: t.title.clone(),
@@ -116,6 +134,10 @@ fn listen_of(state: &AppState, id: &str, at: u64) -> Option<scrobble::Listen> {
         duration: t.duration,
         at,
         user: String::new(),
+        recording_mbid: ids.recording,
+        release_mbid: ids.release,
+        artist_mbids: ids.artists,
+        track_no: t.track_no,
     })
 }
 
@@ -148,10 +170,19 @@ pub fn shutdown(ctx: &Ctx) {
 /// Background work at startup: carry on following the singer, then rescan and watch the folders.
 pub fn start_background(ctx: &Ctx) {
     voice::resume_batch(ctx, crate::api::resolve_lyrics);
-    if !ctx.state.settings.lock().folders.is_empty() {
-        // Watching lists the same folders the scan does: once it's done, not alongside.
-        jobs::start_scan_then_watch(ctx.clone());
-    }
+    // The day's snapshot of the user data (when one is due; a second or so, low priority), then
+    // the rescan: one after the other, so they never run side by side.
+    let ctx = ctx.clone();
+    let _ = std::thread::Builder::new().name("cadence-backup".into()).spawn(move || {
+        jobs::background_priority();
+        // The artists across scripts, from the saved library (kept up to date from now on).
+        crate::identity::init(&ctx);
+        crate::backup::snapshot_if_due(&ctx);
+        if !ctx.state.settings.lock().folders.is_empty() {
+            // Watching lists the same folders the scan does: once it's done, not alongside.
+            jobs::start_scan_then_watch(ctx.clone());
+        }
+    });
 }
 
 fn status_hub(
@@ -177,16 +208,31 @@ fn status_hub(
     // The front end gets the queue (thousands of ids with a big library) only when it changed,
     // not four times a second; it keeps the last one.
     let mut sent_queue: Option<Vec<String>> = None;
+    // The last update without its position (and peak level): when only those moved, windows hidden in the
+    // tray or minimized aren't sent it (see winvis.rs); anything else goes to every window.
+    let mut sent_headline: Option<serde_json::Map<String, serde_json::Value>> = None;
     for s in rx {
         if let Ok(mut update) = serde_json::to_value(&s) {
+            let mut significant = false;
             if sent_queue.as_ref() == Some(&s.queue) {
                 if let Some(o) = update.as_object_mut() {
                     o.remove("queue");
                 }
             } else {
                 sent_queue = Some(s.queue.clone());
+                significant = true;
             }
-            ctx.emit("player-status", update);
+            let headline = crate::winvis::headline(&update);
+            significant |= sent_headline.as_ref() != Some(&headline);
+            sent_headline = Some(headline);
+            match crate::winvis::targets(significant) {
+                crate::winvis::Targets::All => ctx.emit("player-status", update),
+                crate::winvis::Targets::Only(labels) => {
+                    for label in labels {
+                        ctx.host().emit_to(label, "player-status", update.clone());
+                    }
+                }
+            }
         }
 
         had_queue |= !s.queue.is_empty();
@@ -202,6 +248,8 @@ fn status_hub(
         if let Some(event) = with_tracker(|t| t.observe(&s, |id| album_of(&state, id))) {
             record_play(&ctx, Some(scrobbler), event);
         }
+        // The queue is about to run out: the next album of an album shuffle, or Autoplay's songs.
+        crate::upnext::on_status(&ctx, &s);
 
         let current = s.index.and_then(|i| s.queue.get(i)).cloned();
         if s.playing && current.is_some() && current != told_playing {

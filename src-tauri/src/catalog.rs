@@ -27,7 +27,7 @@ fn norm(s: &str) -> String {
 }
 
 /// A title without "(feat. …)", "[Remix]", " - Single" and the like.
-fn core_title(s: &str) -> String {
+pub(crate) fn core_title(s: &str) -> String {
     let cut = s.find(['(', '[', '（', '【']).unwrap_or(s.len());
     let t = &s[..cut];
     norm(t.split(" - ").next().unwrap_or(t))

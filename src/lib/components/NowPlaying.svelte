@@ -5,6 +5,7 @@
   import Icon from "./Icon.svelte";
   import LyricsView from "./LyricsView.svelte";
   import QualityBadge from "./QualityBadge.svelte";
+  import Waveform from "./Waveform.svelte";
 
   const s = $derived(app.status);
   const t = $derived(app.current);
@@ -65,6 +66,16 @@
   }
   const duration = $derived(s?.duration ?? 0);
 
+  // The waveform seek bar (Settings > Appearance): drawn behind the same slider, which keeps doing
+  // the seeking. Until a song's waveform is there (or without one), the plain line shows.
+  let waveShown = $state(false);
+  const wave = $derived(app.waveformSeek && waveShown);
+  let hoverX = $state<number | null>(null);
+  function seekHover(e: PointerEvent & { currentTarget: HTMLElement }) {
+    const r = e.currentTarget.getBoundingClientRect();
+    hoverX = r.width > 0 ? Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) : null;
+  }
+
   const src = $derived(s?.source);
   const quality = $derived(src ? qualityOf(src.codec, src.sampleRate) : "");
   const detail = $derived(src ? `${src.bits ? `${src.bits}-bit/` : ""}${khz(src.sampleRate)} ${src.codec}` : "");
@@ -121,7 +132,13 @@
   const progress = $derived(Math.min(1, pull / (typeof window === "undefined" ? 800 : window.innerHeight)));
 </script>
 
-<svelte:window onkeydown={(e) => e.key === "Escape" && (app.nowPlayingOpen = false)} />
+<svelte:window
+  onkeydown={(e) => {
+    // Only when nothing above Now Playing (a menu, a dialog, an open dropdown) wants the key.
+    if (e.key !== "Escape" || e.defaultPrevented || app.menu || document.querySelector("[aria-modal='true'], [role=menu]")) return;
+    app.nowPlayingOpen = false;
+  }}
+/>
 
 {#if pull > 0}<div class="behind" style="opacity: {0.6 * (1 - progress)}" aria-hidden="true"></div>{/if}
 <div
@@ -196,7 +213,11 @@
           </div>
         {/if}
 
-        <div class="seek">
+        <div class="seek" class:with-wave={wave} class:wave-on={app.waveformSeek && !!t}>
+          <div class="bar" role="presentation" onpointermove={wave ? seekHover : undefined} onpointerleave={() => (hoverX = null)}>
+          {#if app.waveformSeek && t}
+            <Waveform trackId={t.id} fraction={duration ? pos / duration : 0} bind:shown={waveShown} />
+          {/if}
           <input
             type="range"
             class="slider"
@@ -204,7 +225,7 @@
             max={Math.max(duration, 1)}
             step="0.1"
             value={pos}
-            style="--pct: {duration ? (pos / duration) * 100 : 0}%"
+            style={wave ? undefined : `--pct: ${duration ? (pos / duration) * 100 : 0}%`}
             onpointerdown={() => { dragging = true; dragValue = app.position; }}
             oninput={(e) => (dragValue = +e.currentTarget.value)}
             onpointerup={seekRelease}
@@ -213,6 +234,10 @@
             onchange={seekChange}
             aria-label="Seek"
           />
+          {#if wave && hoverX != null && duration}
+            <div class="tip" style="left: {hoverX * 100}%">{formatTime(hoverX * duration)}</div>
+          {/if}
+          </div>
           <div class="times"><span>{formatTime(pos)}</span><span>-{formatTime(Math.max(0, duration - pos))}</span></div>
         </div>
 
@@ -475,6 +500,44 @@
   .seek .slider {
     width: 100%;
     --fill: white;
+  }
+  .bar {
+    position: relative;
+    --fill: white;
+  }
+  /* The waveform's height from the start, so nothing below moves when it arrives. */
+  .wave-on .bar {
+    height: 40px;
+    display: flex;
+    align-items: center;
+  }
+  /* With the waveform: the slider covers it (so it's all one seek area) and its own track is
+     clear; the thumb still shows under the pointer, in the middle of the bars. */
+  .with-wave .slider {
+    position: relative;
+    z-index: 1;
+    height: 40px;
+    display: block;
+  }
+  .with-wave .slider::-webkit-slider-runnable-track {
+    background: transparent;
+  }
+  .with-wave .times {
+    margin-top: 2px;
+  }
+  .tip {
+    position: absolute;
+    bottom: calc(100% + 2px);
+    transform: translateX(-50%);
+    padding: 2px 7px;
+    border-radius: 6px;
+    background: rgba(10, 11, 20, 0.85);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: white;
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 2;
   }
   .times {
     display: flex;

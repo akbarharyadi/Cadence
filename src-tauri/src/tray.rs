@@ -77,6 +77,8 @@ pub fn set_tooltip<R: Runtime>(app: &AppHandle<R>, text: Option<String>) {
 
 pub fn show_main<R: Runtime>(app: &AppHandle<R>) {
     if let Some(w) = app.get_webview_window("main") {
+        // Its page gets a fresh status and starts drawing again before it's on screen.
+        crate::winvis::on_event(app, crate::winvis::MAIN, crate::winvis::WinEvent::Show);
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
@@ -122,6 +124,7 @@ pub fn toggle_mini<R: Runtime>(app: &AppHandle<R>) {
                 // Its size in that screen's pixels (it was made at the size of the screen it opened on).
                 let _ = win.set_size(tauri::LogicalSize::new(w, h));
             }
+            crate::winvis::on_event(app, MINI_LABEL, crate::winvis::WinEvent::Opened);
             let _ = win.show();
             let _ = win.set_focus();
         }

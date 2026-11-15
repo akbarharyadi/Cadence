@@ -1,7 +1,7 @@
 <script lang="ts">
   import { artUrl } from "#lib/api.js";
   import Icon from "#lib/components/Icon.svelte";
-  import { app, shuffled } from "#lib/store.svelte.js";
+  import { app } from "#lib/store.svelte.js";
   import type { Track } from "#lib/api.js";
 
   /** Every song of the artist, newest album first (the same order as the artist's page). */
@@ -20,7 +20,7 @@
         onclick={() => app.go({ name: "artist", artist: artist.name })}
         oncontextmenu={(e) => app.openMenu(e, [
           { label: "Play", icon: "play", action: () => app.playTracks(songsOf(artist)) },
-          { label: "Shuffle", icon: "shuffle", action: () => app.playTracks(shuffled(songsOf(artist))) },
+          { label: "Shuffle", icon: "shuffle", action: () => app.shuffleTracks(songsOf(artist)) },
           { label: "Play Next", icon: "playNext", action: () => app.enqueue(songsOf(artist), true) },
           { label: "Add to Queue", icon: "queue", action: () => app.enqueue(songsOf(artist), false) },
           { label: "Go to Artist", icon: "artist", action: () => app.go({ name: "artist", artist: artist.name }) },

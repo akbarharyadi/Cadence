@@ -3,6 +3,7 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { api, artUrl, khz, qualityOf } from "#lib/api.js";
   import { android as androidBridge, app } from "#lib/store.svelte.js";
+  import { onShowing } from "#lib/showing.svelte.js";
   import ContextMenu from "#lib/components/ContextMenu.svelte";
   import FolderBrowser from "#lib/components/FolderBrowser.svelte";
   import UpdateBanner from "#lib/components/UpdateBanner.svelte";
@@ -12,6 +13,7 @@
   import { errorMessage, forgetCrash, note, recentCrash, recordCrash, reportCrash, type Crash } from "#lib/diag.js";
   import NowPlaying from "#lib/components/NowPlaying.svelte";
   import PlaylistPicker from "#lib/components/PlaylistPicker.svelte";
+  import PlaylistTransfer from "#lib/components/PlaylistTransfer.svelte";
   import SmartEditor from "#lib/components/SmartEditor.svelte";
   import TagEditor from "#lib/components/TagEditor.svelte";
   import FixInfo from "#lib/components/FixInfo.svelte";
@@ -43,6 +45,8 @@
   import Sound from "#lib/views/Sound.svelte";
   import Welcome from "#lib/views/Welcome.svelte";
   import Library from "#lib/views/Library.svelte";
+  import AppKeys from "#lib/components/AppKeys.svelte";
+  import { overlays } from "#lib/palette.svelte.js";
 
 
   let dropping = $state(false);
@@ -134,6 +138,9 @@
   function onUnhandled(e: PromiseRejectionEvent) {
     const now = Date.now();
     if (now - lastInput > 3000) return;
+    // Only a failed command (Tauri rejects with a string) is something the user asked for;
+    // thrown Errors are bugs or background work and stay in the log.
+    if (typeof e.reason !== "string") return;
     const message = errorMessage(e.reason).replace(/\s+/g, " ").trim().slice(0, 160) || "Unknown error";
     if (now - lastFailToast.at < 3000 || (message === lastFailToast.message && now - lastFailToast.at < 30_000)) return;
     lastFailToast = { at: now, message };
@@ -181,7 +188,7 @@
       if (app.loaded && app.tracks.length === 0 && app.folders.length > 0 && !app.scan) api.rescan();
     };
     window.addEventListener("focus", retry);
-    document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && retry());
+    const unShowing = onShowing((showing) => showing && retry());
     // Drop folders or files anywhere on the window to import them.
     const unlisten = getCurrentWebview().onDragDropEvent((e) => {
       if (e.payload.type === "enter" || e.payload.type === "over") dropping = true;
@@ -193,6 +200,7 @@
     });
     return () => {
       unlisten.then((f) => f());
+      unShowing();
       window.removeEventListener("pointerdown", userInput, true);
       window.removeEventListener("keydown", userInput, true);
       window.removeEventListener("unhandledrejection", onUnhandled);
@@ -220,6 +228,8 @@
       target.tagName === "SELECT" ||
       target.isContentEditable;
     if (typing) return;
+    // The command palette and the shortcut help have the keyboard (see AppKeys.svelte).
+    if (overlays.paletteOpen || overlays.helpOpen) return;
     // An open dialog or menu has the keyboard (Escape, arrows, Space in its own controls).
     if (app.menu || target.closest("[aria-modal='true'], [role=menu]")) return;
     if (e.altKey && !e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
@@ -229,7 +239,7 @@
       return;
     }
     // Controls that use the arrow keys themselves: sliders, choices, lists of options, tabs.
-    const arrowsOwned = !!target.closest("input[type=range], [role=slider], [role=radio], [role=radiogroup], [role=option], [role=tab], [role=tablist], [role=spinbutton]");
+    const arrowsOwned = !!target.closest("input[type=range], [role=slider], [role=radio], [role=radiogroup], [role=tab], [role=spinbutton]");
     // Space on a focused button (or card, row, choice) already presses it; don't also toggle playback.
     const pressable = !!target.closest(
       "button, a[href], input, [role=button], [role=checkbox], [role=switch], [role=radio], [role=option], [role=menuitem], [role=tab], summary, [data-row]",
@@ -397,8 +407,10 @@
 
 {#if app.nowPlayingOpen}<Guard label="Now Playing" overlay onclose={() => (app.nowPlayingOpen = false)}><NowPlaying /></Guard>{/if}
 <ContextMenu />
+<AppKeys />
 {#if app.picker}<PlaylistPicker />{/if}
 {#if app.smartEditing}<SmartEditor />{/if}
+<PlaylistTransfer />
 {#if app.tagEditing}<TagEditor />{/if}
 {#if app.fixing}{#key app.fixing.id}<FixInfo />{/key}{/if}
 {#if app.fixingAlbum}{#key app.fixingAlbum.id}<FixAlbum />{/key}{/if}
@@ -416,7 +428,7 @@
 {/if}
 
 {#if app.toast}
-  <div class="toast" role="status">
+  <div class="toast" class:long={app.toast.length > 80} role="status">
     {app.toast}
     {#if app.toastAction}<button class="toast-action" onclick={() => app.toastAction?.run()}>{app.toastAction.label}</button>{/if}
   </div>
@@ -576,11 +588,20 @@
     box-shadow:
       0 0 0 1px var(--line-strong),
       0 10px 30px rgba(0, 0, 0, 0.45);
-    max-width: 70vw;
+    max-width: min(70vw, calc(100vw - 24px));
+    max-height: 50vh;
+    overflow-wrap: anywhere;
     display: flex;
     align-items: center;
     gap: 14px;
     animation: up 0.2s ease-out;
+  }
+  /* A long message (several songs that couldn't be saved): wraps, scrolls if it still doesn't fit. */
+  .toast.long {
+    border-radius: 18px;
+    overflow-y: auto;
+    max-width: min(560px, calc(100vw - 24px));
+    line-height: 1.4;
   }
   :global(html.player-bottom) .toast {
     bottom: 108px;

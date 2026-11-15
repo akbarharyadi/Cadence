@@ -231,19 +231,22 @@ follow the singer, [docs/research-lyrics-alignment.md](docs/research-lyrics-alig
 
 ## Privacy
 
-The app has no account, no analytics and no tracking. Sound analysis, lyrics pronunciation and following the singer
-run on your device (no audio ever leaves it).
+The app has no account, no analytics and no tracking. Sound analysis, lyrics pronunciation (with furigana and
+pinyin), finding songs by their lyrics and following the singer run on your device (no audio ever leaves it).
 It only goes online for these, and sends only what's listed:
 
 | Service | When | What it sends |
 |---|---|---|
-| [LRCLIB](https://lrclib.net) | A song has no lyrics (can be turned off) | Artist, title, album and length |
+| [LRCLIB](https://lrclib.net) | A song has no lyrics (can be turned off). Word-by-word timings come in the same answer when LRCLIB has them (no extra request) | Artist, title, album and length |
 | iTunes Search (Apple) | Fill in missing song info (can be turned off), Fix Song Info, Change Cover | The file name, or the words you search for |
 | [Deezer](https://developers.deezer.com/api) | Fix song info, Change Cover, artist pictures, checking AI music suggestions | Artist and album or song names |
+| [MusicBrainz](https://musicbrainz.org/doc/MusicBrainz_API) | Learning what else your artists are called, so one artist written two ways (米津玄師 / Kenshi Yonezu) is one artist and search finds them by any name: in the background, one name about every second, each name once (names it doesn't know are asked again after a month). Can be turned off (Settings › Learn artist names online) | Artist names from your library, and an app identifier (Cadence, its version and this project's page) |
 | GitHub | Checking for updates | Nothing beyond the request itself |
 | PyPI or GitHub, Hugging Face | Only when you download the voice models for following the singer | Nothing beyond the requests themselves |
 | Your AI service (Z.ai GLM, Claude from Anthropic, or another) | Only if you add your own key (Ask the DJ, daily mixes, Discover, who sings) | What Settings shows before you turn it on |
-| [ListenBrainz](https://listenbrainz.org) | Only if you connect it | The songs you listen to |
+| Your AI service, for lyrics translations | Only with the AI set up and **Translation** turned on in the lyrics, for the song on screen, once per song and language (kept afterwards; translations that come with the lyrics need nothing) | The song's title and artist, and its lyrics' lines |
+| [ListenBrainz](https://listenbrainz.org) | Only if you connect it (your token is kept in the system's credential store). **Sent:** each song you hear half of or four minutes of, with its artist, title, album, length and track number, the MusicBrainz ids in its tags (recording, release, artists) when it has them, and Cadence's name and version; the song playing now; and, unless you turn it off (Settings › Scrobbling), a song you heart or un-heart as loved or not, with its recording id, or, for a song whose file has none, its artist and title to look the id up. **Fetched, only when you ask:** *Restore history from ListenBrainz* reads your listens (newest first, one request a second, a thousand at a time) and *Sync favorites* reads the songs you love there; both are matched to your library on this computer, show what they would change, and change nothing until you say yes (a safety copy of your data is made first) | What is listed under Sent. Nothing is sent without a connected account |
+| [ListenBrainz](https://listenbrainz.org) fresh releases | Once a day at most, when Discover opens, and only if *Look for new releases online* is on (Settings). It needs no account or token | Nothing about you or your library: one request for the recent and upcoming releases of everyone, which Cadence filters to your artists on this computer. Cover pictures of the releases shown come from the Cover Art Archive, one request for each row that is on screen |
 
 The website counts visits with Cloudflare Web Analytics, which uses no cookies and keeps no personal data.
 

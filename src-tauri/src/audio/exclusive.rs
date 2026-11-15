@@ -5,8 +5,8 @@
 //! integer format. It registers itself with MMCSS as "Pro Audio" (Windows doesn't do that for an
 //! app's own thread, event-driven or not), so a busy system doesn't starve it of time.
 //!
-//! The stream follows the Windows default output: when it changes to another device, the worker is
-//! told (as when the device fails) and reopens on the new one.
+//! The device is the one the engine names (the chosen one, or the Windows default looked up by id);
+//! following the default when it changes is the engine's (see `devices::watch`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +15,7 @@ use std::thread::JoinHandle;
 use anyhow::{Result, anyhow};
 use ringbuf::traits::Split;
 use ringbuf::{HeapProd, HeapRb};
-use wasapi::{DeviceEnumerator, DeviceEventCallbacks, Direction, Role, SampleType, StreamMode, WaveFormat};
+use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
 use super::output::{Output, Renderer, Shared};
 use super::pcm::{Dither, Format, encode};
@@ -100,16 +100,18 @@ struct Ready {
     prod: HeapProd<f32>,
 }
 
-/// Opens the default device exclusively at `rate`. Fails (so the caller can fall back to shared mode)
-/// when the device is busy, exclusive mode is disallowed, or the rate isn't supported.
-pub fn open(shared: Arc<Shared>, rate: u32) -> Result<Output> {
+/// Opens a device exclusively at `rate`: the one with this id (see `devices`), or the Windows
+/// default. Fails (so the caller can fall back to shared mode) when the device is busy, exclusive
+/// mode is disallowed, or the rate isn't supported.
+pub fn open(shared: Arc<Shared>, rate: u32, device: Option<&str>) -> Result<Output> {
+    let device = device.map(|id| super::devices::endpoint_id(id).to_string());
     let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<Ready>>(1);
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = stop.clone();
     let thread = std::thread::Builder::new()
         .name("cadence-exclusive".into())
         .spawn(move || {
-            if let Err(e) = run(shared, rate, thread_stop, &ready_tx) {
+            if let Err(e) = run(shared, rate, device, thread_stop, &ready_tx) {
                 let _ = ready_tx.try_send(Err(e));
             }
         })?;
@@ -142,31 +144,19 @@ pub fn open(shared: Arc<Shared>, rate: u32) -> Result<Output> {
 fn run(
     shared: Arc<Shared>,
     rate: u32,
+    device: Option<String>,
     stop: Arc<AtomicBool>,
     ready: &crossbeam_channel::Sender<Result<Ready>>,
 ) -> Result<()> {
     let _ = wasapi::initialize_mta();
     let enumerator = DeviceEnumerator::new()?;
-    let device = enumerator.get_default_device(&Direction::Render)?;
+    let device = match &device {
+        Some(id) => enumerator.get_device(id)?,
+        None => enumerator.get_default_device(&Direction::Render)?,
+    };
     let name = device
         .get_friendlyname()
         .unwrap_or_else(|_| "Speakers".into());
-    // A new default output (another device chosen in Windows, or plugged in): reopen there, as
-    // shared mode would. Only the render + console default counts (what "default device" means in
-    // Sound settings); the callback runs on a Windows thread and only sets a flag.
-    let id = device.get_id().ok();
-    let mut callbacks = DeviceEventCallbacks::new();
-    let notify = shared.clone();
-    callbacks.set_default_device_callback(move |direction, role, new| {
-        if direction == Direction::Render && role == Role::Console && new.is_some() && new != id {
-            log::info!("the default output changed; reopening there");
-            notify.failed.store(true, Ordering::Release);
-        }
-    });
-    let _registration = enumerator
-        .register_notification_callback(callbacks)
-        .map_err(|e| log::warn!("can't follow default output changes: {e}"))
-        .ok();
     let mut client = device.get_iaudioclient()?;
     let channels = (client.get_mixformat()?.get_nchannels() as usize).clamp(1, 8);
 

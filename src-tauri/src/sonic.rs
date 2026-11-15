@@ -170,8 +170,10 @@ pub struct Item<'a> {
 }
 
 /// The same recording on two albums (a single and the album, say) shouldn't fill a list twice.
-fn song_key(t: &Track) -> String {
-    format!("{}\u{1}{}", t.title.to_lowercase(), t.artist.to_lowercase())
+/// The artist part is the same for every spelling of the artist (`identity`: 米津玄師's "Lemon"
+/// and Kenshi Yonezu's are one song).
+fn song_key(t: &Track, artists: &crate::identity::Identity) -> String {
+    format!("{}\u{1}{}", t.title.to_lowercase(), artists.primary_key(&t.artist))
 }
 
 /// Songs that sound most like `seed`, closest first.
@@ -185,10 +187,11 @@ pub fn similar<'a>(items: &[Item<'a>], seed: &Track, limit: usize) -> Vec<&'a Tr
         .map(|i| (distance(sf, i.f), i.track))
         .collect();
     ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut seen = HashSet::from([song_key(seed)]);
+    let artists = crate::identity::current();
+    let mut seen = HashSet::from([song_key(seed, &artists)]);
     ranked
         .into_iter()
-        .filter(|(_, t)| seen.insert(song_key(t)))
+        .filter(|(_, t)| seen.insert(song_key(t, &artists)))
         .take(limit)
         .map(|(_, t)| t)
         .collect()
@@ -200,24 +203,35 @@ pub fn radio<'a>(items: &[Item<'a>], seed: &'a Track, count: usize) -> Vec<&'a T
     let Some(sf) = items.iter().find(|i| i.track.id == seed.id).map(|i| i.f) else {
         return vec![seed];
     };
+    // Each song's key and artist, worked out once (not for every pick).
+    let artists = crate::identity::current();
+    let keys: Vec<String> = items.iter().map(|i| song_key(i.track, &artists)).collect();
+    let who: Vec<String> = items.iter().map(|i| artists.primary_key(&i.track.artist)).collect();
     let mut out = vec![seed];
-    let mut seen = HashSet::from([song_key(seed)]);
+    let mut seen = HashSet::from([song_key(seed, &artists)]);
+    let mut last_artist = artists.primary_key(&seed.artist);
     let mut current = sf;
     while out.len() < count {
         let last_album = &out[out.len() - 1].album_id;
         let best = items
             .iter()
-            .filter(|i| !seen.contains(&song_key(i.track)))
-            .map(|i| {
+            .enumerate()
+            .filter(|(k, _)| !seen.contains(&keys[*k]))
+            .map(|(k, i)| {
                 let mut score = 0.7 * distance(current, i.f) + 0.3 * distance(sf, i.f);
                 if &i.track.album_id == last_album {
                     score *= 1.15;
                 }
-                (score, i)
+                // The same artist again (under any spelling): a little further away.
+                if who[k] == last_artist {
+                    score *= 1.1;
+                }
+                (score, k, i)
             })
             .min_by(|a, b| a.0.total_cmp(&b.0));
-        let Some((_, next)) = best else { break };
-        seen.insert(song_key(next.track));
+        let Some((_, k, next)) = best else { break };
+        seen.insert(keys[k].clone());
+        last_artist = who[k].clone();
         current = next.f;
         out.push(next.track);
     }
@@ -415,6 +429,41 @@ pub fn describe(items: &[Item<'_>]) -> HashMap<String, String> {
                 .collect();
             words.push(format!("~{} BPM", ((i.f[TEMPO] + 1.0) / 2.0 * 206.0).round()));
             (i.track.id.clone(), words.join(", "))
+        })
+        .collect()
+}
+
+/// How a song sounds next to the rest of the library, as numbers (standard deviations from the
+/// library's mean, the same measures `describe` puts into words), for the DJ's retriever.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Traits {
+    /// + fast, − slow.
+    pub tempo: f32,
+    /// + loud, − soft.
+    pub loud: f32,
+    /// + bright, − dark.
+    pub bright: f32,
+    /// + minor key, − major key.
+    pub minor: f32,
+    pub bpm: f32,
+}
+
+/// `Traits` per song id (one pass over the analysed songs).
+pub fn traits(items: &[Item<'_>]) -> HashMap<String, Traits> {
+    let n = items.len().max(1) as f32;
+    let stat = |d: &dyn Fn(&[f32]) -> f32| {
+        let m = items.iter().map(|i| d(i.f)).sum::<f32>() / n;
+        let sd = (items.iter().map(|i| (d(i.f) - m).powi(2)).sum::<f32>() / n).sqrt().max(1e-6);
+        (m, sd)
+    };
+    let dims: [&dyn Fn(&[f32]) -> f32; 4] = [&|f| f[TEMPO], &|f| f[LOUDNESS], &|f| f[BRIGHTNESS], &|f| f[MINOR] - f[MAJOR]];
+    let stats: Vec<(f32, f32)> = dims.iter().map(|d| stat(*d)).collect();
+    let z = |k: usize, f: &[f32]| ((dims[k](f) - stats[k].0) / stats[k].1).clamp(-4.0, 4.0);
+    items
+        .iter()
+        .map(|i| {
+            let t = Traits { tempo: z(0, i.f), loud: z(1, i.f), bright: z(2, i.f), minor: z(3, i.f), bpm: ((i.f[TEMPO] + 1.0) / 2.0 * 206.0).round() };
+            (i.track.id.clone(), t)
         })
         .collect()
 }

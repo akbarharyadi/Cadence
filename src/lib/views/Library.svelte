@@ -3,6 +3,8 @@
   // the library, the playlists (and a new one), and Sound and Settings.
   import { newSmart } from "#lib/smart.js";
   import Icon from "#lib/components/Icon.svelte";
+  import { openPalette } from "#lib/palette.svelte.js";
+  import { startExportAll, startImport } from "#lib/playlistTransfer.svelte.js";
   import { app, type View } from "#lib/store.svelte.js";
 
   const places: { label: string; icon: string; view: View }[] = [
@@ -23,6 +25,8 @@
         icon: "smart",
         action: () => (app.smartEditing = { id: "", name: "", trackIds: [], smart: newSmart(), created: 0, updated: 0 }),
       },
+      { label: "Import playlist…", icon: "file", action: () => void startImport() },
+      ...(app.playlists.length ? [{ label: "Export all playlists…", icon: "download", action: () => startExportAll() }] : []),
     ]);
   }
 </script>
@@ -62,6 +66,13 @@
   </ul>
 
   <ul class="list more">
+    <li>
+      <button class="item" onclick={openPalette}>
+        <Icon name="search" size={20} />
+        <span class="label">Find anything</span>
+        <span class="chev"><Icon name="chevron" size={16} /></span>
+      </button>
+    </li>
     {@render row("Sound", "eq", { name: "sound" })}
     {@render row("Settings", "settings", { name: "settings" })}
   </ul>

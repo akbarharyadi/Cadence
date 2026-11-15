@@ -24,6 +24,9 @@ macro_rules! tauri_command {
             crate::api::$name(&ctx, $($arg),*)
         }
     };
+    (bytes $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty) => {
+        tauri_bytes_command!($name($($arg: $ty),*));
+    };
     (blocking $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty) => {
         #[tauri::command]
         pub async fn $name(ctx: State<'_, Ctx>, $($arg: $ty),*) -> Result<$ret, String> {
@@ -31,6 +34,20 @@ macro_rules! tauri_command {
             tauri::async_runtime::spawn_blocking(move || crate::api::$name(&ctx, $($arg),*))
                 .await
                 .map_err(|e| e.to_string())?
+        }
+    };
+}
+
+// Raw bytes (a waveform): handed to the window as an ArrayBuffer, not a JSON list of numbers.
+macro_rules! tauri_bytes_command {
+    ($name:ident($($arg:ident: $ty:ty),*)) => {
+        #[tauri::command]
+        pub async fn $name(ctx: State<'_, Ctx>, $($arg: $ty),*) -> Result<tauri::ipc::Response, String> {
+            let ctx = ctx.inner().clone();
+            tauri::async_runtime::spawn_blocking(move || crate::api::$name(&ctx, $($arg),*))
+                .await
+                .map(tauri::ipc::Response::new)
+                .map_err(|e| e.to_string())
         }
     };
 }

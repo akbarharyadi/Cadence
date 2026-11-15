@@ -237,37 +237,53 @@ fn restore(dir: &Path, b: &Before) -> Result<(), String> {
     tag.save_to_path(path, WriteOptions::default()).map_err(|e| e.to_string())
 }
 
+/// A change that can be undone here: one that only removed files can't be where nothing comes back
+/// from a Recycle Bin (`CAN_BRING_BACK`; such changes aren't kept there, but a list can still have one).
+fn can_undo(b: &Batch) -> bool {
+    CAN_BRING_BACK || !b.songs.is_empty()
+}
+
 /// The changes that can be undone, newest first.
 pub fn recent(ctx: &Ctx) -> Vec<ChangeInfo> {
     load(&dir(ctx))
         .into_iter()
         .rev()
+        .filter(can_undo)
         .map(|b| ChangeInfo { id: b.id, at: b.at, label: b.label, songs: b.songs.len() + b.removed.len() })
         .collect()
 }
 
 /// What's left of a change after an undo that didn't all work: the songs not written back, the
-/// files not back yet and their marks. None when everything was undone.
-fn left_over(batch: &Batch, failed_songs: &[String], missing: &[String]) -> Option<Batch> {
+/// files that could come back but didn't yet (`retry`), and their marks. Files that can never come
+/// back (not in the Recycle Bin any more, or no Recycle Bin to bring them back from) aren't kept:
+/// trying again could only fail again. None when nothing is left to try.
+fn left_over(batch: &Batch, failed_songs: &[String], retry: &[String]) -> Option<Batch> {
     let left = Batch {
         id: batch.id.clone(),
         at: batch.at,
         label: batch.label.clone(),
         songs: batch.songs.iter().filter(|b| failed_songs.contains(&b.path)).cloned().collect(),
-        removed: batch.removed.iter().filter(|p| missing.contains(p)).cloned().collect(),
-        marks: batch.marks.iter().filter(|m| missing.contains(&m.path)).cloned().collect(),
+        removed: batch.removed.iter().filter(|p| retry.contains(p)).cloned().collect(),
+        marks: batch.marks.iter().filter(|m| retry.contains(&m.path)).cloned().collect(),
     };
     (!left.songs.is_empty() || !left.removed.is_empty()).then_some(left)
 }
 
-/// What to tell the listener when part of an undo failed (`done` of `total` undone).
-fn partly_undone(done: usize, total: usize, failed_songs: &[String], missing: usize) -> String {
+/// What to tell the listener when part of an undo failed (`done` of `total` undone): files that
+/// didn't come back but may (`retry`), ones that never can (`lost`), songs not written back.
+fn partly_undone(done: usize, total: usize, failed_songs: &[String], retry: usize, lost: usize) -> String {
+    let files = |n: usize| if n == 1 { "1 file".to_string() } else { format!("{n} files") };
     let mut why = Vec::new();
-    if missing > 0 {
-        why.push(format!(
-            "{missing} {} not in the Recycle Bin any more",
-            if missing == 1 { "file is" } else { "files are" }
-        ));
+    if lost > 0 {
+        let is = if lost == 1 { "is" } else { "are" };
+        if CAN_BRING_BACK {
+            why.push(format!("{} {is} not in the Recycle Bin any more", files(lost)));
+        } else {
+            why.push(format!("{} can't be brought back here (no Recycle Bin)", files(lost)));
+        }
+    }
+    if retry > 0 {
+        why.push(format!("{} couldn't be brought back from the Recycle Bin", files(retry)));
     }
     if !failed_songs.is_empty() {
         let names: Vec<String> = failed_songs.iter().take(3).map(|p| file_name(p)).collect();
@@ -275,7 +291,8 @@ fn partly_undone(done: usize, total: usize, failed_songs: &[String], missing: us
         why.push(format!("couldn't write {}{more} back (open in another app?)", names.join(", ")));
     }
     let start = if done == 0 { "Nothing was undone".to_string() } else { format!("Undid {done} of {total}") };
-    format!("{start}: {}. Try Undo again to retry the rest.", why.join("; "))
+    let again = if retry > 0 || !failed_songs.is_empty() { " Try Undo again to retry the rest." } else { "" };
+    format!("{start}: {}.{again}", why.join("; "))
 }
 
 fn file_name(p: &str) -> String {
@@ -287,11 +304,22 @@ fn file_name(p: &str) -> String {
 /// many songs. When part of it fails, what failed stays in the list to try again, and the error
 /// says what was and wasn't undone.
 pub fn undo(ctx: &Ctx, id: &str) -> Result<usize, String> {
+    undo_with(ctx, id, bring_back)
+}
+
+/// `undo`, bringing removed files back with `bring_back` (the Recycle Bin's, or a test's).
+fn undo_with(ctx: &Ctx, id: &str, bring_back: impl Fn(&[String]) -> BroughtBack) -> Result<usize, String> {
     // One undo at a time (two clicks mustn't both bring the same files back).
     static UNDOING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
     let _one = UNDOING.lock();
     let dir = dir(ctx);
     let batch = load(&dir).into_iter().find(|b| b.id == id).ok_or("This change can't be undone any more.")?;
+    if !can_undo(&batch) {
+        // Kept by mistake where nothing comes back from a Recycle Bin: let go, not offered again.
+        forget_batch(&dir, &batch.id);
+        ctx.emit("changes-changed", ());
+        return Err("Removed files can't be brought back on this device.".into());
+    }
     let (playing_id, playing_path) = {
         let s = ctx.state.engine.status();
         let id = s.index.and_then(|i| s.queue.get(i).cloned());
@@ -302,11 +330,14 @@ pub fn undo(ctx: &Ctx, id: &str) -> Result<usize, String> {
     let art_dir = ctx.state.art_dir();
     let mut written = 0;
     let mut failed: Vec<String> = Vec::new();
-    // Removed files that aren't back (checked on the disk: one already put back by hand counts).
+    // Removed files that aren't back (checked on the disk: one already put back by hand counts),
+    // and of those, the ones that never can be (not in the Recycle Bin, or no Recycle Bin here).
     let mut missing: Vec<String> = Vec::new();
+    let mut lost: Vec<String> = Vec::new();
     if !batch.removed.is_empty() {
-        bring_back(&batch.removed);
+        let back = bring_back(&batch.removed);
         missing = batch.removed.iter().filter(|p| !Path::new(p.as_str()).exists()).cloned().collect();
+        lost = missing.iter().filter(|p| !CAN_BRING_BACK || back.not_in_bin.contains(p)).cloned().collect();
         written += batch.removed.len() - missing.len();
         // Their favourites and ratings come back with them.
         let back: Vec<&RemovedMark> = batch.marks.iter().filter(|m| !missing.contains(&m.path)).collect();
@@ -363,8 +394,10 @@ pub fn undo(ctx: &Ctx, id: &str) -> Result<usize, String> {
             }
         }
     }
-    // Only now is the change taken off the list (or cut down to what failed, to try again).
-    let left = left_over(&batch, &failed, &missing);
+    // Only now is the change taken off the list (or cut down to what failed and can work when
+    // tried again).
+    let retry: Vec<String> = missing.iter().filter(|p| !lost.contains(p)).cloned().collect();
+    let left = left_over(&batch, &failed, &retry);
     {
         let _one = LIST.lock();
         let mut list = load(&dir);
@@ -392,10 +425,29 @@ pub fn undo(ctx: &Ctx, id: &str) -> Result<usize, String> {
         crate::jobs::start_scan(ctx.clone());
     }
     let total = batch.songs.len() + batch.removed.len();
-    if left.is_some() {
-        return Err(partly_undone(total - failed.len() - missing.len(), total, &failed, missing.len()));
+    if !failed.is_empty() || !missing.is_empty() {
+        return Err(partly_undone(total - failed.len() - missing.len(), total, &failed, retry.len(), lost.len()));
     }
     Ok(total)
+}
+
+/// Takes a change off the list.
+fn forget_batch(dir: &Path, id: &str) {
+    let _one = LIST.lock();
+    let mut list = load(dir);
+    if let Some(i) = list.iter().position(|b| b.id == id) {
+        let b = list.remove(i);
+        forget(dir, &b.songs);
+        save(dir, &list);
+    }
+}
+
+/// What `bring_back` found.
+#[derive(Default)]
+struct BroughtBack {
+    /// Files that aren't in the Recycle Bin at all (emptied, or never there): they can never come
+    /// back, so Undo doesn't keep them to try again.
+    not_in_bin: Vec<String>,
 }
 
 /// Moves a file to the Recycle Bin (Trash). Phones have none: there it's deleted.
@@ -410,14 +462,22 @@ pub fn to_recycle_bin(path: &Path) -> Result<(), String> {
 pub const CAN_BRING_BACK: bool = cfg!(any(windows, target_os = "linux"));
 
 /// Brings files back from the Recycle Bin to where they were (the latest copy of each, if
-/// the place is free). Returns how many.
-fn bring_back(paths: &[String]) -> usize {
+/// the place is free), and says which aren't in it at all. (A Recycle Bin that can't be read
+/// counts as not knowing: those files may come back on another try.)
+fn bring_back(paths: &[String]) -> BroughtBack {
     #[cfg(any(windows, target_os = "linux"))]
     {
-        let Ok(items) = trash::os_limited::list() else { return 0 };
+        let mut out = BroughtBack::default();
+        let items = match trash::os_limited::list() {
+            Ok(items) => items,
+            Err(e) => {
+                log::warn!("couldn't read the Recycle Bin: {e}");
+                return out;
+            }
+        };
         let mut picked: Vec<trash::TrashItem> = Vec::new();
-        for p in paths {
-            let p = Path::new(p);
+        for path in paths {
+            let p = Path::new(path);
             if p.exists() {
                 continue;
             }
@@ -425,26 +485,21 @@ fn bring_back(paths: &[String]) -> usize {
                 .iter()
                 .filter(|i| i.original_path() == p)
                 .max_by_key(|i| i.time_deleted);
-            if let Some(i) = latest {
-                picked.push(i.clone());
+            match latest {
+                Some(i) => picked.push(i.clone()),
+                None => out.not_in_bin.push(path.clone()),
             }
         }
-        let n = picked.len();
-        if n == 0 {
-            return 0;
-        }
-        match trash::os_limited::restore_all(picked) {
-            Ok(()) => n,
-            Err(e) => {
+        if !picked.is_empty()
+            && let Err(e) = trash::os_limited::restore_all(picked) {
                 log::warn!("couldn't bring files back from the Recycle Bin: {e}");
-                0
             }
-        }
+        out
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
-        let _ = paths;
-        0
+        // No Recycle Bin to bring files back from here (`CAN_BRING_BACK`).
+        BroughtBack { not_in_bin: paths.to_vec() }
     }
 }
 
@@ -487,10 +542,96 @@ mod tests {
 
     #[test]
     fn says_what_was_and_wasnt_undone() {
-        let msg = partly_undone(3, 5, &["D:/Music/a.flac".into()], 1);
+        let msg = partly_undone(3, 5, &["D:/Music/a.flac".into()], 0, 1);
         assert!(msg.starts_with("Undid 3 of 5"), "{msg}");
-        assert!(msg.contains("1 file is not in the Recycle Bin") && msg.contains("a.flac"), "{msg}");
-        assert!(partly_undone(0, 2, &[], 2).starts_with("Nothing was undone: 2 files are"));
+        assert!(msg.contains("1 file") && msg.contains("a.flac") && msg.contains("Try Undo again"), "{msg}");
+        // Only files that can never come back: nothing to try again.
+        let msg = partly_undone(0, 2, &[], 0, 2);
+        assert!(msg.starts_with("Nothing was undone: 2 files") && !msg.contains("Try Undo again"), "{msg}");
+        assert!(partly_undone(1, 2, &[], 1, 0).contains("couldn't be brought back from the Recycle Bin. Try Undo again"));
+    }
+
+    struct Quiet;
+    impl crate::ctx::Host for Quiet {
+        fn emit(&self, _: &str, _: serde_json::Value) {}
+    }
+
+    /// The app's core on a data folder of its own (no window; the player opens no device until a
+    /// song plays).
+    fn core(name: &str) -> (Ctx, PathBuf) {
+        let base = std::env::temp_dir().join(format!("cadence-undo-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let (ctx, _status) = crate::hub::open(base.join("data"), &base.join("local"), std::sync::Arc::new(Quiet));
+        (ctx, base)
+    }
+
+    #[test]
+    fn undo_keeps_only_what_can_work_on_another_try() {
+        let (ctx, base) = core("retry");
+        let dir = dir(&ctx);
+        let file = |n: &str| base.join(n).to_string_lossy().into_owned();
+        let (back, emptied, stuck) = (file("back.mp3"), file("emptied.mp3"), file("stuck.mp3"));
+        // A song whose file can't be written (it isn't there), and three removed copies.
+        let batch = Batch {
+            id: "c1".into(),
+            at: 5,
+            label: "Removed 3 copies".into(),
+            songs: vec![song(&file("locked.flac"))],
+            removed: vec![back.clone(), emptied.clone(), stuck.clone()],
+            marks: vec![RemovedMark { path: stuck.clone(), mark: mark("stuck") }, RemovedMark { path: emptied.clone(), mark: mark("emptied") }],
+        };
+        save(&dir, &[batch]);
+        // The Recycle Bin: "back" comes back; "emptied" isn't in it any more; "stuck" is, but
+        // couldn't be put back this time.
+        let (b, e) = (back.clone(), emptied.clone());
+        let bin = move |paths: &[String]| {
+            assert_eq!(paths.len(), 3);
+            std::fs::write(&b, b"x").unwrap();
+            BroughtBack { not_in_bin: vec![e.clone()] }
+        };
+        let err = undo_with(&ctx, "c1", bin).unwrap_err();
+        assert!(err.starts_with("Undid 1 of 4"), "{err}");
+        let list = load(&dir);
+        assert_eq!(list.len(), 1, "something can still work: the change stays");
+        let left = &list[0];
+        assert_eq!(left.songs.len(), 1, "the song to write back is tried again");
+        if CAN_BRING_BACK {
+            assert_eq!(left.removed, [stuck.clone()], "the emptied one can never come back: not kept");
+            assert_eq!(left.marks.len(), 1);
+            assert_eq!(left.marks[0].path, stuck);
+        } else {
+            assert!(left.removed.is_empty(), "nothing ever comes back here: no removed file is kept");
+        }
+        // The second try brings "stuck" back; the song still can't be written.
+        let s = stuck.clone();
+        let err = undo_with(&ctx, "c1", move |_| {
+            std::fs::write(&s, b"x").unwrap();
+            BroughtBack::default()
+        })
+        .unwrap_err();
+        assert!(err.contains("locked.flac"), "{err}");
+        let list = load(&dir);
+        assert!(list[0].removed.is_empty() && list[0].songs.len() == 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_removal_that_can_never_come_back_isnt_kept() {
+        let (ctx, base) = core("lost");
+        let dir = dir(&ctx);
+        let gone = base.join("gone.mp3").to_string_lossy().into_owned();
+        save(&dir, &[Batch { id: "c2".into(), at: 1, label: "Removed 1 copy".into(), songs: vec![], removed: vec![gone.clone()], marks: vec![] }]);
+        let shown = recent(&ctx).len();
+        let not_in_bin = gone.clone();
+        let err = undo_with(&ctx, "c2", move |_| BroughtBack { not_in_bin: vec![not_in_bin.clone()] }).unwrap_err();
+        assert!(!err.contains("Try Undo again"), "{err}");
+        // Gone from the list: Undo isn't offered for it again, where it could only fail.
+        assert!(load(&dir).is_empty());
+        assert!(recent(&ctx).is_empty());
+        // Where removed files can't come back (Android, macOS), such a change isn't even offered.
+        assert_eq!(shown, CAN_BRING_BACK as usize);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// On a copy of a tagged song with a cover: a change and its undo leave the file as it was.

@@ -639,6 +639,84 @@ struct ArtistNames {
     /// Pairs the user said aren't the same artist.
     #[serde(default)]
     different: Vec<[String; 2]>,
+    /// Pairs the user said are the same artist (without changing any file: `identity`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    same: Vec<[String; 2]>,
+}
+
+/// The user's decisions and the catalogue's pairs, for `identity`.
+pub(crate) struct Decisions {
+    pub same: Vec<(String, String)>,
+    pub different: Vec<(String, String)>,
+    pub learned: Vec<(String, String)>,
+}
+
+pub(crate) fn decisions(dir: &Path) -> Decisions {
+    let names = load_names(dir);
+    let pairs = |v: &[[String; 2]]| v.iter().map(|[a, b]| (a.clone(), b.clone())).collect();
+    Decisions {
+        same: pairs(&names.same),
+        different: pairs(&names.different),
+        learned: names.latin.iter().filter_map(|(n, l)| Some((n.clone(), l.clone()?))).collect(),
+    }
+}
+
+/// One of the Needs Attention jobs that asks the catalogues is running.
+pub(crate) fn catalogue_job_running() -> bool {
+    ARTISTS_RUNNING.load(Ordering::SeqCst) || FIX_ALL_RUNNING.load(Ordering::SeqCst) || COVERS_RUNNING.load(Ordering::SeqCst)
+}
+
+fn same_pair(p: &[String; 2], a: &str, b: &str) -> bool {
+    let f = crate::identity::fold;
+    let (x, y) = (f(&p[0]), f(&p[1]));
+    let (a, b) = (f(a), f(b));
+    (x == a && y == b) || (x == b && y == a)
+}
+
+/// The user says these two names are one artist (the files keep their names). Undone with
+/// `artist_forget`.
+pub fn artist_mark_same(ctx: &Ctx, a: String, b: String) {
+    let dir = &ctx.state.data_dir;
+    let mut names = load_names(dir);
+    names.different.retain(|p| !same_pair(p, &a, &b));
+    if !names.same.iter().any(|p| same_pair(p, &a, &b)) {
+        names.same.push([a, b]);
+    }
+    save_names(dir, &names);
+    crate::identity::rebuild_now(ctx);
+}
+
+/// The user says `name` isn't the same artist as any of `others` (an artist page's "Not the same
+/// artist"). The pairs written, to undo with `artist_forget`.
+pub fn artist_mark_different(ctx: &Ctx, name: String, others: Vec<String>) -> Vec<[String; 2]> {
+    let dir = &ctx.state.data_dir;
+    let mut names = load_names(dir);
+    let mut added = Vec::new();
+    for o in others {
+        if crate::identity::fold(&o) == crate::identity::fold(&name) {
+            continue;
+        }
+        names.same.retain(|p| !same_pair(p, &name, &o));
+        if !names.different.iter().any(|p| same_pair(p, &name, &o)) {
+            names.different.push([name.clone(), o.clone()]);
+            added.push([name.clone(), o]);
+        }
+    }
+    save_names(dir, &names);
+    crate::identity::rebuild_now(ctx);
+    added
+}
+
+/// Forgets the user's decisions about these pairs (same or different), to undo one.
+pub fn artist_forget(ctx: &Ctx, pairs: Vec<[String; 2]>) {
+    let dir = &ctx.state.data_dir;
+    let mut names = load_names(dir);
+    for [a, b] in &pairs {
+        names.same.retain(|p| !same_pair(p, a, b));
+        names.different.retain(|p| !same_pair(p, a, b));
+    }
+    save_names(dir, &names);
+    crate::identity::rebuild_now(ctx);
 }
 
 fn names_file(dir: &Path) -> PathBuf {
@@ -714,6 +792,8 @@ pub fn artist_check_start(ctx: Ctx) -> bool {
             });
         }
         ARTISTS_RUNNING.store(false, Ordering::SeqCst);
+        // What it learned joins the artists (and MusicBrainz, waiting for it, can go on).
+        crate::identity::invalidate();
         progress(total, false);
     });
     true
@@ -799,6 +879,10 @@ pub fn artist_pairs(ctx: &Ctx) -> ArtistPairs {
             if different.contains(&(n.clone(), l.clone())) {
                 return None;
             }
+            // Already one artist by the user's word: nothing to suggest.
+            if names.same.iter().any(|p| same_pair(p, native, latin)) {
+                return None;
+            }
             let (native, native_songs) = artists.get(&n)?.clone();
             let (latin, latin_songs) = artists.get(&l)?.clone();
             Some(ArtistPair { native, native_songs, latin, latin_songs })
@@ -809,12 +893,23 @@ pub fn artist_pairs(ctx: &Ctx) -> ArtistPairs {
     ArtistPairs { pairs, unchecked, running: ARTISTS_RUNNING.load(Ordering::SeqCst) }
 }
 
+/// Which artist names are one artist (`identity`: the catalogue's pairs, MusicBrainz, the user's
+/// decisions and safe spelling equivalences), for telling that two credits in different scripts
+/// are the same artist (`state::same_artist`). `dir` is the data folder the identity was built
+/// from (the app's own).
+pub(crate) fn artist_aliases(dir: &Path) -> crate::state::Aliases {
+    let _ = dir;
+    crate::identity::current()
+}
+
 /// The user says these two names are different artists: not suggested again.
 pub fn artist_pair_dismiss(ctx: &Ctx, native: String, latin: String) {
     let dir = &ctx.state.data_dir;
     let mut names = load_names(dir);
+    names.same.retain(|p| !same_pair(p, &native, &latin));
     names.different.push([native, latin]);
     save_names(dir, &names);
+    crate::identity::invalidate();
 }
 
 /// `credit` with the name `from` (a whole name of it) changed to `to`; None when it doesn't have it.
@@ -904,6 +999,24 @@ pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<Renamed, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decisions_are_kept_reversible_and_old_files_still_load() {
+        let dir = std::env::temp_dir().join(format!("cadence-decisions-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file from before "same" existed.
+        std::fs::write(names_file(&dir), r#"{"latin":{"米津玄師":"Kenshi Yonezu"},"different":[["A","B"]]}"#).unwrap();
+        let d = decisions(&dir);
+        assert_eq!(d.learned, [("米津玄師".to_string(), "Kenshi Yonezu".to_string())]);
+        assert_eq!(d.different.len(), 1);
+        assert!(d.same.is_empty());
+        let mut names = load_names(&dir);
+        names.same.push(["X".into(), "Y".into()]);
+        save_names(&dir, &names);
+        assert_eq!(decisions(&dir).same.len(), 1);
+        assert!(same_pair(&["x".into(), "Y".into()], "y", "X"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn renames_a_whole_name_in_a_credit() {

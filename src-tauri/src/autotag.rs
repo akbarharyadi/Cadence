@@ -1193,7 +1193,7 @@ const VERSION_KINDS: [&[&str]; 9] = [
 ];
 
 /// The kinds of other recording `s` names (one bit per entry of VERSION_KINDS).
-fn version_kinds(s: &str) -> u16 {
+pub(crate) fn version_kinds(s: &str) -> u16 {
     let s = s.to_lowercase();
     VERSION_KINDS
         .iter()

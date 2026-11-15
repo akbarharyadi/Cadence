@@ -29,7 +29,7 @@
   $effect(() => {
     const id = songId;
     lyrics = null;
-    if (id) api.lyrics(id).then((l) => id === songId && (lyrics = l));
+    if (id) api.lyrics(id).then((l) => id === songId && (lyrics = l)).catch(() => {});
   });
   // The timing nudge set in the main window's lyrics view (same localStorage key and per-song
   // layout as LyricsView.svelte; lyrics placed on the singing have a separate one).

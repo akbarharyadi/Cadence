@@ -5,7 +5,7 @@
   import Icon from "#lib/components/Icon.svelte";
   import QualityBadge from "#lib/components/QualityBadge.svelte";
   import { eqBars } from "#lib/eq.js";
-  import { app, shuffled } from "#lib/store.svelte.js";
+  import { app } from "#lib/store.svelte.js";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
   const newest = $derived([...app.albums].sort((a, b) => b.added - a.added));
@@ -58,7 +58,7 @@
   const mixMenu = (e: MouseEvent, name: string, tracks: Track[]) =>
     app.openMenu(e, [
       { label: "Play", icon: "play", action: () => app.playTracks(tracks) },
-      { label: "Shuffle", icon: "shuffle", action: () => app.playTracks(shuffled(tracks)) },
+      { label: "Shuffle", icon: "shuffle", action: () => app.shuffleTracks(tracks) },
       { label: "Save as Playlist", icon: "playlist", action: () => saveMix(name, tracks) },
     ]);
 
@@ -69,7 +69,10 @@
   let asking = $state(false);
   let answer = $state<AiMix | null>(null);
   let askError = $state("");
-  const suggestions = ["Calm songs for late-night coding", "Something epic to focus", "Upbeat songs with vocals", "Quiet instrumentals"];
+  // Suggestions from what the library has (its languages, decades and genres), asked for once per
+  // library (the app works them out once too); these until then, or if that fails.
+  let suggestions = $state(["Calm songs for late-night coding", "Something epic to focus", "Upbeat songs with vocals", "Quiet instrumentals"]);
+  let suggestionsFor = -1;
 
   async function ask(text = request) {
     text = text.trim();
@@ -88,13 +91,17 @@
   }
 
   // ---------- header ----------
-  // Looked at again every minute, so a window left open overnight says the right thing.
+  // Looked at again every minute, so a window left open overnight says the right thing (while the
+  // window can be seen; shown again after a night in the tray, at once).
   let now = $state(new Date());
   $effect(() => {
-    const timer = setInterval(() => {
+    if (!app.showing) return;
+    const look = () => {
       const d = new Date();
       if (d.getHours() !== now.getHours() || d.getDate() !== now.getDate()) now = d;
-    }, 60_000);
+    };
+    look();
+    const timer = setInterval(look, 60_000);
     return () => clearInterval(timer);
   });
   const greeting = $derived.by(() => {
@@ -103,6 +110,18 @@
   });
   const today = $derived(now.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" }));
   let djOpen = $state(false);
+  $effect(() => {
+    if (!app.aiReady || !djOpen) return;
+    const songs = app.tracks.length;
+    if (songs === suggestionsFor) return;
+    suggestionsFor = songs;
+    api
+      .djSuggestions()
+      .then((s) => {
+        if (Array.isArray(s) && s.length && s.every((x) => typeof x === "string")) suggestions = s.slice(0, 4);
+      })
+      .catch(() => {});
+  });
 
   // ---------- quick picks: what you played lately, one tap away ----------
   const quick = $derived.by(() => {
@@ -167,7 +186,7 @@
   });
 
   function shuffleAll() {
-    app.playTracks(shuffled(app.tracks));
+    app.shuffleTracks(app.tracks);
   }
 </script>
 
@@ -247,6 +266,9 @@
             <div>
               <h3>{answer.title}</h3>
               {#if answer.reason}<p>{answer.reason}</p>{/if}
+              {#if typeof answer.understood === "string" && answer.understood}<p class="understood" title="What the DJ understood">{answer.understood}</p>{/if}
+              {#if typeof answer.notice === "string" && answer.notice}<p class="dj-notice">{answer.notice}</p>{/if}
+              {#if typeof answer.withoutAi === "string" && answer.withoutAi}<p class="dj-notice">{answer.withoutAi}</p>{/if}
             </div>
             <div class="answer-actions">
               <button class="pill" onclick={() => app.playTracks(tracks)}><Icon name="play" size={15} />Play {tracks.length} songs</button>
@@ -849,6 +871,16 @@
     margin: 4px 0 0;
     color: var(--text-2);
     font-size: 13.5px;
+  }
+  .answer-head p.understood {
+    margin-top: 6px;
+    font-size: 12.5px;
+    color: var(--text-3);
+  }
+  .answer-head p.dj-notice {
+    margin-top: 4px;
+    font-size: 12.5px;
+    color: var(--text-2);
   }
   .answer-actions {
     display: flex;

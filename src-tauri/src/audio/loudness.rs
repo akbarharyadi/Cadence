@@ -13,6 +13,7 @@ use anyhow::{Result, anyhow};
 use ebur128::{EbuR128, Mode};
 use serde::{Deserialize, Serialize};
 
+use super::envelope::{self, Envelope};
 use super::source::Source;
 
 /// ReplayGain 2.0 reference loudness.
@@ -109,17 +110,27 @@ pub fn parse_tag_number(s: &str) -> Option<f32> {
 
 /// Measures one song. Returns its gain info and the analyzer (kept to compute album loudness).
 pub fn measure(path: &Path) -> Result<(GainInfo, EbuR128)> {
+    measure_with(path, false).map(|(g, m, _)| (g, m))
+}
+
+/// `measure`, also drawing the song's waveform (`envelope`) from the same decode when `envelope`
+/// is set: a max and a multiply-add per sample, next to the meter's oversampled true peak.
+pub fn measure_with(path: &Path, envelope: bool) -> Result<(GainInfo, EbuR128, Option<Envelope>)> {
     let mut src = Source::open(path)?;
     let (rate, channels) = (src.rate, src.channels);
     // True peak (4× oversampled, BS.1770): the peaks between samples that a DAC's reconstruction
     // filter (or resampling) actually produces, often above the highest sample of a loud master.
     let mut meter = EbuR128::new(channels as u32, rate, Mode::I | Mode::SAMPLE_PEAK | Mode::TRUE_PEAK)?;
+    let mut wave = if envelope { src.total_frames.and_then(envelope::Builder::new) } else { None };
     while let Some((samples, r, c)) = src.next_chunk()? {
         if r != rate || c != channels {
             // Format changed mid-stream (rare); measure what we have.
             break;
         }
         meter.add_frames_f32(samples)?;
+        if let Some(w) = wave.as_mut() {
+            w.add(samples, c);
+        }
     }
     let lufs = meter.loudness_global()?;
     if !lufs.is_finite() {
@@ -132,6 +143,7 @@ pub fn measure(path: &Path) -> Result<(GainInfo, EbuR128)> {
             peak: peak as f32,
         },
         meter,
+        wave.map(envelope::Builder::finish),
     ))
 }
 
@@ -145,17 +157,26 @@ fn true_peak(meter: &EbuR128, channels: usize) -> f64 {
 
 /// Measures every song of an album; returns per-song track gains and the album gain.
 pub fn measure_album(paths: &[&Path]) -> (Vec<Option<GainInfo>>, Option<GainInfo>) {
+    let (tracks, album, _) = measure_album_with(paths, &[]);
+    (tracks, album)
+}
+
+/// `measure_album`, also drawing the waveform of each song whose place in `waveforms` is true.
+pub fn measure_album_with(paths: &[&Path], waveforms: &[bool]) -> (Vec<Option<GainInfo>>, Option<GainInfo>, Vec<Option<Envelope>>) {
     let mut tracks = Vec::with_capacity(paths.len());
     let mut meters = Vec::new();
-    for p in paths {
-        match measure(p) {
-            Ok((g, m)) => {
+    let mut envelopes = Vec::with_capacity(paths.len());
+    for (i, p) in paths.iter().enumerate() {
+        match measure_with(p, waveforms.get(i).copied().unwrap_or(false)) {
+            Ok((g, m, e)) => {
                 tracks.push(Some(g));
                 meters.push(m);
+                envelopes.push(e);
             }
             Err(e) => {
                 log::warn!("loudness scan failed for {}: {e:#}", p.display());
                 tracks.push(None);
+                envelopes.push(None);
             }
         }
     }
@@ -166,7 +187,7 @@ pub fn measure_album(paths: &[&Path]) -> (Vec<Option<GainInfo>>, Option<GainInfo
             gain: (REFERENCE_LUFS - lufs) as f32,
             peak: tracks.iter().flatten().map(|g| g.peak).fold(0.0, f32::max),
         });
-    (tracks, album)
+    (tracks, album, envelopes)
 }
 
 #[cfg(test)]

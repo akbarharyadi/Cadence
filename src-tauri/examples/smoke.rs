@@ -48,6 +48,7 @@ fn main() {
             tone: None,
             start: t.cue.map_or(0.0, |c| c.start),
             end: t.cue.and_then(|c| c.end),
+            ..Default::default()
         })
         .collect();
     engine.send(Cmd::Load { items, index: 0 });

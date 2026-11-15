@@ -1,15 +1,67 @@
 <script lang="ts">
-  import { artUrl, formatDuration } from "#lib/api.js";
+  import { api, artUrl, formatDuration, type Album } from "#lib/api.js";
   import AlbumCard from "#lib/components/AlbumCard.svelte";
   import Icon from "#lib/components/Icon.svelte";
+  import Segmented from "#lib/components/Segmented.svelte";
   import TrackList from "#lib/components/TrackList.svelte";
-  import { app, shuffled } from "#lib/store.svelte.js";
+  import { app } from "#lib/store.svelte.js";
 
   let { name }: { name: string } = $props();
-  const artist = $derived(app.artists.find((a) => a.name.toLowerCase() === name.toLowerCase()));
-  const albums = $derived([...(artist?.albums ?? [])].sort((a, b) => (b.year ?? 0) - (a.year ?? 0)));
+  // Under any of its spellings (米津玄師 opens Kenshi Yonezu's page when they're one artist).
+  const artist = $derived(app.artistByName(name));
+  const also = $derived(artist?.also ?? []);
+
+  /** "Not the same artist": `other` is split out of this artist (no file changes; Undo puts it back). */
+  async function notSame(other: string) {
+    if (!artist) return;
+    const shown = artist.name;
+    const rest = [shown, ...also].filter((n) => n !== other);
+    try {
+      const pairs = await api.artistMarkDifferent(other, rest);
+      app.showToast(`“${other}” is shown as another artist now`, {
+        label: "Undo",
+        run: () => void api.artistForget(pairs).catch((e) => app.showToast(String(e))),
+      });
+    } catch (e) {
+      app.showToast(String(e));
+    }
+  }
+  // How the albums are ordered, remembered for every artist.
+  type Order = "newest" | "oldest" | "az";
+  const ORDER_KEY = "cadence-artist-album-order";
+  const orders: { value: Order; label: string }[] = [
+    { value: "newest", label: "Newest first" },
+    { value: "oldest", label: "Oldest first" },
+    { value: "az", label: "A–Z" },
+  ];
+  function savedOrder(): Order {
+    try {
+      const v = localStorage.getItem(ORDER_KEY);
+      return v === "oldest" || v === "az" ? v : "newest";
+    } catch {
+      return "newest";
+    }
+  }
+  let order = $state<Order>(savedOrder());
+  function setOrder(o: Order) {
+    order = o;
+    try {
+      localStorage.setItem(ORDER_KEY, o);
+    } catch {
+      // The order still applies until the page is closed.
+    }
+  }
+  const byTitle = (a: Album, b: Album) => a.title.localeCompare(b.title);
+  const sorters: Record<Order, (a: Album, b: Album) => number> = {
+    newest: (a, b) => (b.year ?? 0) - (a.year ?? 0) || byTitle(a, b),
+    // Albums without a year go last, not first.
+    oldest: (a, b) => (a.year || Infinity) - (b.year || Infinity) || byTitle(a, b),
+    az: byTitle,
+  };
+  const albums = $derived([...(artist?.albums ?? [])].sort(sorters[order]));
   const songs = $derived(albums.flatMap((a) => app.albumTracks(a)));
-  const portrait = $derived(albums[0]);
+  // The picture's glow comes from the newest album, whatever the order.
+  const portrait = $derived([...(artist?.albums ?? [])].sort(sorters.newest)[0]);
   const picture = $derived(artist ? app.artistPicture(artist, "large") : null);
   const time = $derived(songs.reduce((s, t) => s + t.duration, 0));
 </script>
@@ -25,16 +77,36 @@
       </button>
       <div class="info">
         <h1>{artist.name}</h1>
+        {#if also.length}
+          <p class="also">
+            Also written as
+            {#each also as other, i (other)}
+              {i ? ", " : ""}<span class="spelling">{other}</span>
+              <button class="link small" onclick={() => notSame(other)} title="“{other}” is someone else: show them as another artist">Not the same artist</button>
+            {/each}
+          </p>
+        {/if}
         <p class="facts">{albums.length} {albums.length === 1 ? "album" : "albums"}, {songs.length} {songs.length === 1 ? "song" : "songs"}, {formatDuration(time)}</p>
         <div class="actions">
           <button class="pill" onclick={() => app.playTracks(songs)}><Icon name="play" size={15} />Play</button>
-          <button class="pill ghost" onclick={() => app.playTracks(shuffled(songs))}><Icon name="shuffle" size={15} />Shuffle</button>
+          <button class="pill ghost" onclick={() => app.shuffleTracks(songs)}><Icon name="shuffle" size={15} />Shuffle</button>
+          {#if albums.length > 1}
+            <button class="pill ghost" onclick={() => app.shuffleAlbums(albums)} title="A random album of {artist.name}’s, whole and in order, then another">
+              <Icon name="album" size={15} />Shuffle albums
+            </button>
+            <button class="pill ghost" onclick={() => app.surpriseAlbum(albums)} title="Play one of {artist.name}’s albums, picked at random">
+              <Icon name="sparkle" size={15} />Surprise me
+            </button>
+          {/if}
         </div>
       </div>
     </header>
 
     <section>
-      <h2 class="section-title">Albums</h2>
+      <div class="albums-head">
+        <h2 class="section-title">Albums</h2>
+        {#if albums.length > 1}<Segmented label="Order of albums" options={orders} value={order} onchange={setOrder} />{/if}
+      </div>
       <div class="grid">
         {#each albums as album (album.id)}<AlbumCard {album} />{/each}
       </div>
@@ -129,12 +201,27 @@
     letter-spacing: -0.03em;
     line-height: 1;
   }
+  .also {
+    margin: 8px 0 0;
+    color: var(--text-2);
+    font-size: 13px;
+  }
+  .also .spelling {
+    color: var(--text-1, inherit);
+  }
+  .also .link {
+    margin-left: 4px;
+    font-size: 12px;
+    color: var(--text-3);
+    text-decoration: underline;
+  }
   .facts {
     margin: 10px 0 0;
     color: var(--text-2);
   }
   .actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
     margin-top: 20px;
   }
@@ -143,6 +230,17 @@
   }
   section .section-title {
     margin-bottom: 18px;
+  }
+  .albums-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
+  }
+  .albums-head .section-title {
+    margin-bottom: 0;
   }
   .grid {
     display: grid;

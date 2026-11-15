@@ -19,7 +19,7 @@
   <div class="update" role="status" transition:fly={{ y: 16, duration: 280, easing: cubicOut }}>
     <span class="mark"><Icon name="download" size={18} /></span>
     <div class="text">
-      <strong>{failed ? "The update didn’t work" : `Cadence ${updates.next}`}</strong>
+      <strong>{failed ? (updates.failed === "check" ? "Couldn’t check for updates" : "The update didn’t work") : `Cadence ${updates.next}`}</strong>
       <span>
         {#if failed}{updates.message}
         {:else if updates.phase === "downloading"}Downloading… {Math.round(updates.progress * 100)}%

@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { api, formatTime, type LyricLine, type Lyrics, type LyricsHit } from "#lib/api.js";
+  import { api, formatTime, type LyricLine, type Lyrics, type LyricsHit, type LyricsTranslation, type RubyPart, type TranslateLang } from "#lib/api.js";
+  import { checkedRuby, rubyPieces } from "#lib/ruby.js";
   import { app } from "#lib/store.svelte.js";
   import { untrack } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
@@ -28,7 +29,11 @@
       .then((l) => {
         if (id === songId) lyrics = l;
       })
-      .finally(() => (loading = false));
+      // No lyrics (offline, or the lookup failed): the view's empty state, quietly.
+      .catch(() => {})
+      .finally(() => {
+        if (id === songId) loading = false;
+      });
   });
 
   // Pronunciation: the lyrics in Latin letters under each line, for scripts you can't read.
@@ -45,13 +50,113 @@
     roman = [];
     if (!pronounce || !romanName || !l) return;
     const lines = l.synced.length ? l.synced.map((x) => x.text) : (l.plain ?? "").split("\n");
-    api.romanize(lines).then((r) => {
-      if (lyrics === l) roman = r;
-    });
+    api
+      .romanize(lines)
+      .then((r) => {
+        if (lyrics === l) roman = r;
+      })
+      .catch(() => {});
   });
   function togglePronounce() {
     pronounce = !pronounce;
     localStorage.setItem("cadence-pronounce", pronounce ? "on" : "off");
+  }
+  const stored = (key: string) => (typeof localStorage !== "undefined" ? localStorage.getItem(key) : null);
+  /** The lines as shown (timed ones, or the plain text's), which readings and translations follow. */
+  const shownLines = $derived(lyrics ? (lyrics.synced.length ? lyrics.synced.map((x) => x.text) : plainLines) : []);
+
+  // ---------- readings above the characters (furigana over kanji, pinyin over hanzi) ----------
+
+  const rubyName = $derived(romanName === "Romaji" ? (/[㐀-鿿]/.test(allText) ? "Furigana" : "") : romanName === "Pinyin" ? "Pinyin above" : "");
+  let furigana = $state(stored("cadence-furigana") === "on");
+  const rubyOn = $derived(furigana && !!rubyName);
+  let rubyRaw = $state<RubyPart[][] | null>(null);
+  $effect(() => {
+    const l = lyrics;
+    rubyRaw = null;
+    if (!rubyOn || !l) return;
+    api
+      .rubyLyrics(untrack(() => shownLines))
+      .then((r) => {
+        if (lyrics === l) rubyRaw = r;
+      })
+      .catch(() => {});
+  });
+  /** Per line its pieces with readings, only where they spell the line exactly. */
+  const rubyLines = $derived(rubyOn ? checkedRuby(shownLines, rubyRaw) : []);
+  function toggleFurigana() {
+    furigana = !furigana;
+    localStorage.setItem("cadence-furigana", furigana ? "on" : "off");
+  }
+
+  // ---------- translation under each line ----------
+
+  const LANG_NAMES: Record<TranslateLang, string> = { en: "English", id: "Indonesian", ja: "Japanese", ko: "Korean", zh: "Chinese" };
+  const isLang = (s: string | null): s is TranslateLang => !!s && s in LANG_NAMES;
+  /** The window's language, when it's one of those; else English. */
+  function systemLang(): TranslateLang {
+    const n = (typeof navigator !== "undefined" ? navigator.language : "en").toLowerCase();
+    if (n.startsWith("id") || n.startsWith("in")) return "id";
+    for (const c of ["ja", "ko", "zh"] as const) if (n.startsWith(c)) return c;
+    return "en";
+  }
+  let translateOn = $state(stored("cadence-translate") === "on");
+  const savedLang = stored("cadence-translate-lang");
+  let translateLang = $state<TranslateLang>(isLang(savedLang) ? savedLang : systemLang());
+  let translation = $state<LyricsTranslation | null>(null);
+  let translateState = $state<"off" | "translating" | "shown" | "needs-ai" | "same" | "error">("off");
+  let translateError = $state("");
+  const hasText = $derived(!!lyrics && !lyrics.instrumental && (lyrics.synced.length > 0 || !!lyrics.plain?.trim()));
+  // Asked only while the toggle is on, for the song on screen; another song cancels it.
+  $effect(() => {
+    const l = lyrics;
+    const id = songId;
+    const lang = translateLang;
+    translation = null;
+    translateError = "";
+    if (!translateOn || !l || !hasText) {
+      translateState = "off";
+      return;
+    }
+    translateState = "translating";
+    const count = untrack(() => shownLines.length);
+    let current = true;
+    api
+      .translateLyrics(id, lang)
+      .then((t) => {
+        if (!current || lyrics !== l) return;
+        if (!t || !Array.isArray(t.lines)) throw new Error("No translation came back.");
+        if (t.from === "needs-ai") translateState = "needs-ai";
+        else if (t.from === "same" || t.from === "none") translateState = "same";
+        else if (t.lines.length !== count) throw new Error("The translation didn’t line up with the lyrics.");
+        else {
+          translation = t;
+          translateState = "shown";
+        }
+      })
+      .catch((e) => {
+        if (!current || lyrics !== l) return;
+        translateState = "error";
+        translateError = e instanceof Error ? e.message : String(e);
+      });
+    return () => {
+      current = false;
+      api.translateCancel(id)?.catch?.(() => {});
+    };
+  });
+  const translatedLines = $derived(translateState === "shown" && translation ? translation.lines.map((x) => (typeof x === "string" ? x : "")) : []);
+  function toggleTranslate() {
+    translateOn = !translateOn;
+    localStorage.setItem("cadence-translate", translateOn ? "on" : "off");
+  }
+  function setTranslateLang(lang: string) {
+    if (!isLang(lang)) return;
+    translateLang = lang;
+    localStorage.setItem("cadence-translate-lang", lang);
+  }
+  function openAiSettings() {
+    app.nowPlayingOpen = false;
+    app.go({ name: "settings" });
   }
 
   // Timing nudge for this song (lyrics made for another version can run early or late), kept
@@ -91,13 +196,9 @@
    * position follows the player's own four updates a second.
    */
   let live = $state(app.position);
-  let visible = $state(typeof document === "undefined" || document.visibilityState === "visible");
+  // The page can be seen (the window not hidden in the tray or minimized; see showing.svelte.ts).
+  const visible = $derived(app.showing);
   const playing = $derived(!!app.status?.playing);
-  $effect(() => {
-    const onVis = () => (visible = document.visibilityState === "visible");
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
-  });
   $effect(() => {
     if (!(lyrics?.synced.length && panel === null && playing && visible)) {
       live = app.position;
@@ -122,6 +223,12 @@
   // Our own scrolls (below) are marked for as long as they can last, so their `scroll` events
   // aren't taken for the user's.
   let ownScrollUntil = 0;
+  // Where `scrollend` exists the smooth scroll says itself when it is over (a long one can outlast
+  // any fixed window); elsewhere the window is a guess.
+  const hasScrollEnd = typeof window !== "undefined" && "onscrollend" in window;
+  function onScrollEnd() {
+    ownScrollUntil = Date.now() + 100;
+  }
   const markUser = () => (userScrolledAt = Date.now());
   function onScroll() {
     if (Date.now() > ownScrollUntil) markUser();
@@ -131,7 +238,7 @@
   }
   function centre(el: HTMLElement | undefined, smooth: boolean) {
     if (!el) return;
-    ownScrollUntil = Date.now() + (smooth ? 1200 : 150);
+    ownScrollUntil = Date.now() + (smooth ? (hasScrollEnd ? 5000 : 1200) : 150);
     el.scrollIntoView({ behavior: smooth ? "smooth" : "instant", block: "center" });
   }
 
@@ -139,6 +246,8 @@
   $effect(() => {
     const i = active;
     void roman; // pronunciation lines change the layout: centre again
+    void translatedLines; // so do translations and readings above the lines
+    void rubyLines;
     if (i < 0 || !box || Date.now() - userScrolledAt < 4000) return;
     centre(box.querySelectorAll<HTMLElement>(".line")[i], !reducedMotion());
   });
@@ -185,7 +294,7 @@
         end: w.end ?? line.words![i + 1]?.time ?? Math.min(next?.time ?? w.time + 1, w.time + 1.5),
       }));
     }
-    const parts = /\s/.test(line.text) ? line.text.split(/(?<=\s)/) : [...line.text];
+    const parts = /\s/.test(line.text) ? splitAfterSpace(line.text) : [...line.text];
     const chars = parts.reduce((n, p) => n + p.trim().length, 0) || 1;
     const cjk = (line.text.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7a3]/g) ?? []).length;
     const quick = Math.max(1.2, cjk * 0.33 + (chars - cjk) * 0.07);
@@ -201,6 +310,8 @@
   }
 
   const sweep = $derived(active >= 0 && lyrics ? pieces(lyrics.synced[active], lyrics.synced[active + 1]) : []);
+  /** The sung line's pieces with their readings above (worked out once per line, not per tick). */
+  const sweepRuby = $derived(rubyPieces(sweep, active >= 0 ? rubyLines[active] : undefined));
   const progress = (p: Piece) => Math.min(1, Math.max(0, (pos + 0.1 - p.start) / (p.end - p.start)));
 
   /** How much of the sung line has been swept (0 to 1), weighted by each piece's length. */
@@ -215,9 +326,14 @@
     return total ? done / total : 0;
   });
 
+  /** Splits after every whitespace character ("a b" -> "a ", "b"); no lookbehind, which older WebKit can't parse. */
+  function splitAfterSpace(text: string): string[] {
+    return text.match(/[^\s]*\s|[^\s]+$/g) ?? [text];
+  }
+
   /** The pronunciation line in words, each with its share of the line, to sweep along with it. */
   function romanWords(text: string) {
-    const words = text.split(/(?<=\s)/);
+    const words = splitAfterSpace(text);
     const total = words.reduce((n, w) => n + w.trim().length, 0) || 1;
     let at = 0;
     return words.map((w) => {
@@ -340,10 +456,12 @@
   // Automatically, once the models are there: every song whose lyrics are opened.
   $effect(() => {
     const id = songId;
-    if (!placeable || lyrics?.voice || !app.voice?.installed || !app.voice.auto || untrack(() => asked.has(id))) return;
+    // Lyrics that came timed word by word (LRCLIB, enhanced LRC) follow the singing already.
+    const sourceWords = !!lyrics?.synced.some((l) => l.words?.length);
+    if (!placeable || lyrics?.voice || sourceWords || !app.voice?.installed || !app.voice.auto || untrack(() => asked.has(id))) return;
     asked.add(id);
     voiceError = "";
-    api.voiceFollow(id);
+    api.voiceFollow(id).catch(() => {});
   });
 
   // Done listening to this song: show the placed lyrics (or why not).
@@ -355,9 +473,12 @@
       return;
     }
     const id = songId;
-    api.lyrics(id).then((l) => {
-      if (id === songId) lyrics = l;
-    });
+    api
+      .lyrics(id)
+      .then((l) => {
+        if (id === songId) lyrics = l;
+      })
+      .catch(() => {});
   });
 
   // The models just finished downloading from this view's panel: start on this song.
@@ -507,6 +628,9 @@
   );
 </script>
 
+<!-- A line's pieces with their readings above (furigana, pinyin). -->
+{#snippet withRuby(parts: RubyPart[])}{#each parts as r}{#if r.ruby}<ruby>{r.text}<rt>{r.ruby}</rt></ruby>{:else}{r.text}{/if}{/each}{/snippet}
+
 <div class="wrap">
   {#if panel === "search"}
     <div class="panel">
@@ -591,7 +715,7 @@
       {/if}
     </div>
   {:else}
-    <div class="lyrics" role="presentation" bind:this={box} onwheel={markUser} ontouchmove={markUser} onkeydown={onKey} onscroll={onScroll}>
+    <div class="lyrics" class:furi={rubyOn} role="presentation" bind:this={box} onwheel={markUser} ontouchmove={markUser} onkeydown={onKey} onscroll={onScroll} onscrollend={hasScrollEnd ? onScrollEnd : undefined}>
       {#if loading}
         <p class="status">Looking for lyrics…</p>
       {:else if lyrics?.instrumental}
@@ -602,7 +726,9 @@
           <button class="line" class:active={i === active} class:past={i < active} class:gap={!line.text} style="--c: {singerColor(line)}; --ct: {tint(singerColor(line))}" onclick={() => app.seek(Math.max(0, line.time + offset))}>
             {#if singerLabels[i]}<span class="who"><i></i>{singerLabels[i]}</span>{/if}
             {#if i === active && line.text}
-              {#each sweep as p}<span class="w" style="--p: {progress(p) * 100}%">{p.text}</span>{/each}
+              {#each sweepRuby as p}<span class="w" style="--p: {progress(p) * 100}%">{@render withRuby(p.parts)}</span>{/each}
+            {:else if line.text && rubyLines[i]}
+              {@render withRuby(rubyLines[i] ?? [])}
             {:else}
               {line.text || "♪"}
             {/if}
@@ -615,14 +741,15 @@
                 {/if}
               </span>
             {/if}
+            {#if translatedLines[i] && line.text}<span class="tr">{translatedLines[i]}</span>{/if}
           </button>
         {/each}
         {#if credit}<p class="credit">{credit}</p>{/if}
         <div class="pad"></div>
       {:else if lyrics?.plain}
-        {#if roman.length}
+        {#if roman.length || translatedLines.length || rubyLines.some(Boolean)}
           <div class="plain">
-            {#each plainLines as text, i}<p>{text}{#if roman[i]}<span class="roman">{roman[i]}</span>{/if}</p>{/each}
+            {#each plainLines as text, i}<p>{#if rubyLines[i]}{@render withRuby(rubyLines[i] ?? [])}{:else}{text}{/if}{#if roman[i]}<span class="roman">{roman[i]}</span>{/if}{#if translatedLines[i] && text.trim()}<span class="tr">{translatedLines[i]}</span>{/if}</p>{/each}
           </div>
         {:else}
           <p class="plain">{lyrics.plain}</p>
@@ -670,6 +797,28 @@
           <button class="chip" class:on={pronounce} aria-pressed={pronounce} onclick={togglePronounce} title="Show the lyrics in Latin letters">
             <span class="aa">Aa</span>{romanName}
           </button>
+        {/if}
+        {#if rubyName && hasText}
+          <button class="chip" class:on={furigana} aria-pressed={furigana} onclick={toggleFurigana}
+            title={rubyName === "Furigana" ? "Show how the kanji are read, above them" : "Show each character’s pinyin above it"}>
+            <span class="aa">{rubyName === "Furigana" ? "ふり" : "pīn"}</span>{rubyName}
+          </button>
+        {/if}
+        {#if hasText}
+          <button class="chip" class:on={translateOn} class:busy={translateState === "translating"} aria-pressed={translateOn} onclick={toggleTranslate}
+            title={translateState === "needs-ai" ? "Translations come with some lyrics; for the others Cadence asks the AI DJ, which isn’t set up" : translateState === "same" ? `These lyrics are in ${LANG_NAMES[translateLang]} already` : translateState === "error" ? translateError : `Show a translation into ${LANG_NAMES[translateLang]} under each line`}>
+            <span class="aa">文A</span>{translateState === "translating" ? "Translating…" : "Translation"}
+          </button>
+          {#if translateOn}
+            <select class="lang" aria-label="Translate into" value={translateLang} onchange={(e) => setTranslateLang(e.currentTarget.value)}>
+              {#each Object.entries(LANG_NAMES) as [code, name] (code)}<option value={code}>{name}</option>{/each}
+            </select>
+            {#if translateState === "needs-ai"}
+              <button class="chip warn" onclick={openAiSettings} title="Turn on the AI DJ in Settings to translate lyrics that don’t come with a translation">Needs the AI DJ: Settings</button>
+            {:else if translateState === "error"}
+              <span class="chip warn" title={translateError}>Couldn’t translate</span>
+            {/if}
+          {/if}
         {/if}
         {#if app.voice?.supported && placeable}
           {#if listening}
@@ -846,6 +995,57 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
+  }
+  /* Readings above the characters: the room for them is kept on every line while they're on (not
+     just the sung one), so no line grows or shrinks as the song plays. */
+  .furi .line,
+  .furi .plain {
+    line-height: 2.05;
+  }
+  .furi .line {
+    padding-top: 4px;
+  }
+  ruby {
+    ruby-position: over;
+  }
+  rt {
+    font-family: var(--sans, inherit);
+    font-size: 0.42em;
+    font-weight: 600;
+    letter-spacing: 0;
+    line-height: 1;
+    color: rgba(var(--ct, 255, 255, 255), 0.75);
+  }
+  /* In the sung line the base text is drawn by the sweep; its reading stays plainly readable. */
+  .w rt {
+    -webkit-text-fill-color: rgba(255, 255, 255, 0.85);
+    color: rgba(255, 255, 255, 0.85);
+  }
+  /* The translation under each line: like the pronunciation, a little dimmer, never swept. */
+  .tr {
+    display: block;
+    margin-top: 3px;
+    font-family: var(--sans, inherit);
+    font-size: 0.5em;
+    font-weight: 500;
+    letter-spacing: 0;
+    line-height: 1.35;
+    opacity: 0.72;
+  }
+  .line.active .tr {
+    color: rgba(255, 255, 255, 0.8);
+  }
+  .lang {
+    height: 28px;
+    padding: 0 6px;
+    border-radius: 99px;
+    border: 0;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.8);
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .lang option {
+    color: #10111a;
   }
   /* The pronunciation under each line: smaller and lighter, but following the line's state. */
   .roman {

@@ -1,9 +1,11 @@
 <script lang="ts">
   import { artUrl, formatTime, type Track } from "#lib/api.js";
   import { app, type MenuItem } from "#lib/store.svelte.js";
-  import { untrack } from "svelte";
+  import { registerSelection, selectingIn } from "#lib/selection.js";
+  import { onMount, untrack } from "svelte";
   import Icon from "./Icon.svelte";
   import Rating from "./Rating.svelte";
+  import SelectionBar from "./SelectionBar.svelte";
   import { eqBars } from "#lib/eq.js";
 
   let {
@@ -12,22 +14,33 @@
     showArt = false,
     showAlbum = false,
     hideArtist = "",
+    label = "Songs",
+    identity,
     extraMenu,
     onreorder,
+    onremove,
   }: {
     tracks: Track[];
     numbered?: boolean;
     showArt?: boolean;
     showAlbum?: boolean;
     hideArtist?: string;
+    /** The list's accessible name. */
+    label?: string;
+    /** When this changes the list shows other songs (not the same ones refreshed): the selection goes. */
+    identity?: unknown;
     /** Extra right-click items for a row (e.g. "Remove from playlist"). */
     extraMenu?: (t: Track, i: number) => MenuItem[];
-    /** Rows can be dragged to a new position. */
-    onreorder?: (from: number, to: number) => void;
+    /** Rows can be dragged to a new position. `rows`: several selected rows dragged together (ascending). */
+    onreorder?: (from: number, to: number, rows?: number[]) => void;
+    /** Rows can be removed (a user playlist): Delete, and "Remove from this playlist" for a selection. */
+    onremove?: (rows: number[]) => void;
   } = $props();
 
   let dragFrom = $state<number | null>(null);
   let dropAt = $state<number | null>(null);
+  /** Several selected rows being dragged together (the dragged row is one of them). */
+  let dragRows: number[] | null = null;
 
   // A drag is ours only if it carries this type: a stale `dragFrom` must never accept someone else's drop.
   const ROW_TYPE = "application/x-cadence-row";
@@ -35,10 +48,12 @@
 
   let edgeSpeed = 0;
   let edgeFrame = 0;
+  /** The element the page scrolls in (the app's `.content`, else the document). */
+  const scrollerOf = (el: HTMLElement) => (el.closest(".content") as HTMLElement | null) ?? document.documentElement;
   /** Drag over: where the scrolling part of the page is, in the window. */
   function scrollBox(): { el: HTMLElement; top: number; bottom: number } | null {
     if (!listEl) return null;
-    const el = (listEl.closest(".content") as HTMLElement | null) ?? document.documentElement;
+    const el = scrollerOf(listEl);
     if (el === document.documentElement) return { el, top: 0, bottom: window.innerHeight };
     const r = el.getBoundingClientRect();
     return { el, top: r.top, bottom: r.bottom };
@@ -64,6 +79,7 @@
   function clearDrag() {
     dragFrom = null;
     dropAt = null;
+    dragRows = null;
     edgeSpeed = 0;
     if (edgeFrame) cancelAnimationFrame(edgeFrame);
     edgeFrame = 0;
@@ -99,9 +115,329 @@
       clearDrag();
     };
   });
-  const menu = (e: MouseEvent, i: number) => app.trackMenu(e, tracks, i, extraMenu?.(tracks[i], i) ?? []);
 
-  let selected = $state<string | null>(null);
+  // ---------- selection ----------
+  // By row position in `tracks` (a playlist can list a song twice: each row is its own). A plain
+  // Set, changed in place, plus a version number the rows read: a toggle is O(1), selecting a
+  // 30,000-row range only fills the Set, and only the rows on screen look at it again.
+  const sel = new Set<number>();
+  let selV = $state(0);
+  /** Where Shift+click / Shift+arrows extend from. */
+  let anchor = -1;
+  /** The row the keyboard is on (aria-activedescendant). */
+  let active = $state(-1);
+  /** Touch: after a long-press, taps add and remove rows instead of playing. */
+  let mode = $state(false);
+  /** The arrow keys were used last (not the mouse): the active row shows a focus ring. */
+  let keyed = $state(false);
+
+  const uid = $props.id();
+  const me = Symbol("track-list");
+
+  function isSel(i: number): boolean {
+    void selV;
+    return sel.has(i);
+  }
+  const count = $derived.by(() => {
+    void selV;
+    return sel.size;
+  });
+  const multi = $derived(count > 1 || mode);
+
+  function changed() {
+    selV++;
+    if (sel.size) selectingIn(me);
+  }
+  function selectOnly(i: number) {
+    sel.clear();
+    if (i >= 0) sel.add(i);
+    anchor = i;
+    active = i;
+    changed();
+  }
+  function toggle(i: number) {
+    if (sel.has(i)) sel.delete(i);
+    else sel.add(i);
+    anchor = i;
+    active = i;
+    changed();
+  }
+  /** Selects anchor..to (replacing the selection, or `add`ing to it). */
+  function selectRange(from: number, to: number, add = false) {
+    if (!add) sel.clear();
+    const lo = Math.max(0, Math.min(from, to));
+    const hi = Math.min(tracks.length - 1, Math.max(from, to));
+    for (let k = lo; k <= hi; k++) sel.add(k);
+    active = to;
+    changed();
+  }
+  function selectAll() {
+    sel.clear();
+    const n = tracks.length;
+    for (let k = 0; k < n; k++) sel.add(k);
+    if (active < 0 || active >= n) active = 0;
+    anchor = active;
+    changed();
+  }
+  function clearSelection() {
+    sel.clear();
+    mode = false;
+    anchor = -1;
+    changed();
+  }
+  /** The selected rows, top to bottom. */
+  const rowsSelected = () => [...sel].filter((i) => i < tracks.length).sort((a, b) => a - b);
+  const selectedTracks = () => rowsSelected().map((i) => tracks[i]);
+
+  onMount(() =>
+    registerSelection({
+      id: me,
+      // Android Back: selection mode (or several selected songs) goes first; one selected row is just where you are.
+      leave: () => {
+        if (!mode && sel.size < 2) return false;
+        clearSelection();
+        return true;
+      },
+      clear: () => {
+        if (sel.size || mode) clearSelection();
+      },
+    }),
+  );
+
+  /** One key per row that tells two rows of the same song apart: the id, and which of its rows it is. */
+  function rowKeys(list: Track[]): string[] {
+    const seen = new Map<string, number>();
+    return list.map((t) => {
+      const n = seen.get(t.id) ?? 0;
+      seen.set(t.id, n + 1);
+      return n ? `${t.id}#${n}` : t.id;
+    });
+  }
+
+  // The same list refreshed (library reload, a song removed): the selection follows its songs to
+  // their new rows. Another list (`identity` changed): it's cleared. Only when something is
+  // selected does this look at the rows (once per new list, never per frame or player tick).
+  let shownTracks: Track[] = untrack(() => tracks);
+  let shownIdentity: unknown = untrack(() => identity);
+  $effect.pre(() => {
+    const next = tracks;
+    const id = identity;
+    untrack(() => {
+      try {
+        const old = shownTracks;
+        shownTracks = next;
+        if (id !== shownIdentity) {
+          shownIdentity = id;
+          sel.clear();
+          mode = false;
+          anchor = active = -1;
+          changed();
+          return;
+        }
+        if (old === next || (!sel.size && active < 0 && anchor < 0)) return;
+        const before = rowKeys(old);
+        const where = new Map<string, number>();
+        rowKeys(next).forEach((k, i) => where.set(k, i));
+        const follow = (i: number, keep: boolean) => {
+          if (i < 0) return -1;
+          const j = where.get(before[i]);
+          return j ?? (keep ? Math.min(i, next.length - 1) : -1);
+        };
+        const kept = [...sel].map((i) => follow(i, false)).filter((j) => j >= 0);
+        sel.clear();
+        for (const j of kept) sel.add(j);
+        anchor = follow(anchor, true);
+        active = follow(active, true);
+        if (!sel.size) mode = false;
+        changed();
+      } catch {
+        sel.clear();
+        mode = false;
+        anchor = active = -1;
+        changed();
+      }
+    });
+  });
+
+  // ---------- pointer ----------
+  /** Touch or mouse, from the last press on the list (a long-press arrives as a contextmenu event). */
+  let pointer = "mouse";
+  /** The click that ends a long-press must not also toggle the row. */
+  let swallowClick = false;
+
+  function rowClick(e: MouseEvent, i: number) {
+    keyed = false;
+    if (swallowClick) {
+      swallowClick = false;
+      return;
+    }
+    if (mode) {
+      toggle(i);
+      if (!sel.size) mode = false;
+    } else if (e.shiftKey) {
+      const from = anchor >= 0 && anchor < tracks.length ? anchor : i;
+      anchor = from;
+      selectRange(from, i, e.ctrlKey || e.metaKey);
+    } else if (e.ctrlKey || e.metaKey) toggle(i);
+    else selectOnly(i);
+  }
+
+  function rowContextMenu(e: MouseEvent, i: number) {
+    if (pointer === "touch") {
+      // Long-press: selection mode, with this row selected (the menu is in the bar's "More").
+      e.preventDefault();
+      swallowClick = true;
+      if (!mode) {
+        mode = true;
+        selectOnly(i);
+      } else if (!sel.has(i)) toggle(i);
+      return;
+    }
+    menu(e, i);
+  }
+
+  /** Right-click / "More": the whole selection when the row is part of it, else just this row. */
+  function menu(e: MouseEvent, i: number) {
+    if (!tracks[i]) return;
+    if (!sel.has(i)) selectOnly(i);
+    if (sel.size > 1) openSelectionMenu(e);
+    else app.trackMenu(e, tracks, i, extraMenu?.(tracks[i], i) ?? []);
+  }
+
+  function openSelectionMenu(e: MouseEvent) {
+    const rows = rowsSelected();
+    if (!rows.length) return;
+    if (rows.length === 1) {
+      const i = rows[0];
+      app.trackMenu(e, tracks, i, extraMenu?.(tracks[i], i) ?? []);
+      return;
+    }
+    app.songsMenu(e, rows.map((i) => tracks[i]), onremove ? [{ label: "Remove from this playlist", icon: "trash", action: () => removeSelected() }] : []);
+  }
+
+  function removeSelected() {
+    const rows = rowsSelected();
+    if (!onremove || !rows.length) return;
+    sel.clear();
+    mode = false;
+    anchor = -1;
+    // The keyboard stays where the first removed row was (the next song moves up into it).
+    active = rows[0];
+    changed();
+    onremove(rows);
+  }
+
+  // ---------- keyboard ----------
+  let typed = "";
+  let typedTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => () => clearTimeout(typedTimer));
+
+  /** Type-ahead: the next song whose title starts with what was typed (the same letter again: the one after). */
+  function typeAhead(ch: string) {
+    clearTimeout(typedTimer);
+    typed += ch.toLowerCase();
+    typedTimer = setTimeout(() => (typed = ""), 800);
+    const q = /^(.)\1+$/u.test(typed) ? typed[0] : typed;
+    const n = tracks.length;
+    const from = q.length === 1 ? active + 1 : Math.max(0, active);
+    for (let k = 0; k < n; k++) {
+      const i = (from + k) % n;
+      if (tracks[i].title.toLowerCase().startsWith(q)) {
+        selectOnly(i);
+        reveal(i);
+        return;
+      }
+    }
+  }
+
+  /** How many rows a page (PageUp / PageDown) is. */
+  function pageRows(): number {
+    if (!listEl) return 10;
+    return Math.max(1, Math.floor(scrollerOf(listEl).clientHeight / ROW) - 1);
+  }
+
+  /** Scrolls row `i` into view (the virtual window then builds it): one measurement, one scroll. */
+  function reveal(i: number) {
+    const el = listEl;
+    if (!el) return;
+    const scroller = scrollerOf(el);
+    const box = scroller === document.documentElement ? { top: 0, bottom: window.innerHeight } : scroller.getBoundingClientRect();
+    let top: number;
+    if (virtual) top = el.getBoundingClientRect().top + i * ROW;
+    else {
+      const row = el.querySelector<HTMLElement>(`[data-row-i="${i}"]`);
+      if (!row) return;
+      top = row.getBoundingClientRect().top;
+    }
+    // The sticky top bar covers the top 52 px; on phones the player and the tab bar cover the bottom.
+    const above = box.top + 60;
+    const below = box.bottom - (document.documentElement.classList.contains("phone") ? 150 : 12);
+    if (top < above) scroller.scrollTop -= above - top;
+    else if (top + ROW > below) scroller.scrollTop += top + ROW - below;
+  }
+
+  function onKey(e: KeyboardEvent) {
+    // The row's own buttons (heart, stars, album) keep their keys.
+    if (e.target !== listEl || e.altKey) return;
+    const n = tracks.length;
+    if (!n) return;
+    const mod = e.ctrlKey || e.metaKey;
+    const k = e.key;
+    const cur = active >= 0 && active < n ? active : -1;
+    let to = -1;
+    if (k === "ArrowDown") to = cur < 0 ? 0 : Math.min(n - 1, cur + 1);
+    else if (k === "ArrowUp") to = cur < 0 ? 0 : Math.max(0, cur - 1);
+    else if (k === "Home") to = 0;
+    else if (k === "End") to = n - 1;
+    else if (k === "PageDown") to = cur < 0 ? 0 : Math.min(n - 1, cur + pageRows());
+    else if (k === "PageUp") to = Math.max(0, cur - pageRows());
+    if (to >= 0) {
+      e.preventDefault();
+      keyed = true;
+      if (e.shiftKey) {
+        const from = anchor >= 0 && anchor < n ? anchor : cur >= 0 ? cur : to;
+        anchor = from;
+        selectRange(from, to, mod);
+      } else if (mod) active = to; // moves without selecting (Ctrl+Space then picks)
+      else selectOnly(to);
+      reveal(to);
+      return;
+    }
+    if (mod && !e.shiftKey && k.toLowerCase() === "a") {
+      e.preventDefault();
+      selectAll();
+    } else if (k === "Enter" && !mod && !e.shiftKey) {
+      if (cur < 0) return;
+      e.preventDefault();
+      play(cur);
+    } else if (k === " " && mod) {
+      if (cur < 0) return;
+      e.preventDefault();
+      keyed = true;
+      toggle(cur);
+    } else if (k === "Escape") {
+      // Used here: nothing behind the list (Back, a panel) also takes this Escape.
+      if (!sel.size && !mode) return;
+      e.preventDefault();
+      e.stopPropagation();
+      clearSelection();
+    } else if ((k === "Delete" || k === "Backspace") && !mod) {
+      if (!onremove || !sel.size) return;
+      e.preventDefault();
+      removeSelected();
+    } else if (k === "ContextMenu" || (k === "F10" && e.shiftKey)) {
+      if (cur < 0) return;
+      e.preventDefault();
+      const row = listEl?.querySelector<HTMLElement>(`[data-row-i="${cur}"]`);
+      const r = row?.getBoundingClientRect();
+      menu(new MouseEvent("contextmenu", { clientX: (r?.left ?? 0) + 60, clientY: (r?.top ?? 0) + ROW / 2 }), cur);
+    } else if (!mod && (/^[\p{L}\p{N}]$/u.test(k) || (typed && k.length === 1))) {
+      // Letters and digits start it (other keys stay shortcuts; Space with nothing typed stays play / pause).
+      e.preventDefault();
+      typeAhead(k);
+    }
+  }
+
   const multiDisc = $derived(numbered && new Set(tracks.map((t) => t.discNo ?? 1)).size > 1);
 
   const isCurrent = (t: Track) => app.current?.id === t.id;
@@ -119,7 +455,7 @@
   $effect(() => {
     const el = listEl;
     if (!virtual || !el) return;
-    const scroller = (el.closest(".content") as HTMLElement | null) ?? document.documentElement;
+    const scroller = scrollerOf(el);
     const count = tracks.length;
     const update = () => {
       const top = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
@@ -137,37 +473,65 @@
       resize.disconnect();
     };
   });
-  // While a row is being dragged it stays built, even when scrolled far off: a removed row never
-  // gets its dragend.
-  const lo = $derived(virtual ? (dragFrom !== null ? Math.min(first, dragFrom) : first) : 0);
-  const hi = $derived(virtual ? (dragFrom !== null ? Math.max(last, dragFrom + 1) : last) : tracks.length);
-  const start = $derived(lo);
-  const shown = $derived(virtual ? tracks.slice(lo, hi) : tracks);
+  // While a row is being dragged it stays built (a removed row never gets its dragend), even
+  // when scrolled far off: then it is the one extra row besides the window, taken out of the
+  // flow (absolute, at its own place) so the padding below still adds up.
+  const items = $derived.by(() => {
+    if (!virtual) return tracks.map((t, i) => ({ t, i, pinned: false }));
+    const out: { t: Track; i: number; pinned: boolean }[] = [];
+    const from = dragFrom;
+    const outside = from !== null && (from < first || from >= last) && from < tracks.length;
+    if (outside && from! < first) out.push({ t: tracks[from!], i: from!, pinned: true });
+    for (let i = first; i < last; i++) out.push({ t: tracks[i], i, pinned: false });
+    if (outside && from! >= last) out.push({ t: tracks[from!], i: from!, pinned: true });
+    return out;
+  });
+  /** The active row, when it is built (a row scrolled out of the window has no element to point at). */
+  const activeId = $derived(active >= 0 && active < tracks.length && (!virtual || (active >= first && active < last)) ? `${uid}-r${active}` : undefined);
 </script>
 
+<!-- One tab stop: the list has the keyboard and points at the active row (aria-activedescendant),
+     so rows can come and go with the virtual window without losing focus. -->
 <div
   class="list"
   class:numbered
+  class:multi
+  class:keyed
   role="listbox"
-  tabindex="-1"
+  aria-label={label}
+  aria-multiselectable="true"
+  aria-activedescendant={activeId}
+  tabindex="0"
   bind:this={listEl}
-  style={virtual ? `padding-top: ${lo * ROW}px; padding-bottom: ${Math.max(0, tracks.length - hi) * ROW}px` : undefined}
+  onkeydown={onKey}
+  onpointerdown={(e) => {
+    pointer = e.pointerType || "mouse";
+    swallowClick = false;
+  }}
+  style={virtual ? `padding-top: ${first * ROW}px; padding-bottom: ${Math.max(0, tracks.length - last) * ROW}px` : undefined}
 >
-  {#each shown as t, k (t.id + (k + start))}
-    {@const i = k + start}
+  {#each items as { t, i, pinned } (t.id + i)}
     {#if multiDisc && (i === 0 || (tracks[i - 1].discNo ?? 1) !== (t.discNo ?? 1))}
       <div class="disc">Disc {t.discNo ?? 1}</div>
     {/if}
+    <!-- The list has the keyboard for its rows (see onKey); a row itself is not a tab stop. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_interactive_supports_focus -->
     <div
       class="row"
+      id="{uid}-r{i}"
+      data-row-i={i}
       class:current={isCurrent(t)}
       class:skipped={app.isSkipped(t)}
-      class:selected={selected === t.id}
+      class:selected={isSel(i)}
+      class:active={active === i}
+      class:pinned
+      style={pinned ? `top: ${i * ROW}px` : undefined}
       class:drop-before={dropAt === i && dragFrom !== null && dragFrom > i}
       class:drop-after={dropAt === i && dragFrom !== null && dragFrom < i}
       draggable={!!onreorder}
       ondragstart={(e) => {
         dragFrom = i;
+        dragRows = sel.size > 1 && sel.has(i) ? rowsSelected() : null;
         e.dataTransfer?.setData(ROW_TYPE, String(i));
         e.dataTransfer?.setData("text/plain", String(i));
         if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
@@ -178,16 +542,19 @@
         if (!ours(e)) return;
         e.preventDefault();
         const from = dragFrom;
+        const rows = dragRows;
         clearDrag();
-        if (from !== null && from !== i) onreorder?.(from, i);
+        if (from === null || from === i) return;
+        // Several selected rows move together; dropped onto one of them, nothing moves.
+        if (rows) {
+          if (!rows.includes(i)) onreorder?.(from, i, rows);
+        } else onreorder?.(from, i);
       }}
       role="option"
-      aria-selected={selected === t.id}
-      tabindex="0"
-      onclick={() => (selected = t.id)}
-      ondblclick={() => play(i)}
-      onkeydown={(e) => e.key === "Enter" && play(i)}
-      oncontextmenu={(e) => { selected = t.id; menu(e, i); }}
+      aria-selected={isSel(i)}
+      onclick={(e) => rowClick(e, i)}
+      ondblclick={() => !mode && play(i)}
+      oncontextmenu={(e) => rowContextMenu(e, i)}
     >
       <div class="lead">
         {#if showArt}
@@ -202,7 +569,7 @@
         {:else}
           <span class="num">{numbered ? (t.trackNo ?? i + 1) : i + 1}</span>
         {/if}
-        <button class="row-play" aria-label="Play {t.title}" onclick={(e) => { e.stopPropagation(); play(i); }}>
+        <button class="row-play" tabindex="-1" aria-label="Play {t.title}" onclick={(e) => { e.stopPropagation(); play(i); }}>
           <Icon name="play" size={14} />
         </button>
       </div>
@@ -213,7 +580,7 @@
         {#if t.artist !== hideArtist}<div class="sub">{t.artist}</div>{/if}
       </div>
       {#if showAlbum}
-        <button class="album" onclick={(e) => { e.stopPropagation(); app.go({ name: "album", id: t.albumId }); }}>{t.album}</button>
+        <button class="album" tabindex="-1" onclick={(e) => { e.stopPropagation(); app.go({ name: "album", id: t.albumId }); }}>{t.album}</button>
       {/if}
       <div class="marks" class:rated={app.ratingOf(t) > 0}>
         <span class="stars"><Rating value={app.ratingOf(t)} size={13} onrate={(n) => app.setRating([t], n)} label="Rating for {t.title}" /></span>
@@ -229,16 +596,38 @@
         </button>
       </div>
       <div class="time">{formatTime(t.duration)}</div>
-      <button class="more" aria-label="More options for {t.title}" title="More options" onclick={(e) => { e.stopPropagation(); menu(e, i); }}>
+      <button class="more" tabindex="-1" aria-label="More options for {t.title}" title="More options" onclick={(e) => { e.stopPropagation(); menu(e, i); }}>
         <Icon name="more" size={16} />
       </button>
     </div>
   {/each}
 </div>
 
+{#if multi}
+  <SelectionBar
+    {count}
+    onplay={() => app.playTracks(selectedTracks(), 0, true)}
+    onqueue={() => app.enqueue(selectedTracks(), false)}
+    onplaylist={() => (app.picker = selectedTracks())}
+    onremove={onremove ? removeSelected : undefined}
+    onmore={openSelectionMenu}
+    onclear={clearSelection}
+  />
+{/if}
+
 <style>
   .list {
     outline: none;
+    position: relative;
+  }
+  /* The row being dragged, far outside the built window: out of the flow, at its own place. */
+  .row.pinned {
+    position: absolute;
+    left: 0;
+    right: 0;
+  }
+  .list .row.pinned::before {
+    display: none;
   }
   .disc {
     font-family: var(--display);
@@ -289,11 +678,20 @@
   .row.drop-after {
     box-shadow: inset 0 -2px 0 var(--accent);
   }
-  .row:focus-visible {
+  /* The keyboard's row, while the list has the keyboard (arrows used, not the mouse). */
+  .list.keyed:focus .row.active {
     box-shadow: inset 0 0 0 2px var(--accent);
   }
   .row.current {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  /* Several selected: tinted with the accent so the set reads at a glance (in every theme; above
+     the playing row's tint, whose title stays accent-coloured). */
+  .list.multi .row.selected {
+    background: color-mix(in srgb, var(--accent) 22%, var(--active));
+  }
+  .list.multi .row.selected:hover {
+    background: color-mix(in srgb, var(--accent) 28%, var(--active));
   }
   .row.current .title {
     color: var(--accent);

@@ -1,5 +1,9 @@
 <script lang="ts">
+  import { openPalette } from "#lib/palette.svelte.js";
+  import { startExport, startExportAll, startImport } from "#lib/playlistTransfer.svelte.js";
+  import { MOD } from "#lib/shortcuts.js";
   import { newSmart } from "#lib/smart.js";
+  import type { Playlist } from "#lib/api.js";
   import { app, type View } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
 
@@ -72,12 +76,50 @@
             unit: "names",
             about: "Asking the catalogue which artists in your library also go by a name in Latin letters.",
           }
+        : app.namesJob
+        ? {
+            label: "Learning artist names",
+            done: app.namesJob.done,
+            total: app.namesJob.total,
+            unit: "names",
+            about: "Asking MusicBrainz what else your artists are called, about one name a second (Settings › Learn artist names online).",
+          }
+        : app.lbImportJob
+        ? {
+            label: "Reading ListenBrainz history",
+            done: 0,
+            total: 0,
+            about: `${app.lbImportJob.seen.toLocaleString()} listens read so far, a thousand at a time (Settings › Scrobbling). Nothing is added until you say so.`,
+          }
+        : app.lyricIndexJob
+        ? {
+            label: "Indexing lyrics",
+            done: app.lyricIndexJob.done,
+            total: app.lyricIndexJob.total,
+            unit: "songs",
+            about: "Reading your saved lyrics once, so Search can find a song by a line of it. Everything stays on this computer.",
+          }
         : app.healthJob
         ? {
             label: app.healthJob.kind === "quality" ? "Checking file quality" : "Checking files",
             done: app.healthJob.done,
             total: app.healthJob.total,
             about: app.healthJob.kind === "quality" ? "Looking for lossless files made from lossy ones." : "Decoding every file and checking it against its checksum.",
+          }
+        : app.backupRunning
+        ? {
+            label: "Backing up your data",
+            done: 0,
+            total: 0,
+            about: "The day's snapshot of your playlists, favorites, history and settings (Settings › Backup).",
+          }
+        : app.waveJob
+        ? {
+            label: app.waveJob.paused ? "Waveforms paused" : "Preparing waveforms",
+            done: app.waveJob.done,
+            total: app.waveJob.total,
+            unit: "songs",
+            about: "Drawing each song's waveform once for the seek bar, in the background (Settings › Waveform seek bar).",
           }
         : app.scan
       ? { label: "Importing", ...app.scan, about: "" }
@@ -125,23 +167,17 @@
         icon: "smart",
         action: () => (app.smartEditing = { id: "", name: "", trackIds: [], smart: newSmart(), created: 0, updated: 0 }),
       },
+      { label: "Import playlist…", icon: "file", action: () => void startImport() },
+      ...(app.playlists.length ? [{ label: "Export all playlists…", icon: "download", action: () => startExportAll() }] : []),
     ]);
   }
 
-  export function focusSearch() {
-    searchInput?.focus();
-    searchInput?.select();
+  /** Right-click on a playlist. */
+  function playlistMenu(e: MouseEvent, p: Playlist) {
+    app.openMenu(e, [{ label: "Export…", icon: "download", action: () => startExport(p) }]);
   }
-</script>
 
-<svelte:window
-  onkeydown={(e) => {
-    if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "k")) {
-      e.preventDefault();
-      focusSearch();
-    }
-  }}
-/>
+</script>
 
 <aside class="sidebar">
   <div class="brand" data-tauri-drag-region>
@@ -149,11 +185,13 @@
     <span>Cadence</span>
   </div>
 
-  <label class="search">
-    <Icon name="search" size={15} />
-    <input bind:this={searchInput} placeholder="Search your music" value={app.search} oninput={onSearch} onkeydown={onSearchKey} spellcheck="false" />
-    <kbd>Ctrl K</kbd>
-  </label>
+  <div class="find-row">
+    <label class="search" title="Search your music ({MOD} F)">
+      <Icon name="search" size={15} />
+      <input bind:this={searchInput} data-global-search="sidebar" placeholder="Search your music" value={app.search} oninput={onSearch} onkeydown={onSearchKey} spellcheck="false" />
+    </label>
+    <button class="palette-btn" onclick={openPalette} aria-label="Command palette" title="Command palette ({MOD} K): pages, actions and your music"><Icon name="more" size={16} /></button>
+  </div>
 
   <nav>
     <button class="item" class:active={isActive("home")} onclick={() => app.go({ name: "home" })}>
@@ -181,7 +219,7 @@
       <button class="add" onclick={newPlaylistMenu} aria-label="New playlist" title="New playlist"><Icon name="plus" size={15} /></button>
     </div>
     {#each app.playlists as p (p.id)}
-      <button class="item" class:active={isActive(`playlist:${p.id}`)} onclick={() => app.go({ name: "playlist", id: p.id })}>
+      <button class="item" class:active={isActive(`playlist:${p.id}`)} onclick={() => app.go({ name: "playlist", id: p.id })} oncontextmenu={(e) => playlistMenu(e, p)}>
         <Icon name={p.smart ? "smart" : "playlist"} size={18} /><span class="label">{p.name}</span>
       </button>
     {:else}
@@ -247,13 +285,34 @@
     stroke-width: 2.6;
     stroke-linecap: round;
   }
+  .find-row {
+    display: flex;
+    gap: 6px;
+    margin: 6px 0 18px;
+  }
+  .palette-btn {
+    flex: none;
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    border-radius: var(--r-sm);
+    background: var(--hover);
+    box-shadow: inset 0 0 0 1px var(--line);
+    color: var(--text-3);
+  }
+  .palette-btn:hover {
+    background: var(--active);
+    color: var(--text);
+  }
   .search {
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
     gap: 8px;
     height: 34px;
     padding: 0 8px 0 11px;
-    margin: 6px 0 18px;
     border-radius: var(--r-sm);
     background: var(--hover);
     box-shadow: inset 0 0 0 1px var(--line);
@@ -276,14 +335,6 @@
   }
   .search input::placeholder {
     color: var(--text-3);
-  }
-  kbd {
-    font: inherit;
-    font-size: 10.5px;
-    color: var(--text-3);
-    padding: 1px 5px;
-    border-radius: 4px;
-    box-shadow: inset 0 0 0 1px var(--line);
   }
   nav {
     flex: 1;

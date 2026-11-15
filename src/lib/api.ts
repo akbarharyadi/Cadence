@@ -190,6 +190,44 @@ export interface Status {
   error: string | null;
   /** The sleep timer's song or album rule, while one is set. */
   stopAfter: { kind: "songs"; left: number } | { kind: "album" } | null;
+  /** "Stop after this song": the queue place it's on. */
+  stopMark?: number | null;
+  /** Where the songs Autoplay added begin (after the playing song). */
+  autoplayFrom?: number | null;
+  /** An album shuffle is playing (albums are added one at a time). */
+  albumShuffle?: boolean;
+  /** The output device in use (or last used): its sound settings are the ones in use. */
+  device?: { id: string; name: string; chosen: boolean; profile: number } | null;
+  /** The chosen output device isn't connected: playback is paused until it's back. */
+  deviceMissing?: { name: string; fallback: string | null; resume: boolean } | null;
+  /** Goes up when the system's output devices changed (the device list is out of date). */
+  devices?: number;
+}
+
+/** An output device as remembered in the settings. */
+export interface DeviceRef {
+  id: string;
+  name: string;
+}
+
+export interface OutputDevices {
+  /** Cadence chooses the device here (not on Android). */
+  supported: boolean;
+  /** Connected devices, then remembered ones that aren't (`present: false`). */
+  devices: { id: string; name: string; isDefault: boolean; present: boolean }[];
+  /** The chosen device (null: the system default). */
+  chosen: DeviceRef | null;
+  /** "Remember sound settings per device". */
+  profiles: boolean;
+}
+
+/** Balanced: artists spread out, recently played songs later. Random: every order equally likely. */
+export type ShuffleMode = "balanced" | "random";
+
+export interface QueueOptions {
+  shuffleMode: ShuffleMode;
+  /** When the queue ends: keep playing songs like the last ones (false: stop). */
+  autoplay: boolean;
 }
 
 export type FilterKind = "peak" | "lowshelf" | "highshelf" | "lowpass" | "highpass";
@@ -262,6 +300,36 @@ export interface Lyrics {
   singers?: string[];
   /** Where the singers come from: named in the lyrics, found by the AI, or told apart by their voices. */
   singersFrom?: "lyrics" | "ai" | "voice";
+  /** A translation that came with the lyrics: one per timed line ("" where none), and its language. */
+  translation?: string[];
+  translationLang?: string;
+}
+
+/** Languages lyrics can be translated into. */
+export type TranslateLang = "en" | "id" | "ja" | "ko" | "zh";
+
+/** A song's lyrics translated (see `translate_lyrics`). */
+export interface LyricsTranslation {
+  lang: TranslateLang;
+  /** "lyrics": came with them; "ai": made by the AI (now or earlier); "same": already in that
+   *  language; "needs-ai": the AI isn't set up; "none": nothing to translate. */
+  from: "lyrics" | "ai" | "same" | "needs-ai" | "none";
+  /** One per line as shown; empty unless `from` is "lyrics" or "ai". */
+  lines: string[];
+}
+
+/** A piece of a lyrics line with the reading shown above it (furigana, pinyin). */
+export interface RubyPart {
+  text: string;
+  ruby?: string;
+}
+
+/** A song found by a line of its lyrics. */
+export interface LyricHit {
+  trackId: string;
+  line: string;
+  /** Seconds; null when the lyrics aren't timed. */
+  time: number | null;
 }
 
 /** Following the singer: Cadence listens to a song once and places every word on the singing. */
@@ -309,6 +377,67 @@ export interface Playlist {
   updated: number;
 }
 
+/** How a playlist is written to a file (Export…). */
+export interface PlaylistExportOptions {
+  format: "m3u8" | "csv";
+  /** Paths relative to the file's folder (absolute for another drive). */
+  relative: boolean;
+  forwardSlashes: boolean;
+  /** Windows line ends in an M3U8. */
+  crlf: boolean;
+}
+
+export interface PlaylistExported {
+  path: string;
+  written: number;
+  /** Songs the library doesn't have, left out. */
+  skipped: number;
+  /** Songs that are tracks of a single-file (CUE) album. */
+  cue: number;
+}
+
+export interface PlaylistsExported {
+  folder: string;
+  files: number;
+  written: number;
+  skipped: number;
+  cue: number;
+}
+
+/** A playlist file's entry that isn't in the library (or fits two songs equally). */
+export interface ImportMiss {
+  artist: string;
+  title: string;
+  album: string;
+  duration: number | null;
+  isrc: string;
+  reason: string;
+  ambiguous: boolean;
+}
+
+/** A playlist file read and matched against the library; nothing is saved yet. */
+export interface PlaylistImport {
+  source: string;
+  name: string;
+  format: string;
+  /** Entries in the file. */
+  total: number;
+  /** The library songs found, in the file's order (a song listed twice is here twice). */
+  matched: string[];
+  notFound: number;
+  ambiguous: number;
+  /** The first entries not matched; `moreMisses` more are in the missing list file. */
+  misses: ImportMiss[];
+  moreMisses: number;
+  error: string | null;
+}
+
+export interface PlaylistFiles {
+  /** Android: the folder playlist files are looked for in. */
+  dir: string;
+  files: { path: string; name: string; size: number }[];
+}
+
 /** A group of songs that sound alike (from local sound analysis). */
 export interface Mix {
   name: string;
@@ -335,6 +464,8 @@ export interface AiSettings {
   claudeModel: string;
   /** Let the model search the web (new music, lyrics). */
   webSearch: boolean;
+  /** "Ask the DJ": let the AI order and name the songs Cadence picked (a second, short request). */
+  djOrder?: boolean;
 }
 
 /** An LRCLIB search result. */
@@ -420,6 +551,103 @@ export interface ListeningStats {
   topAlbums: StatItem[];
   /** Minutes per day (week, month) or per 30 days (year), oldest first. */
   timeline: number[];
+  // Over the whole history (the archive too); optional so an older backend's answer still renders.
+  /** Songs played on this date in earlier years. */
+  onThisDay?: StatDayItem[];
+  /** Played often, loved or rated 4–5 stars, and not for 180 days. */
+  forgotten?: StatForgotten[];
+  /** Plays per local hour, 0–23 (the range). */
+  clock?: number[];
+  /** Plays per weekday, Monday first (the range). */
+  weekdays?: number[];
+  streak?: StatStreaks | null;
+  /** New artists per month, the last 12 months. */
+  discovery?: { month: string; count: number }[];
+  firstSong?: { id: string; name: string; sub: string; at: number } | null;
+  /** Albums heard through in one go (the range); `finished` = how often. */
+  completeAlbums?: StatItem[];
+  /** Plays by the decade of the songs' year (the range). */
+  decades?: { decade: number; plays: number; minutes: number }[];
+  /** Plays by the songs' language (the range), most played first. */
+  languages?: { code: string; name: string; plays: number; minutes: number }[];
+  /** Unix seconds of the first play recorded (0: none). */
+  historyFrom?: number;
+}
+
+export interface StatDayItem {
+  id: string;
+  name: string;
+  sub: string;
+  year: number;
+  plays: number;
+}
+
+export interface StatForgotten {
+  id: string;
+  name: string;
+  sub: string;
+  plays: number;
+  /** Unix seconds of the last play. */
+  last: number;
+  loved: boolean;
+  rating: number;
+}
+
+export interface StatStreaks {
+  current: number;
+  longest: number;
+  longestFrom: string;
+  longestTo: string;
+  days: number;
+}
+
+/** A snapshot or backup file the Settings page lists. */
+export interface BackupSnapshot {
+  path: string;
+  name: string;
+  kind: "auto" | "safety" | "manual";
+  created: number;
+  size: number;
+}
+
+export interface BackupInfo {
+  lastAuto: number | null;
+  snapshots: BackupSnapshot[];
+  folder: string;
+  folderError: string;
+  /** Android: where "Back up now" saves. */
+  exportDir: string;
+  dir: string;
+  /** The day's automatic snapshot is being made right now. */
+  running?: boolean;
+}
+
+export interface BackupMade {
+  path: string;
+  files: number;
+  bytes: number;
+  skipped: string[];
+  note: string;
+}
+
+export interface BackupPreview {
+  path: string;
+  app: string;
+  created: number;
+  kind: string;
+  /** What a restore replaces, one line each. */
+  replaces: string[];
+}
+
+export interface BackupRestored {
+  files: number;
+  relinked: number;
+  unresolved: number;
+  unresolvedHistory: number;
+  safety: string;
+  lyricOffsets: string | null;
+  app: string;
+  created: number;
 }
 
 /** A Discover search and what it found. */
@@ -449,6 +677,12 @@ export interface AiMix {
   lane?: string;
   /** Songs not in the library that fit. */
   discover?: NewSong[];
+  /** "Ask the DJ": what was understood ("Indonesian · calm · not played in 3 months · 25 songs"). */
+  understood?: string;
+  /** "Ask the DJ": a constraint relaxed or not met, in one sentence. */
+  notice?: string;
+  /** "Ask the DJ": set when the songs were picked (or ordered) without the AI, saying why. */
+  withoutAi?: string;
 }
 
 export const EQ_BANDS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -480,16 +714,44 @@ export const api = {
   setRepeat: (repeat: Repeat) => invoke<void>("set_repeat", { repeat }),
   /** Shuffle the songs coming up (and every list played from now on); off puts them back in order. */
   setShuffle: (on: boolean) => invoke<void>("set_shuffle", { on }),
+  /** Plays a whole list shuffled (balanced or fully random, as set); skipped songs are left out. */
+  playShuffled: (ids: string[]) => invoke<void>("play_shuffled", { ids }),
+  /** Album shuffle: one album at a time, whole and in order, every album once. False: nothing to play. */
+  shuffleAlbums: (albumIds: string[]) => invoke<boolean>("shuffle_albums", { albumIds }),
+  /** Plays one of these albums, picked at random. Its id. */
+  surpriseAlbum: (albumIds: string[]) => invoke<string | null>("surprise_album", { albumIds }),
+  /** "Stop after this song" on the song at this queue place (null: off). */
+  stopAfterSong: (index: number | null) => invoke<void>("stop_after_song", { index }),
+  clearAutoplay: () => invoke<void>("clear_autoplay"),
+  queueOptions: () => invoke<QueueOptions>("get_queue_options"),
+  setQueueOptions: (options: QueueOptions) => invoke<void>("set_queue_options", { options }),
   status: () => invoke<Status>("get_status"),
   dsp: () => invoke<DspSettings>("get_dsp"),
   setDsp: (dsp: DspSettings) => invoke<void>("set_dsp", { dsp }),
+  outputDevices: () => invoke<OutputDevices>("list_output_devices"),
+  setOutputDevice: (device: DeviceRef | null) => invoke<void>("set_output_device", { device }),
+  outputUseDefault: () => invoke<void>("output_use_default"),
+  setDeviceProfiles: (enabled: boolean) => invoke<void>("set_device_profiles", { enabled }),
   eqPresets: () => invoke<Preset[]>("eq_presets"),
   parseEqFile: (args: { text?: string; path?: string }) => invoke<{ preamp: number; filters: Filter[] }>("parse_eq_file", args),
   reanalyze: () => invoke<void>("reanalyze"),
   history: () => invoke<HistoryStats>("get_history"),
-  appSettings: () => invoke<{ closeToTray: boolean; globalHotkeys: boolean; lyricsOnline: boolean; fixTagsOnline: boolean; listenbrainzUser: string }>("get_app_settings"),
+  appSettings: () => invoke<{ closeToTray: boolean; globalHotkeys: boolean; lyricsOnline: boolean; fixTagsOnline: boolean; listenbrainzUser: string; artistNamesOnline?: boolean; listenbrainzLoved?: boolean; newReleasesOnline?: boolean }>("get_app_settings"),
   connectListenBrainz: (token: string) => invoke<string>("connect_listenbrainz", { token }),
   disconnectListenBrainz: () => invoke<void>("disconnect_listenbrainz"),
+  setListenbrainzLoved: (enabled: boolean) => invoke<void>("set_listenbrainz_loved", { enabled }),
+  setNewReleasesOnline: (enabled: boolean) => invoke<void>("set_new_releases_online", { enabled }),
+  lbImportStatus: () => invoke<LbImportStatus>("lb_import_status"),
+  lbImportStart: () => invoke<LbImportStatus>("lb_import_start"),
+  lbImportPause: () => invoke<void>("lb_import_pause"),
+  lbImportDiscard: () => invoke<void>("lb_import_discard"),
+  lbImportApply: () => invoke<LbApplied>("lb_import_apply"),
+  lbImportSaveUnmatched: (path: string | null) => invoke<{ path: string; rows: number }>("lb_import_save_unmatched", { path }),
+  lbLovedPreview: () => invoke<LbSyncPreview>("lb_loved_preview"),
+  lbLovedApply: () => invoke<LbSyncDone>("lb_loved_apply"),
+  lbLovedWaiting: () => invoke<number>("lb_loved_waiting"),
+  newReleases: () => invoke<NewReleases>("new_releases"),
+  newReleasesCached: () => invoke<NewReleases>("new_releases_cached"),
   setLyricsOnline: (enabled: boolean) => invoke<void>("set_lyrics_online", { enabled }),
   findAlbumInfo: (albumId: string, query?: string) =>
     invoke<{ term: string; results: AlbumMatch[] }>("find_album_info", { albumId, query: query ?? null }),
@@ -512,6 +774,19 @@ export const api = {
   artistPairDismiss: (native: string, latin: string) => invoke<void>("artist_pair_dismiss", { native, latin }),
   /** Renames an artist in every song's artist and album artist; returns how many songs. */
   mergeArtist: (from: string, to: string) => invoke<{ songs: number; change: string | null }>("merge_artist", { from, to }),
+  /** The artists the library writes in more than one way (one artist across scripts). */
+  artistIdentity: () => invoke<ArtistIdentity>("artist_identity"),
+  /** Extra words for search: other spellings, aliases and readings (worked out once per library). */
+  searchKeys: () => invoke<SearchKeys>("search_keys"),
+  /** "Treat as the same artist": no file changes. Undo with `artistForget`. */
+  artistMarkSame: (a: string, b: string) => invoke<void>("artist_mark_same", { a, b }),
+  /** "Not the same artist": `name` split out from `others`; the pairs written, for `artistForget`. */
+  artistMarkDifferent: (name: string, others: string[]) => invoke<[string, string][]>("artist_mark_different", { name, others }),
+  artistForget: (pairs: [string, string][]) => invoke<void>("artist_forget", { pairs }),
+  artistNamesStatus: () => invoke<ArtistNamesStatus>("artist_names_status"),
+  artistNamesPause: (paused: boolean) => invoke<void>("artist_names_pause", { paused }),
+  artistNamesStop: () => invoke<void>("artist_names_stop"),
+  setArtistNamesOnline: (enabled: boolean) => invoke<void>("set_artist_names_online", { enabled }),
   findSongInfo: (id: string, query?: string) => invoke<{ term: string; results: SongInfo[] }>("find_song_info", { id, query: query ?? null }),
   /** keepTitle: the song's own title instead of the match's; wholeAlbum: the album's info for its other songs too. */
   saveSongInfo: (id: string, info: SongInfo, keepTitle: boolean, wholeAlbum: boolean) =>
@@ -542,12 +817,27 @@ export const api = {
   voiceBatchStop: () => invoke<void>("voice_batch_stop"),
   /** Lines in Latin letters (romaji, pinyin, Korean); "" for lines that need none. */
   romanize: (lines: string[]) => invoke<string[]>("romanize_lyrics", { lines }),
+  /** Readings above the characters (furigana, pinyin): per line its pieces; [] for lines that need none. */
+  rubyLyrics: (lines: string[]) => invoke<RubyPart[][]>("ruby_lyrics", { lines }),
+  /** The lyrics translated into `lang` (asks the AI only when it's set up; kept once made). */
+  translateLyrics: (trackId: string, lang: TranslateLang) => invoke<LyricsTranslation>("translate_lyrics", { trackId, lang }),
+  translateCancel: (trackId: string) => invoke<void>("translate_cancel", { trackId }),
+  /** Songs with a lyric line matching `query`; `ready` false while the index is first made. */
+  lyricSearch: (query: string, limit?: number) => invoke<{ ready: boolean; hits: LyricHit[] }>("lyric_search", { query, limit: limit ?? null }),
   /** `later`: songs playing now, shown changed already; their files are written when they stop. */
   writeTags: (ids: string[], changes: Record<string, string>) =>
     invoke<{ saved: number; later: number; change: string | null }>("write_tags", { ids, changes }),
   playlists: () => invoke<Playlist[]>("get_playlists"),
   savePlaylist: (playlist: Playlist) => invoke<Playlist>("save_playlist", { playlist }),
   deletePlaylist: (id: string) => invoke<void>("delete_playlist", { id }),
+  /** `path` null: Android (Documents › Cadence). */
+  playlistExport: (name: string, ids: string[], path: string | null, options: PlaylistExportOptions) =>
+    invoke<PlaylistExported>("playlist_export", { name, ids, path, options }),
+  playlistExportAll: (items: { name: string; ids: string[] }[], folder: string | null, options: PlaylistExportOptions) =>
+    invoke<PlaylistsExported>("playlist_export_all", { items, folder, options }),
+  playlistImport: (paths: string[]) => invoke<PlaylistImport[]>("playlist_import", { paths }),
+  playlistImportFiles: () => invoke<PlaylistFiles>("playlist_import_files"),
+  playlistMissingSave: (source: string, path: string | null) => invoke<{ path: string; rows: number }>("playlist_missing_save", { source, path }),
   setCloseToTray: (enabled: boolean) => invoke<void>("set_close_to_tray", { enabled }),
   setGlobalHotkeys: (enabled: boolean) => invoke<void>("set_global_hotkeys", { enabled }),
   healthReport: () => invoke<HealthReport>("health_report"),
@@ -567,7 +857,7 @@ export const api = {
   similarTracks: (id: string, limit?: number) => invoke<string[]>("similar_tracks", { id, limit }),
   soundRadio: (id: string, count?: number) => invoke<string[]>("sound_radio", { id, count }),
   soundMixes: () => invoke<Mix[]>("sound_mixes"),
-  aiSettings: () => invoke<{ settings: AiSettings; hasKey: boolean }>("get_ai_settings"),
+  aiSettings: () => invoke<{ settings: AiSettings; hasKey: boolean; ready?: boolean }>("get_ai_settings"),
   setAiSettings: (settings: AiSettings) => invoke<void>("set_ai_settings", { settings }),
   setAiKey: (text: string) => invoke<{ settings: AiSettings; hasKey: boolean }>("set_ai_key", { text }),
   /** Results best first: the artist, then closeness to the song's length, album, timed. */
@@ -579,6 +869,20 @@ export const api = {
   aiDiscover: (refresh: boolean) => invoke<NewSong[]>("ai_discover", { refresh }),
   listeningProfile: () => invoke<ListeningProfile>("listening_profile"),
   listeningStats: (range: StatsRange) => invoke<ListeningStats>("listening_stats", { range }),
+  backupInfo: () => invoke<BackupInfo>("backup_info"),
+  /** `path` from the save dialog (none on Android: the shared Documents folder). */
+  backupCreate: (path: string | null, lyricOffsets: string | null) => invoke<BackupMade>("backup_create", { path, lyricOffsets }),
+  backupPreview: (path: string) => invoke<BackupPreview>("backup_preview", { path }),
+  backupRestore: (path: string) => invoke<BackupRestored>("backup_restore", { path }),
+  backupSetFolder: (folder: string | null) => invoke<BackupInfo>("backup_set_folder", { folder }),
+  backupKeepOffsets: (lyricOffsets: string) => invoke<void>("backup_keep_offsets", { lyricOffsets }),
+  /** A song's seek-bar waveform as raw bytes (see waveform.ts); empty while it's being drawn ("waveform-ready" follows). */
+  waveform: (trackId: string) => invoke<ArrayBuffer | Uint8Array | number[] | null>("waveform", { trackId }),
+  /** Settings: draw the waveform of every song that has none (a background job). False: already running. */
+  waveformsPrepare: () => invoke<boolean>("waveforms_prepare"),
+  waveformsPause: (paused: boolean) => invoke<void>("waveforms_pause", { paused }),
+  waveformsStop: () => invoke<void>("waveforms_stop"),
+  waveformsStatus: () => invoke<WaveformJob>("waveforms_status"),
   aiRecommended: () => invoke<Recommendations>("ai_recommended"),
   /** The suggestions the library still doesn't have (asked again when the library changes). */
   aiStillNew: (picks: NewSong[]) => invoke<NewSong[]>("ai_still_new", { picks }),
@@ -590,10 +894,20 @@ export const api = {
   aiTest: () => invoke<string>("ai_test"),
   aiPreview: (request: string) => invoke<string>("ai_preview", { request }),
   aiAsk: (request: string) => invoke<AiMix>("ai_ask", { request }),
+  /** Suggestions for the DJ box from the library's own languages, decades and genres. */
+  djSuggestions: () => invoke<string[]>("dj_suggestions"),
   aiMixes: (refresh: boolean) => invoke<AiMix[]>("ai_mixes", { refresh }),
   toggleMini: () => invoke<void>("toggle_mini"),
   showMain: () => invoke<void>("show_main"),
 };
+
+/** "Prepare waveforms for all songs" ("waveform-progress" events). */
+export interface WaveformJob {
+  running: boolean;
+  paused: boolean;
+  done: number;
+  total: number;
+}
 
 /** Artwork files replaced in place (a new cover): their addresses get a version, so the old image isn't reused. */
 const artVersions: Record<string, number> = (() => {
@@ -756,6 +1070,106 @@ export interface AlbumPlan {
 }
 
 /** A background job's progress (Fix all: `found` songs tagged so far). */
+/** An artist the library writes in more than one way. */
+export interface ArtistGroup {
+  /** The library's spellings, the one on most songs first. */
+  names: string[];
+  /** Other names it's known by (MusicBrainz aliases, the catalogue's name). */
+  aliases: string[];
+  mbid: string | null;
+  sort: string | null;
+  native: string | null;
+  latin: string | null;
+  lang: "japanese" | "chinese" | "korean" | null;
+}
+
+export interface ArtistIdentity {
+  version: number;
+  groups: ArtistGroup[];
+}
+
+/** Extra search words (folded, one per line), by artist credit, track id and album id. */
+export interface SearchKeys {
+  version: number;
+  credits: Record<string, string>;
+  tracks: Record<string, string>;
+  albums: Record<string, string>;
+  pending: boolean;
+}
+
+/** Restoring the listening history from ListenBrainz: what was read, matched and would be added. */
+export interface LbSummary {
+  onListenbrainz: number;
+  matched: number;
+  alreadyHere: number;
+  willAdd: number;
+  unmatched: number;
+  ambiguous: number;
+}
+export interface LbApplied {
+  added: number;
+  live: number;
+  archived: number;
+  already: number;
+  /** The safety snapshot taken first. */
+  safety: string;
+}
+export interface LbImportStatus {
+  phase: "idle" | "scanning" | "paused" | "failed" | "ready" | "applying" | "done";
+  connected: boolean;
+  seen: number;
+  matched: number;
+  unmatched: number;
+  ambiguous: number;
+  summary: LbSummary | null;
+  applied: LbApplied | null;
+  message: string;
+}
+/** Favorites compared with the songs loved on ListenBrainz. */
+export interface LbSyncPreview {
+  favorites: number;
+  loved: number;
+  inBoth: number;
+  toSend: number;
+  toHeart: number;
+  notFound: number;
+  ambiguous: number;
+}
+export interface LbSyncDone {
+  hearted: number;
+  queued: number;
+}
+/** A new release by an artist in the library. */
+export interface NewRelease {
+  key: string;
+  title: string;
+  artist: string;
+  /** "2026-11-14". */
+  date: string;
+  /** "Album", "Single", "EP"… */
+  kind: string;
+  upcoming: boolean;
+  /** A Cover Art Archive address; loaded only when the row is on screen. */
+  cover: string | null;
+}
+export interface NewReleases {
+  items: NewRelease[];
+  fetched: number;
+  enabled: boolean;
+  error: string;
+}
+
+/** Learning the artists' other names from MusicBrainz. */
+export interface ArtistNamesStatus {
+  done: number;
+  total: number;
+  running: boolean;
+  paused: boolean;
+  enabled: boolean;
+  known: number;
+  waiting: number;
+}
+
 export interface JobProgress {
   done: number;
   total: number;

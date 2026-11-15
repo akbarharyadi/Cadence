@@ -258,6 +258,91 @@ pub(crate) mod tests {
         std::fs::write(path, f).unwrap();
     }
 
+    /// Writes the same signal as `position_wav` as a FLAC (16-bit stereo 44.1 kHz, fixed 4096-frame
+    /// blocks with verbatim subframes, no seek table, no MD5), made here so no binary fixture is
+    /// needed. `frames` must be a whole number of blocks.
+    pub(crate) fn position_flac(path: &Path, frames: u32) {
+        const BLOCK: u32 = 4096;
+        assert!(frames > 0 && frames.is_multiple_of(BLOCK));
+        fn crc8(b: &[u8]) -> u8 {
+            b.iter().fold(0u8, |mut c, &x| {
+                c ^= x;
+                for _ in 0..8 {
+                    c = if c & 0x80 != 0 { (c << 1) ^ 0x07 } else { c << 1 };
+                }
+                c
+            })
+        }
+        fn crc16(b: &[u8]) -> u16 {
+            b.iter().fold(0u16, |mut c, &x| {
+                c ^= u16::from(x) << 8;
+                for _ in 0..8 {
+                    c = if c & 0x8000 != 0 { (c << 1) ^ 0x8005 } else { c << 1 };
+                }
+                c
+            })
+        }
+        let mut f = b"fLaC".to_vec();
+        // STREAMINFO, the last metadata block, 34 bytes.
+        f.extend_from_slice(&[0x80, 0, 0, 34]);
+        f.extend_from_slice(&(BLOCK as u16).to_be_bytes());
+        f.extend_from_slice(&(BLOCK as u16).to_be_bytes());
+        f.extend_from_slice(&[0; 6]); // frame sizes unknown
+        let packed: u64 = (44_100u64 << 44) | (1 << 41) | (15 << 36) | u64::from(frames);
+        f.extend_from_slice(&packed.to_be_bytes());
+        f.extend_from_slice(&[0; 16]); // MD5 not set
+        for n in 0..frames / BLOCK {
+            let start = f.len();
+            // Sync + fixed blocking; 4096 frames, 44.1 kHz; stereo, 16 bits.
+            f.extend_from_slice(&[0xFF, 0xF8, 0xC9, 0x18]);
+            // The frame number, UTF-8 coded.
+            if n < 0x80 {
+                f.push(n as u8);
+            } else {
+                f.extend_from_slice(&[0xC0 | (n >> 6) as u8, 0x80 | (n & 0x3F) as u8]);
+            }
+            let c = crc8(&f[start..]);
+            f.push(c);
+            for channel in 0..2 {
+                f.push(0x02); // verbatim subframe, no wasted bits
+                for i in n * BLOCK..(n + 1) * BLOCK {
+                    let v = (i % 30_000) as i16;
+                    f.extend_from_slice(&(if channel == 0 { v } else { -v }).to_be_bytes());
+                }
+            }
+            let c = crc16(&f[start..]);
+            f.extend_from_slice(&c.to_be_bytes());
+        }
+        std::fs::write(path, f).unwrap();
+    }
+
+    #[test]
+    fn seeking_a_flac_lands_on_the_exact_frame() {
+        let dir = std::env::temp_dir().join(format!("cadence-flac-seek-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("positions.flac");
+        position_flac(&path, 20 * 4096);
+        let mut s = Source::open(&path).unwrap();
+        assert_eq!((s.codec.as_str(), s.rate, s.channels, s.total_frames), ("FLAC", 44_100, 2, Some(20 * 4096)));
+        // From the start: frame 0 first.
+        assert_eq!(at(s.next_chunk().unwrap().unwrap().0), 0);
+        // Mid-block, on a block boundary, one after it, near the end, back near the start.
+        for target in [50_000u64, 8_192, 4_097, 81_000, 7] {
+            assert_eq!(s.seek_frame(target).unwrap(), target, "seek to {target}");
+            let (x, rate, ch) = s.next_chunk().unwrap().unwrap();
+            assert_eq!((rate, ch), (44_100, 2));
+            assert_eq!(at(x), (target % 30_000) as i64, "seek to {target}");
+            assert_eq!((x[1] * 32_768.0).round() as i64, -((target % 30_000) as i64));
+            // Decoding carries on from there without a gap.
+            let n = (x.len() / 2) as u64;
+            if target + n < 20 * 4096 {
+                assert_eq!(at(s.next_chunk().unwrap().unwrap().0), ((target + n) % 30_000) as i64, "after {target}");
+            }
+        }
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The frame number the first sample of `chunk` carries (see `position_wav`).
     fn at(chunk: &[f32]) -> i64 {
         (chunk[0] * 32_768.0).round() as i64

@@ -1,9 +1,11 @@
 mod ai;
+mod dj;
 mod lanes;
 mod api;
 mod attention;
 mod artists;
 mod autotag;
+mod backup;
 mod catalog;
 mod changes;
 mod covers;
@@ -16,24 +18,43 @@ mod health;
 #[cfg(desktop)]
 mod hotkeys;
 mod hub;
+mod identity;
 mod jobs;
 mod libfix;
 pub mod library;
 pub mod lyrics;
+mod lyricindex;
+mod lyricsfile;
+mod translate;
 mod marks;
 mod media;
+mod musicbrainz;
 mod net;
 mod romanize;
 pub mod playlists;
+mod playlist_io;
+mod profiles;
 mod scrobble;
+mod lbapi;
+mod lbimport;
+mod lbloved;
+mod lbreleases;
+mod tagids;
+mod searchkeys;
 mod secrets;
 mod sleep;
+mod songlang;
+mod shuffle;
+mod upnext;
 pub mod sonic;
 mod state;
+mod stats;
 pub mod tagedit;
 #[cfg(desktop)]
 mod tray;
 mod voice;
+mod waveform;
+mod winvis;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,6 +69,10 @@ struct TauriHost(AppHandle);
 impl Host for TauriHost {
     fn emit(&self, event: &str, payload: serde_json::Value) {
         let _ = self.0.emit(event, payload);
+    }
+
+    fn emit_to(&self, label: &str, event: &str, payload: serde_json::Value) {
+        let _ = self.0.emit_to(label, event, payload);
     }
 
     fn set_hotkeys(&self, on: bool) {
@@ -139,8 +164,20 @@ pub fn run() {
                     if ctx.state.settings.lock().close_to_tray && tray::available() {
                         api.prevent_close();
                         let _ = window.hide();
+                        winvis::on_event(window.app_handle(), window.label(), winvis::WinEvent::Hide);
                     }
                 }
+            // Hidden in the tray or minimized: the window's page stops drawing (see winvis.rs).
+            #[cfg(desktop)]
+            match event {
+                WindowEvent::Resized(size) => winvis::on_event(
+                    window.app_handle(),
+                    window.label(),
+                    winvis::WinEvent::Resized { width: size.width, height: size.height },
+                ),
+                WindowEvent::Destroyed => winvis::on_event(window.app_handle(), window.label(), winvis::WinEvent::Closed),
+                _ => {}
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_library,
@@ -169,9 +206,20 @@ pub fn run() {
             commands::set_volume,
             commands::set_repeat,
             commands::set_shuffle,
+            commands::play_shuffled,
+            commands::shuffle_albums,
+            commands::surprise_album,
+            commands::stop_after_song,
+            commands::clear_autoplay,
+            commands::get_queue_options,
+            commands::set_queue_options,
             commands::get_status,
             commands::get_dsp,
             commands::set_dsp,
+            commands::list_output_devices,
+            commands::set_output_device,
+            commands::output_use_default,
+            commands::set_device_profiles,
             commands::eq_presets,
             commands::parse_eq_file,
             commands::get_history,
@@ -196,6 +244,10 @@ pub fn run() {
             commands::get_skips,
             commands::artist_images,
             commands::romanize_lyrics,
+            commands::ruby_lyrics,
+            commands::translate_lyrics,
+            commands::translate_cancel,
+            commands::lyric_search,
             commands::find_covers,
             commands::set_album_cover,
             commands::find_artist_photos,
@@ -213,6 +265,15 @@ pub fn run() {
             commands::artist_pairs,
             commands::artist_pair_dismiss,
             commands::merge_artist,
+            commands::set_artist_names_online,
+            commands::artist_identity,
+            commands::search_keys,
+            commands::artist_mark_same,
+            commands::artist_mark_different,
+            commands::artist_forget,
+            commands::artist_names_status,
+            commands::artist_names_pause,
+            commands::artist_names_stop,
             commands::fix_all_found,
             commands::fix_all_save,
             commands::fix_all_discard,
@@ -233,8 +294,26 @@ pub fn run() {
             commands::connect_listenbrainz,
             commands::write_tags,
             commands::disconnect_listenbrainz,
+            commands::set_listenbrainz_loved,
+            commands::set_new_releases_online,
+            commands::lb_import_status,
+            commands::lb_import_start,
+            commands::lb_import_pause,
+            commands::lb_import_discard,
+            commands::lb_import_apply,
+            commands::lb_import_save_unmatched,
+            commands::lb_loved_preview,
+            commands::lb_loved_apply,
+            commands::lb_loved_waiting,
+            commands::new_releases,
+            commands::new_releases_cached,
             commands::save_playlist,
             commands::delete_playlist,
+            commands::playlist_export,
+            commands::playlist_export_all,
+            commands::playlist_import,
+            commands::playlist_import_files,
+            commands::playlist_missing_save,
             commands::sonic_status,
             commands::debug_tap,
             commands::get_ai_settings,
@@ -257,6 +336,7 @@ pub fn run() {
             commands::ai_test,
             commands::ai_preview,
             commands::ai_ask,
+            commands::dj_suggestions,
             commands::ai_mixes,
             commands::similar_tracks,
             commands::sound_radio,
@@ -264,6 +344,17 @@ pub fn run() {
             commands::toggle_mini,
             commands::show_main,
             commands::quit,
+            commands::backup_info,
+            commands::backup_create,
+            commands::backup_preview,
+            commands::backup_restore,
+            commands::backup_set_folder,
+            commands::backup_keep_offsets,
+            commands::waveform,
+            commands::waveforms_prepare,
+            commands::waveforms_pause,
+            commands::waveforms_stop,
+            commands::waveforms_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Cadence")

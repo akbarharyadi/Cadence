@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::library::Track;
 use crate::state::match_key;
 
-#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 struct Entry {
     /// 0 = not rated, else 1–5 stars.
@@ -22,6 +22,18 @@ struct Entry {
     artist: String,
     album: String,
     duration: f64,
+    /// The song's file (empty: a song of a single-file album, or a mark made before this was
+    /// kept): a song whose file is only out of reach isn't followed to a look-alike.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    path: String,
+}
+
+/// The same mark of the same song (where its file is doesn't matter: `take_back` compares marks
+/// saved with a change before files were kept).
+impl PartialEq for Entry {
+    fn eq(&self, o: &Self) -> bool {
+        (self.rating, self.loved, &self.title, &self.artist, &self.album) == (o.rating, o.loved, &o.title, &o.artist, &o.album) && self.duration == o.duration
+    }
 }
 
 impl Entry {
@@ -31,6 +43,7 @@ impl Entry {
             artist: t.artist.clone(),
             album: t.album.clone(),
             duration: t.duration,
+            path: if t.cue.is_none() { t.path.clone() } else { String::new() },
             ..Default::default()
         }
     }
@@ -122,40 +135,99 @@ impl Marks {
         }
     }
 
-    /// Entries whose song id is gone from the library follow the same song under its new id (same
-    /// title and length, the same artist and album preferred), unless that song already has its
-    /// own mark. Returns how many moved.
-    pub fn relink(&mut self, tracks: &[Track]) -> usize {
-        let known: std::collections::HashSet<&str> = tracks.iter().map(|t| t.id.as_str()).collect();
-        let gone: Vec<String> = self.items.keys().filter(|id| !known.contains(id.as_str())).cloned().collect();
-        if gone.is_empty() {
-            return 0;
+    /// Notes the file of entries made before marks kept it (`lookup`: the library's song of an id).
+    /// Returns how many.
+    pub fn note_paths<'a>(&mut self, lookup: impl Fn(&str) -> Option<&'a Track>) -> usize {
+        let mut noted = 0;
+        for (id, e) in self.items.iter_mut().filter(|(_, e)| e.path.is_empty()) {
+            if let Some(t) = lookup(id).filter(|t| t.cue.is_none()) {
+                e.path = t.path.clone();
+                noted += 1;
+            }
         }
-        let mut by_title: HashMap<String, Vec<&Track>> = HashMap::new();
-        for t in tracks {
-            by_title.entry(match_key(&t.title)).or_default().push(t);
+        noted
+    }
+
+    /// Each marked song as the mark remembers it (id, title, artist, album, length, file), for
+    /// finding it again after a restore (`backup::relink`).
+    pub(crate) fn as_tracks(&self) -> Vec<Track> {
+        self.items
+            .iter()
+            .map(|(id, e)| Track {
+                id: id.clone(),
+                title: e.title.clone(),
+                artist: e.artist.clone(),
+                album: e.album.clone(),
+                duration: e.duration,
+                path: e.path.clone(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// Moves entries to their song's new id (old → new, `lookup`: the library's song of an id),
+    /// unless the new id has a mark of its own. Returns how many moved.
+    pub(crate) fn follow<'a>(&mut self, moved: &HashMap<String, String>, lookup: impl Fn(&str) -> Option<&'a Track>) -> usize {
+        let mut n = 0;
+        for (old, new) in moved {
+            if old == new || self.items.contains_key(new) || !self.items.contains_key(old) {
+                continue;
+            }
+            let Some(t) = lookup(new) else { continue };
+            let Some(mut e) = self.items.remove(old) else { continue };
+            let fresh = Entry::of(t);
+            (e.title, e.artist, e.album, e.duration, e.path) = (fresh.title, fresh.artist, fresh.album, fresh.duration, fresh.path);
+            self.items.insert(new.clone(), e);
+            n += 1;
         }
+        n
+    }
+
+    /// Whether some entry's song isn't in the library (`known`: whether an id is).
+    pub fn has_gone(&self, known: impl Fn(&str) -> bool) -> bool {
+        self.items.keys().any(|id| !known(id))
+    }
+
+    /// Entries whose song id is gone from the library follow the song to its new id when it's
+    /// certain which song that is (`state::Finder`: a move Cadence made, a file replaced in its
+    /// folder, or the one song with the same title, artist and length), unless that song already
+    /// has its own mark. A cover by another artist, or one of several look-alikes, is not it: the
+    /// entry stays under its old id. Returns how many moved.
+    pub(crate) fn relink(&mut self, finder: &crate::state::Finder) -> usize {
+        use crate::state::Found;
+        // (old id, where it is now, how sure, its album)
+        let found: Vec<(String, &Track, Found, String)> = self
+            .items
+            .iter()
+            .filter(|(id, _)| finder.track(id).is_none())
+            .filter_map(|(id, e)| {
+                let was = crate::state::Was {
+                    id,
+                    path: &e.path,
+                    cue: e.path.is_empty(),
+                    title: &e.title,
+                    artist: &e.artist,
+                    album: &e.album,
+                    duration: e.duration,
+                };
+                finder.find(&was).map(|(new, how)| (id.clone(), new, how, match_key(&e.album)))
+            })
+            .collect();
         let mut moved = 0;
-        for old_id in gone {
-            let Some(entry) = self.items.get(&old_id) else { continue };
-            let best = by_title
-                .get(&match_key(&entry.title))
-                .into_iter()
-                .flatten()
-                .filter(|t| (t.duration - entry.duration).abs() < 2.5 && !self.items.contains_key(&t.id))
-                .min_by_key(|t| {
-                    (
-                        match_key(&t.artist) != match_key(&entry.artist),
-                        match_key(&t.album) != match_key(&entry.album),
-                        ((t.duration - entry.duration).abs() * 1000.0) as u64,
-                    )
-                });
-            let Some(new) = best else { continue };
-            let mut entry = self.items.remove(&old_id).unwrap();
+        for (old_id, new, how, album) in &found {
+            // Two songs of different albums can't both be this one: a guess isn't followed then.
+            if *how == Found::Same && found.iter().any(|(o, n, _, a)| n.id == new.id && o != old_id && a != album) {
+                continue;
+            }
+            if self.items.contains_key(&new.id) {
+                continue;
+            }
+            let Some(mut entry) = self.items.remove(old_id.as_str()) else { continue };
             entry.title = new.title.clone();
             entry.artist = new.artist.clone();
             entry.album = new.album.clone();
             entry.duration = new.duration;
+            entry.path = if new.cue.is_none() { new.path.clone() } else { String::new() };
             self.items.insert(new.id.clone(), entry);
             moved += 1;
         }
@@ -196,10 +268,56 @@ mod tests {
             song("other", "Lemon", "Someone Else", "Cover", 300.0),
             song("new", "Lemon", "Kenshi Yonezu", "Lemon", 255.4),
         ];
-        assert_eq!(m.relink(&library), 1);
+        assert_eq!(relink(&mut m, &library), 1);
         let v = m.view();
         assert!(!v.contains_key("old"));
         assert_eq!((v["new"].rating, v["new"].loved), (5, true));
+    }
+
+    fn relink(m: &mut Marks, library: &[Track]) -> usize {
+        m.relink(&crate::state::Finder::new(library, &[], Default::default()))
+    }
+
+    #[test]
+    fn marks_never_go_to_another_artists_song_or_a_look_alike() {
+        // A cover by someone else, of the same title and length: not the song.
+        let old = song("m-old", "Lemon", "Kenshi Yonezu", "Lemon", 255.0);
+        let mut m = Marks::default();
+        m.set_loved(&old, true);
+        assert_eq!(relink(&mut m, &[song("m-cover", "Lemon", "Someone Else", "Covers", 255.0)]), 0);
+        assert!(m.view()["m-old"].loved);
+        // Another album's "Intro" by the same artist, two of them: either could be it, so neither.
+        let intro = song("m-intro", "Intro", "YOASOBI", "THE BOOK", 90.0);
+        let mut m = Marks::default();
+        m.set_rating(&intro, 4);
+        let others = [song("m-i2", "Intro", "YOASOBI", "THE BOOK 2", 90.4), song("m-i3", "Intro", "YOASOBI", "THE BOOK 3", 91.0)];
+        assert_eq!(relink(&mut m, &others), 0);
+        assert_eq!(m.view()["m-intro"].rating, 4);
+        // The same artist under a credit with a guest: followed.
+        assert_eq!(relink(&mut m, &[song("m-i4", "Intro", "YOASOBI feat. Ayase", "THE BOOK", 90.2)]), 1);
+        assert_eq!(m.view()["m-i4"].rating, 4);
+    }
+
+    #[test]
+    fn a_mark_whose_drive_is_unplugged_stays() {
+        // Its music folder can't be reached: the song isn't gone, only out of reach.
+        let base = std::env::temp_dir().join(format!("cadence-marks-offline-{}", std::process::id()));
+        let folder = base.join("Unplugged");
+        let mut old = song("m-off", "Lemon", "Kenshi Yonezu", "Lemon", 255.0);
+        old.path = folder.join("Lemon.flac").to_string_lossy().into_owned();
+        let mut m = Marks::default();
+        m.set_loved(&old, true);
+        let elsewhere = [song("m-elsewhere", "Lemon", "Kenshi Yonezu", "Lemon", 255.0)];
+        let finder = crate::state::Finder::new(&elsewhere, &[folder.to_string_lossy().into_owned()], Default::default());
+        assert_eq!(m.relink(&finder), 0);
+        assert!(m.view()["m-off"].loved);
+        // A mark saved before files were kept still reads, and learns its file.
+        let mut m: Marks = serde_json::from_str(r#"{"items":{"m-n":{"rating":3,"loved":false,"title":"T","artist":"A","album":"B","duration":100.0}}}"#).unwrap();
+        let mut t = song("m-n", "T", "A", "B", 100.0);
+        t.path = "D:/Music/T.flac".into();
+        assert_eq!(m.note_paths(|id| (id == "m-n").then_some(&t)), 1);
+        assert_eq!(m.items["m-n"].path, "D:/Music/T.flac");
+        assert_eq!(m.note_paths(|id| (id == "m-n").then_some(&t)), 0, "once");
     }
 
     #[test]
@@ -241,14 +359,14 @@ mod tests {
         let mut m = Marks::default();
         m.set_loved(&old, true);
         // The drive is unplugged: nothing like it in the library.
-        assert_eq!(m.relink(&[song("x", "Other", "A", "B", 100.0)]), 0);
+        assert_eq!(relink(&mut m, &[song("x", "Other", "A", "B", 100.0)]), 0);
         assert!(m.view()["old"].loved);
         // A song that already has its own mark isn't overwritten.
         let mut m = Marks::default();
         m.set_loved(&old, true);
         let twin = song("twin", "Lemon", "Kenshi Yonezu", "Lemon", 255.0);
         m.set_rating(&twin, 2);
-        assert_eq!(m.relink(&[twin]), 0);
+        assert_eq!(relink(&mut m, &[twin]), 0);
         assert_eq!(m.view()["twin"].rating, 2);
     }
 }

@@ -286,6 +286,31 @@ pub fn reanalyze(ctx: &Ctx) {
     start_analysis(ctx.clone());
 }
 
+// ---------- waveform seek bar ----------
+
+/// The song's waveform (`waveform` module's file format), or empty: not drawn yet ("waveform-ready"
+/// follows once it is) or it can't be.
+pub fn waveform(ctx: &Ctx, track_id: String) -> Vec<u8> {
+    crate::waveform::for_track(ctx, &track_id)
+}
+
+/// Settings > "Prepare waveforms for all songs". False: already running.
+pub fn waveforms_prepare(ctx: &Ctx) -> bool {
+    crate::waveform::prepare_all(ctx)
+}
+
+pub fn waveforms_pause(ctx: &Ctx, paused: bool) {
+    crate::waveform::pause(ctx, paused);
+}
+
+pub fn waveforms_stop(ctx: &Ctx) {
+    crate::waveform::stop(ctx);
+}
+
+pub fn waveforms_status(_ctx: &Ctx) -> crate::waveform::JobStatus {
+    crate::waveform::status()
+}
+
 // ---------- sounds like ----------
 
 #[derive(Serialize)]
@@ -367,6 +392,8 @@ pub fn sound_mixes(ctx: &Ctx) -> Result<Vec<crate::sonic::Mix>, String> {
 pub struct AiInfo {
     settings: crate::ai::AiSettings,
     has_key: bool,
+    /// On and able to answer (a key, or a server on this computer or the home network).
+    ready: bool,
 }
 
 pub fn get_ai_settings(ctx: &Ctx) -> AiInfo {
@@ -374,13 +401,14 @@ pub fn get_ai_settings(ctx: &Ctx) -> AiInfo {
     // One lock, released before the key lookup (a second lock in the same expression deadlocks).
     let settings = state.settings.lock().ai.clone();
     let has_key = crate::secrets::get(settings.service.key_name()).is_some();
-    AiInfo { settings, has_key }
+    let ready = crate::ai::ready(&settings);
+    AiInfo { settings, has_key, ready }
 }
 
 pub fn set_ai_settings(ctx: &Ctx, settings: crate::ai::AiSettings) {
     let state = &ctx.state;
     state.settings.lock().ai = settings;
-    state.save_settings();
+    state.save_settings_later();
 }
 
 /// Saves the API key for the chosen service. Accepts the bare key or a pasted .env file
@@ -513,58 +541,54 @@ pub fn ai_test(ctx: &Ctx) -> Result<String, String> {
 }
 
 /// Exactly what would be sent for this request (shown in Settings).
-/// (`blocking`: it goes through the whole library.)
+/// (`blocking`: the library's facts may need working out first.)
 pub fn ai_preview(ctx: &Ctx, request: String) -> Result<String, String> {
-    let state = &ctx.state;
-    let input = dj_input(state, &request);
-    Ok(format!(
-        "{}\n\n{}",
-        crate::ai::SYSTEM,
-        crate::ai::ask_prompt(&request, &input.taste, &input.candidates, &input.history)
-    ))
+    let facts = crate::dj::facts(&ctx.state);
+    Ok(crate::dj::preview(&facts, &request, &crate::ai::date_and_time_words()))
 }
 
-/// Tops a short AI pick up with songs that sound like it, when the library has them.
-fn fill_by_sound(state: &AppState, mix: &mut crate::ai::AiMix, want: usize) {
-    if mix.track_ids.len() >= want {
-        return;
-    }
-    with_sonic(state, |items, _| {
-        let picked: Vec<&[f32]> = items
-            .iter()
-            .filter(|i| mix.track_ids.contains(&i.track.id))
-            .map(|i| i.f)
-            .collect();
-        if picked.is_empty() {
-            return;
-        }
-        let mut rest: Vec<(f32, &str)> = items
-            .iter()
-            .filter(|i| !mix.track_ids.contains(&i.track.id))
-            .map(|i| {
-                let d = picked
-                    .iter()
-                    .map(|p| crate::sonic::distance(p, i.f))
-                    .fold(f32::MAX, f32::min);
-                (d, i.track.id.as_str())
-            })
-            .collect();
-        rest.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let need = want - mix.track_ids.len();
-        mix.track_ids
-            .extend(rest.into_iter().take(need).map(|(_, id)| id.to_string()));
-    });
+/// Suggestions for the DJ box from what the library has (its languages, decades and genres).
+/// (`blocking`: worked out once per library, which may read the saved lyrics' languages.)
+pub fn dj_suggestions(ctx: &Ctx) -> Result<Vec<String>, String> {
+    Ok(crate::dj::suggestions(&crate::dj::facts(&ctx.state)))
 }
 
+/// "Ask the DJ" (dj.rs): the AI plans, Cadence picks the songs, the AI orders and names them.
+/// Works without the AI too (a plan from the request's own words).
 pub fn ai_ask(ctx: &Ctx, request: String) -> Result<crate::ai::AiMix, String> {
     let state = &ctx.state;
-    let input = dj_input(state, &request);
-    let library = state.library.lock().snapshot.tracks.clone();
-    let mut mix = crate::ai::ask(&input.settings, &request, &input.taste, &input.candidates, &input.history).map(|mut m| {
-            m.discover = crate::catalog::check(std::mem::take(&mut m.discover), &library);
-            m
-        })?;
-    fill_by_sound(state, &mut mix, 12);
+    let facts = crate::dj::facts(state);
+    let settings = state.settings.lock().ai.clone();
+    let history = state.history.lock().stats();
+    let marks = state.marks.lock().view();
+    let rule = state.skip_rule();
+    let never: HashSet<String> = {
+        let lib = state.library.lock();
+        lib.snapshot.tracks.iter().filter(|t| rule.skips(t)).map(|t| t.id.clone()).collect()
+    };
+    let identity = crate::identity::current();
+    let credits = || crate::searchkeys::current(ctx).credits.into_iter().collect::<Vec<_>>();
+    let llm = crate::dj::AppLlm(settings.clone());
+    let ready = crate::ai::ready(&settings);
+    let now = crate::history::now();
+    let mut mix = crate::dj::ask(
+        &facts,
+        &crate::dj::Ask {
+            request: &request,
+            taste: crate::dj::Taste { plays: &history.plays, skips: &history.skips, last: &history.last_played, marks: &marks, now },
+            never: &never,
+            identity: &identity,
+            credits: &credits,
+            llm: ready.then_some(&llm as &dyn crate::dj::Llm),
+            ai_order: settings.dj_order,
+            now_words: &crate::ai::date_and_time_words(),
+            seed: crate::shuffle::clock_seed(),
+        },
+    )?;
+    if !mix.discover.is_empty() {
+        let library = state.library.lock().snapshot.tracks.clone();
+        mix.discover = crate::catalog::check(std::mem::take(&mut mix.discover), &library);
+    }
     Ok(mix)
 }
 
@@ -753,6 +777,8 @@ pub fn set_volume(ctx: &Ctx, volume: f32) {
     let state = &ctx.state;
     state.engine.send(Cmd::SetVolume(volume));
     state.settings.lock().volume = volume;
+    // (Also the playing device's own volume, with sound settings per device.)
+    crate::profiles::remember(state);
     state.save_settings_later();
 }
 
@@ -760,14 +786,75 @@ pub fn set_repeat(ctx: &Ctx, repeat: Repeat) {
     let state = &ctx.state;
     state.engine.send(Cmd::SetRepeat(repeat));
     state.settings.lock().repeat = repeat;
-    state.save_settings();
+    state.save_settings_later();
 }
 
 pub fn set_shuffle(ctx: &Ctx, on: bool) {
     let state = &ctx.state;
     state.engine.send(Cmd::SetShuffle(on));
     state.settings.lock().shuffle = on;
-    state.save_settings();
+    state.save_settings_later();
+}
+
+/// Plays a whole list shuffled (the balanced or the fully random shuffle, as set); skipped songs
+/// are left out.
+pub fn play_shuffled(ctx: &Ctx, ids: Vec<String>) {
+    let state = &ctx.state;
+    let rule = state.skip_rule();
+    let (ids, _) = {
+        let lib = state.library.lock();
+        without_skipped(ids, 0, false, |id| lib.by_id.get(id).is_some_and(|&k| rule.skips(&lib.snapshot.tracks[k])))
+    };
+    if ids.is_empty() {
+        return;
+    }
+    state.engine.send(Cmd::LoadShuffled(state.queue_items(&ids)));
+}
+
+/// Album shuffle over these albums: one at a time, whole and in order, each once (see `upnext`).
+pub fn shuffle_albums(ctx: &Ctx, album_ids: Vec<String>) -> bool {
+    crate::upnext::shuffle_albums(ctx, album_ids)
+}
+
+/// Plays one of these albums, picked at random (one not played lately, more likely). Its id.
+pub fn surprise_album(ctx: &Ctx, album_ids: Vec<String>) -> Option<String> {
+    crate::upnext::surprise_album(ctx, album_ids)
+}
+
+/// "Stop after this song" on the song at this queue place (None: off).
+pub fn stop_after_song(ctx: &Ctx, index: Option<usize>) {
+    ctx.state.engine.send(Cmd::StopAt(index));
+}
+
+/// Takes the songs Autoplay added out of the queue.
+pub fn clear_autoplay(ctx: &Ctx) {
+    ctx.state.engine.send(Cmd::ClearAutoplay);
+}
+
+/// How shuffle plays, and what happens when the queue ends.
+#[derive(Clone, Copy, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueOptions {
+    shuffle_mode: crate::shuffle::ShuffleMode,
+    /// When the queue ends: keep playing songs like the last ones (false: stop).
+    autoplay: bool,
+}
+
+pub fn get_queue_options(ctx: &Ctx) -> QueueOptions {
+    let s = ctx.state.settings.lock();
+    QueueOptions { shuffle_mode: s.shuffle_mode, autoplay: s.autoplay }
+}
+
+pub fn set_queue_options(ctx: &Ctx, options: QueueOptions) {
+    let state = &ctx.state;
+    state.engine.send(Cmd::SetShuffleMode(options.shuffle_mode));
+    state.engine.send(Cmd::SetAutoplay(options.autoplay));
+    {
+        let mut s = state.settings.lock();
+        s.shuffle_mode = options.shuffle_mode;
+        s.autoplay = options.autoplay;
+    }
+    state.save_settings_later();
 }
 
 pub fn get_status(ctx: &Ctx) -> Status {
@@ -792,7 +879,67 @@ pub fn set_dsp(ctx: &Ctx, dsp: DspSettings) {
     let state = &ctx.state;
     state.engine.send(Cmd::SetDsp(dsp.clone()));
     state.settings.lock().dsp = dsp;
-    state.save_settings();
+    // (Also the playing device's own settings, with sound settings per device.)
+    crate::profiles::remember(state);
+    // The EQ sends a change every ~40 ms while a band is dragged: heard at once, saved once it
+    // settles (and at exit).
+    state.save_settings_later();
+}
+
+/// The Sound page's output device picker.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputDevices {
+    /// Cadence chooses the device here (not on Android, which routes to its devices itself).
+    supported: bool,
+    /// Connected devices, then remembered ones that aren't (`present: false`).
+    devices: Vec<crate::audio::devices::Entry>,
+    /// The chosen device (None: the system default).
+    chosen: Option<crate::audio::DeviceRef>,
+    /// "Remember sound settings per device".
+    profiles: bool,
+}
+
+/// (`blocking`: it asks the system for its devices.)
+pub fn list_output_devices(ctx: &Ctx) -> Result<OutputDevices, String> {
+    let state = &ctx.state;
+    let (chosen, profiles, remembered) = {
+        let s = state.settings.lock();
+        let remembered: Vec<(String, String)> = s.sound_profiles.devices.iter().map(|(id, p)| (id.clone(), p.name.clone())).collect();
+        (s.output_device.clone(), s.device_profiles, remembered)
+    };
+    let supported = !cfg!(target_os = "android");
+    if !supported {
+        return Ok(OutputDevices { supported, devices: Vec::new(), chosen, profiles });
+    }
+    let present = crate::audio::list_output_devices().map_err(|e| format!("Couldn't list the output devices: {e}"))?;
+    // Where the system doesn't tell Cadence about devices (not Windows), a chosen one that's back
+    // is found this way.
+    state.engine.send(Cmd::CheckDevices);
+    let devices = crate::audio::devices::entries(&present, chosen.as_ref(), remembered.iter().map(|(id, name)| (id.as_str(), name.as_str())));
+    Ok(OutputDevices { supported, devices, chosen, profiles })
+}
+
+/// Plays on this device from now on (None: the system default, followed when it changes).
+pub fn set_output_device(ctx: &Ctx, device: Option<crate::audio::DeviceRef>) {
+    let state = &ctx.state;
+    let device = device.filter(|d| !d.id.is_empty());
+    state.settings.lock().output_device = device.clone();
+    state.save_settings_later();
+    state.engine.send(Cmd::SetDevice(device));
+}
+
+/// The chosen device isn't connected: play on the system default until it's back.
+pub fn output_use_default(ctx: &Ctx) {
+    ctx.state.engine.send(Cmd::UseDefaultForNow);
+}
+
+/// "Remember sound settings per device" on or off.
+pub fn set_device_profiles(ctx: &Ctx, enabled: bool) {
+    let state = &ctx.state;
+    let device = state.engine.status().device.map(|d| crate::audio::DeviceRef { id: d.id, name: d.name });
+    crate::profiles::set_enabled(state, enabled, device.as_ref());
+    state.save_settings_later();
 }
 
 pub fn eq_presets(_ctx: &Ctx) -> Vec<Preset> {
@@ -836,6 +983,12 @@ pub struct AppSettings {
     lyrics_online: bool,
     fix_tags_online: bool,
     listenbrainz_user: String,
+    /// Learn the artists' other names from MusicBrainz.
+    artist_names_online: bool,
+    /// Hearts are sent to ListenBrainz as loved songs.
+    listenbrainz_loved: bool,
+    /// New releases by the library's artists are looked up once a day (Discover).
+    new_releases_online: bool,
 }
 
 pub fn get_app_settings(ctx: &Ctx) -> AppSettings {
@@ -847,6 +1000,9 @@ pub fn get_app_settings(ctx: &Ctx) -> AppSettings {
         lyrics_online: s.lyrics_online,
         fix_tags_online: s.fix_tags_online,
         listenbrainz_user: s.listenbrainz_user.clone(),
+        artist_names_online: s.artist_names_online,
+        listenbrainz_loved: s.listenbrainz_loved,
+        new_releases_online: s.new_releases_online,
     }
 }
 
@@ -920,7 +1076,7 @@ pub fn covers_discard(ctx: &Ctx) {
 
 pub fn set_global_hotkeys(ctx: &Ctx, enabled: bool) {
     ctx.state.settings.lock().global_hotkeys = enabled;
-    ctx.state.save_settings();
+    ctx.state.save_settings_later();
     ctx.host().set_hotkeys(enabled);
 }
 
@@ -949,7 +1105,7 @@ pub fn hotkey(ctx: &Ctx, action: &str) {
 pub fn set_lyrics_online(ctx: &Ctx, enabled: bool) {
     let state = &ctx.state;
     state.settings.lock().lyrics_online = enabled;
-    state.save_settings();
+    state.save_settings_later();
 }
 
 #[derive(Serialize)]
@@ -982,7 +1138,7 @@ pub fn set_skipped(ctx: &Ctx, ids: Vec<String>, skip: bool) {
             }
         }
     }
-    state.save_settings();
+    state.save_settings_later();
     if !skip {
         return;
     }
@@ -1015,6 +1171,19 @@ pub fn set_rating(ctx: &Ctx, ids: Vec<String>, rating: u8) {
 pub fn set_loved(ctx: &Ctx, ids: Vec<String>, loved: bool) {
     let state = &ctx.state;
     change_marks(state, &ids, |marks, t| marks.set_loved(t, loved));
+    // Told to ListenBrainz too, when that's on (kept and sent in the background: never waits).
+    let (user, on) = {
+        let s = state.settings.lock();
+        (s.listenbrainz_user.clone(), s.listenbrainz_loved)
+    };
+    if let (true, false, Some(sc)) = (on, user.is_empty(), crate::scrobble::running()) {
+        let lib = state.library.lock();
+        for id in &ids {
+            if let Some(&k) = lib.by_id.get(id) {
+                sc.loved(crate::lbloved::Item::of(&lib.snapshot.tracks[k], &user, i8::from(loved)));
+            }
+        }
+    }
 }
 
 fn change_marks(state: &crate::state::AppState, ids: &[String], change: impl Fn(&mut crate::marks::Marks, &crate::library::Track)) {
@@ -1033,13 +1202,67 @@ fn change_marks(state: &crate::state::AppState, ids: &[String], change: impl Fn(
 pub fn set_skip_instrumentals(ctx: &Ctx, enabled: bool) {
     let state = &ctx.state;
     state.settings.lock().skip_instrumentals = enabled;
-    state.save_settings();
+    state.save_settings_later();
 }
 
 pub fn set_fix_tags_online(ctx: &Ctx, enabled: bool) {
     let state = &ctx.state;
     state.settings.lock().fix_tags_online = enabled;
-    state.save_settings();
+    state.save_settings_later();
+}
+
+// ---------- one artist across scripts (identity.rs, musicbrainz.rs, searchkeys.rs) ----------
+
+/// Learning the artists' other names from MusicBrainz, on or off (off stops a running job).
+pub fn set_artist_names_online(ctx: &Ctx, enabled: bool) {
+    let state = &ctx.state;
+    state.settings.lock().artist_names_online = enabled;
+    state.save_settings_later();
+    if enabled {
+        crate::musicbrainz::auto(ctx);
+    } else {
+        crate::musicbrainz::turned_off();
+    }
+}
+
+/// The artists the library writes in more than one way.
+pub fn artist_identity(ctx: &Ctx) -> crate::identity::IdentityView {
+    let _ = ctx;
+    crate::identity::view(&crate::identity::current())
+}
+
+/// Extra words for the window's search index (`blocking`: worked out after a library change).
+pub fn search_keys(ctx: &Ctx) -> Result<crate::searchkeys::SearchKeys, String> {
+    Ok(crate::searchkeys::current(ctx))
+}
+
+/// "Treat as the same artist" (Needs Attention): no file changes.
+pub fn artist_mark_same(ctx: &Ctx, a: String, b: String) {
+    crate::libfix::artist_mark_same(ctx, a, b);
+}
+
+/// "Not the same artist" (an artist page): `name` is split out from `others`. The pairs written.
+pub fn artist_mark_different(ctx: &Ctx, name: String, others: Vec<String>) -> Vec<[String; 2]> {
+    crate::libfix::artist_mark_different(ctx, name, others)
+}
+
+/// Undoes either of the two above.
+pub fn artist_forget(ctx: &Ctx, pairs: Vec<[String; 2]>) {
+    crate::libfix::artist_forget(ctx, pairs);
+}
+
+pub fn artist_names_status(ctx: &Ctx) -> crate::musicbrainz::Status {
+    crate::musicbrainz::status(ctx)
+}
+
+/// Pause (kept across restarts) or resume the MusicBrainz job.
+pub fn artist_names_pause(ctx: &Ctx, paused: bool) {
+    crate::musicbrainz::set_paused(ctx, paused);
+}
+
+/// Stops the MusicBrainz job until Cadence starts again.
+pub fn artist_names_stop(ctx: &Ctx) {
+    crate::musicbrainz::stop(ctx);
 }
 
 /// Lyrics for a song: from the file or a .lrc next to it, else LRCLIB (if allowed). Placed on the
@@ -1050,6 +1273,8 @@ pub fn get_lyrics(ctx: &Ctx, track_id: String) -> Result<crate::lyrics::Lyrics, 
     let track = track_of(state, &track_id)?;
     let (state, voice) = (state.clone(), voice.clone());
     let lyrics = voice.apply(&track, resolve_lyrics(&state, &track));
+    // Lyrics from the song's own file join the lyrics search (saved ones are in it already).
+    crate::lyricindex::seen(&track.id, &lyrics);
     // Followed before Cadence told singers apart: their voices once more (separating only).
     if !lyrics.voice.is_empty() && lyrics.singers.is_empty() && state.settings.lock().voice_auto && voice.installed() && !voice.has_voices(&track) && voice.several_singers(&track) {
         crate::voice::request(ctx, track_id, resolve_lyrics);
@@ -1156,7 +1381,7 @@ pub fn voice_remove(ctx: &Ctx) {
 pub fn voice_set_auto(ctx: &Ctx, enabled: bool) {
     let state = &ctx.state;
     state.settings.lock().voice_auto = enabled;
-    state.save_settings();
+    state.save_settings_later();
 }
 
 /// Listens to a song so its lyrics follow the singer ("voice-progress", then "voice-done").
@@ -1191,7 +1416,7 @@ pub fn voice_use(ctx: &Ctx, track_id: String, on: bool) -> Result<crate::lyrics:
 pub fn set_close_to_tray(ctx: &Ctx, enabled: bool) {
     let state = &ctx.state;
     state.settings.lock().close_to_tray = enabled;
-    state.save_settings();
+    state.save_settings_later();
 }
 
 // ---------- playlists ----------
@@ -1222,6 +1447,47 @@ pub fn delete_playlist(ctx: &Ctx, id: String) {
     state.save_playlists();
 }
 
+// ---------- playlist import and export (playlist_io.rs) ----------
+// All `blocking`: they read and write files and match whole libraries.
+
+/// Writes a playlist (the songs `ids`, in order) as M3U8 or CSV to `path` (the save dialog's; on
+/// Android none: Documents › Cadence). The window resolves smart playlists to their songs.
+pub fn playlist_export(
+    ctx: &Ctx,
+    name: String,
+    ids: Vec<String>,
+    path: Option<String>,
+    options: crate::playlist_io::ExportOptions,
+) -> Result<crate::playlist_io::ExportDone, String> {
+    crate::playlist_io::export_one(ctx, &name, &ids, path, &options)
+}
+
+/// One file per playlist in `folder` (on Android none: Documents › Cadence).
+pub fn playlist_export_all(
+    ctx: &Ctx,
+    items: Vec<crate::playlist_io::ExportItem>,
+    folder: Option<String>,
+    options: crate::playlist_io::ExportOptions,
+) -> Result<crate::playlist_io::ExportAllDone, String> {
+    crate::playlist_io::export_all(ctx, &items, folder, &options)
+}
+
+/// Reads and matches playlist files against the library, saving nothing: one preview per file.
+pub fn playlist_import(ctx: &Ctx, paths: Vec<String>) -> Result<Vec<crate::playlist_io::ImportPreview>, String> {
+    Ok(crate::playlist_io::import_files(ctx, &paths))
+}
+
+/// Android: the playlist files in Documents › Cadence (the file picker can't hand over a path).
+pub fn playlist_import_files(ctx: &Ctx) -> Result<crate::playlist_io::ImportFiles, String> {
+    let _ = ctx;
+    Ok(crate::playlist_io::import_candidates())
+}
+
+/// Writes the entries of a playlist file that aren't in the library as a CSV.
+pub fn playlist_missing_save(ctx: &Ctx, source: String, path: Option<String>) -> Result<crate::playlist_io::SavedFile, String> {
+    crate::playlist_io::save_missing(ctx, &source, path)
+}
+
 // ---------- scrobbling ----------
 
 /// Checks the token with ListenBrainz, then stores it in Credential Manager. Returns the user name.
@@ -1243,6 +1509,65 @@ pub fn disconnect_listenbrainz(ctx: &Ctx) -> Result<(), String> {
     // Listens still waiting were this account's: an account connected later mustn't get them.
     crate::scrobble::clear(&state.data_dir.join("scrobble-queue.json"));
     Ok(())
+}
+
+pub fn set_listenbrainz_loved(ctx: &Ctx, enabled: bool) {
+    ctx.state.settings.lock().listenbrainz_loved = enabled;
+    ctx.state.save_settings_later();
+}
+
+pub fn set_new_releases_online(ctx: &Ctx, enabled: bool) {
+    ctx.state.settings.lock().new_releases_online = enabled;
+    ctx.state.save_settings_later();
+}
+
+/// Restoring the listening history from ListenBrainz (`lbimport`).
+pub fn lb_import_status(ctx: &Ctx) -> crate::lbimport::Status {
+    crate::lbimport::status(ctx)
+}
+
+pub fn lb_import_start(ctx: &Ctx) -> Result<crate::lbimport::Status, String> {
+    crate::lbimport::start(ctx)
+}
+
+pub fn lb_import_pause(ctx: &Ctx) {
+    crate::lbimport::pause(ctx);
+}
+
+pub fn lb_import_discard(ctx: &Ctx) {
+    crate::lbimport::discard(ctx);
+}
+
+pub fn lb_import_apply(ctx: &Ctx) -> Result<crate::lbimport::Applied, String> {
+    crate::lbimport::apply(ctx)
+}
+
+pub fn lb_import_save_unmatched(ctx: &Ctx, path: Option<String>) -> Result<crate::playlist_io::SavedFile, String> {
+    crate::lbimport::save_unmatched(ctx, path)
+}
+
+/// Favorites and ListenBrainz's loved songs (`lbloved`).
+pub fn lb_loved_preview(ctx: &Ctx) -> Result<crate::lbloved::SyncPreview, String> {
+    crate::lbloved::preview(ctx)
+}
+
+pub fn lb_loved_apply(ctx: &Ctx) -> Result<crate::lbloved::SyncDone, String> {
+    crate::lbloved::apply(ctx)
+}
+
+/// How many hearts wait to be sent to ListenBrainz.
+pub fn lb_loved_waiting(_ctx: &Ctx) -> usize {
+    crate::lbloved::waiting()
+}
+
+/// New releases by the library's artists (asks ListenBrainz when it's due, once a day).
+pub fn new_releases(ctx: &Ctx) -> Result<crate::lbreleases::View, String> {
+    Ok(crate::lbreleases::for_discover(ctx, true))
+}
+
+/// What was found last time (no network).
+pub fn new_releases_cached(ctx: &Ctx) -> crate::lbreleases::View {
+    crate::lbreleases::for_discover(ctx, false)
 }
 
 // ---------- tag editing ----------
@@ -1475,6 +1800,49 @@ pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<crate::libfix
 /// that need none.
 pub fn romanize_lyrics(_ctx: &Ctx, lines: Vec<String>) -> Result<Vec<String>, String> {
     Ok(crate::romanize::lines(&lines))
+}
+
+/// Readings above the characters of each line (furigana over kanji, pinyin over hanzi); an empty
+/// list for lines that need none.
+pub fn ruby_lyrics(_ctx: &Ctx, lines: Vec<String>) -> Result<Vec<Vec<crate::romanize::RubyPart>>, String> {
+    Ok(crate::romanize::ruby(&lines))
+}
+
+/// The translation of a song's lyrics (as the lyrics view shows them) into `lang`: the one that
+/// came with them, one made before, or the AI's (only when it's set up; asked once per lyrics
+/// and language, then kept). Another song's request (or `translate_cancel`) stops it.
+pub fn translate_lyrics(ctx: &Ctx, track_id: String, lang: String) -> Result<crate::translate::Translation, String> {
+    let state = ctx.state.clone();
+    let track = track_of(&state, &track_id)?;
+    crate::translate::begin(&track_id);
+    let lyrics = ctx.voice.apply(&track, resolve_lyrics(&state, &track));
+    let lines: Vec<String> = if lyrics.instrumental {
+        Vec::new()
+    } else if !lyrics.synced.is_empty() {
+        lyrics.synced.iter().map(|l| l.text.clone()).collect()
+    } else {
+        lyrics.plain.split('\n').map(str::to_string).collect()
+    };
+    let bundled: &[String] = if lyrics.translation.len() == lyrics.synced.len() && !lyrics.synced.is_empty() { &lyrics.translation } else { &[] };
+    let song = crate::translate::Song { title: &track.title, artist: &track.artist, lines: &lines, bundled, bundled_lang: &lyrics.translation_lang };
+    let settings = state.settings.lock().ai.clone();
+    let ai = crate::ai::ready(&settings).then(|| crate::translate::Ai(settings));
+    let cancelled = || !crate::translate::is_wanted(&track_id);
+    let out = crate::translate::translate(&state.data_dir.join("lyrics"), &track_id, &song, &lang, ai.as_ref().map(|a| a as &dyn crate::translate::Model), &cancelled);
+    if let Ok(t) = &out {
+        log::info!("translation of {} into {lang}: {} ({} lines)", track.title, t.from, t.lines.len());
+    }
+    out
+}
+
+/// The lyrics view moved on from this song: its translation isn't asked for any more.
+pub fn translate_cancel(_ctx: &Ctx, track_id: String) {
+    crate::translate::cancel(&track_id);
+}
+
+/// Songs with a line of their lyrics matching `query`, with the line and where it's sung.
+pub fn lyric_search(ctx: &Ctx, query: String, limit: Option<usize>) -> Result<crate::lyricindex::Found, String> {
+    Ok(crate::lyricindex::search(ctx, &query, limit.unwrap_or(20).min(100)))
 }
 
 // ---------- album covers ----------
@@ -1733,93 +2101,34 @@ pub struct ListeningStats {
     pub top_albums: Vec<StatItem>,
     /// Listening minutes per day (week, month) or per 30 days (year), oldest first; empty for "all".
     pub timeline: Vec<u32>,
+    // The sections below (stats.rs): over the whole history (archive included); the range ones
+    // say so.
+    /// Songs played on this date in earlier years.
+    pub on_this_day: Vec<crate::stats::DayItem>,
+    /// Songs played often, loved or rated 4–5 stars, not played for 180 days.
+    pub forgotten: Vec<crate::stats::Forgotten>,
+    /// Plays per local hour, 0–23 (the range).
+    pub clock: Vec<u32>,
+    /// Plays per weekday, Monday first (the range).
+    pub weekdays: Vec<u32>,
+    pub streak: Option<crate::stats::Streaks>,
+    /// New artists per month, the last 12 months.
+    pub discovery: Vec<crate::stats::MonthCount>,
+    pub first_song: Option<crate::stats::FirstSong>,
+    /// Albums heard through in one go (the range); `finished` = how often.
+    pub complete_albums: Vec<StatItem>,
+    /// Plays by the decade of the songs' year (the range).
+    pub decades: Vec<crate::stats::Decade>,
+    /// Plays by the songs' language (the range), most played first.
+    pub languages: Vec<crate::stats::Language>,
+    /// Unix seconds of the first play recorded (0: none).
+    pub history_from: u64,
 }
 
-/// (`blocking`: it goes through the whole history.)
+/// (`blocking`: it goes through the whole history, the archive's year files summarised once and
+/// kept, see stats.rs.)
 pub fn listening_stats(ctx: &Ctx, range: String) -> Result<ListeningStats, String> {
-    Ok(stats(&ctx.state, range))
-}
-
-fn stats(state: &AppState, range: String) -> ListeningStats {
-    let now = crate::history::now();
-    let (days, bucket) = match range.as_str() {
-        "week" => (7, 86_400),
-        "month" => (30, 86_400),
-        "year" => (365, 30 * 86_400),
-        _ => (0, 0),
-    };
-    let since = if days == 0 { 0 } else { now.saturating_sub(days * 86_400) };
-    let events: Vec<crate::history::PlayEvent> = state.history.lock().events.iter().filter(|e| e.at >= since).cloned().collect();
-    let lib = state.library.lock();
-    let mut out = ListeningStats { range: range.clone(), ..Default::default() };
-    if bucket > 0 {
-        out.timeline = vec![0; (days * 86_400 / bucket) as usize];
-    }
-    let mut songs: HashMap<String, StatItem> = HashMap::new();
-    let mut artists: HashMap<String, StatItem> = HashMap::new();
-    let mut albums: HashMap<String, StatItem> = HashMap::new();
-    let album_of: HashMap<&str, &crate::library::Album> = lib.snapshot.albums.iter().map(|a| (a.id.as_str(), a)).collect();
-    let credits = artist_index(lib.snapshot.albums.iter().map(|a| a.artist.as_str()));
-    let mut seconds = 0.0;
-    let mut timeline = vec![0.0f64; out.timeline.len()];
-    for e in &events {
-        let Some(t) = lib.by_id.get(&e.track_id).map(|&i| &lib.snapshot.tracks[i]) else { continue };
-        let finished = !e.skipped && (e.duration <= 0.0 || e.listened >= e.duration * 0.9 || e.duration - e.listened <= 10.0);
-        let heard = e.listened.max(0.0);
-        out.plays += 1;
-        out.finished += finished as u32;
-        out.skipped += e.skipped as u32;
-        seconds += heard;
-        if let Some(last) = timeline.len().checked_sub(1) {
-            timeline[(((e.at - since) / bucket) as usize).min(last)] += heard;
-        }
-        // `minutes` holds seconds until the end.
-        let add = |map: &mut HashMap<String, StatItem>, id: &str, name: &str, sub: &str| {
-            let s = map
-                .entry(id.to_lowercase())
-                .or_insert_with(|| StatItem { id: id.to_string(), name: name.to_string(), sub: sub.to_string(), ..Default::default() });
-            s.plays += 1;
-            s.finished += finished as u32;
-            s.minutes += heard.round() as u32;
-        };
-        add(&mut songs, &t.id, &t.title, &t.artist);
-        // Under the artists whose pages have the song: its album's artist credit, split as the
-        // artist list splits it ("A & B" under A and B when both are artists in the library).
-        let album = album_of.get(t.album_id.as_str());
-        let credit = album.map_or(t.album_artist.as_str(), |a| a.artist.as_str());
-        match credits.get(credit) {
-            Some(names) => {
-                for n in names {
-                    add(&mut artists, n, n, "");
-                }
-            }
-            None => add(&mut artists, credit, credit, ""),
-        }
-        if let Some(a) = album {
-            add(&mut albums, &a.id, &a.title, &a.artist);
-        }
-    }
-    out.minutes = (seconds / 60.0).round() as u32;
-    out.timeline = timeline.iter().map(|s| (s / 60.0).round() as u32).collect();
-    out.songs = songs.len() as u32;
-    out.artists = artists.len() as u32;
-    out.albums = albums.len() as u32;
-    let top = |map: HashMap<String, StatItem>| {
-        let mut v: Vec<StatItem> = map
-            .into_values()
-            .map(|mut s| {
-                s.minutes = (s.minutes as f64 / 60.0).round() as u32;
-                s
-            })
-            .collect();
-        v.sort_by(|a, b| b.finished.cmp(&a.finished).then(b.minutes.cmp(&a.minutes)).then_with(|| a.name.cmp(&b.name)));
-        v.truncate(50);
-        v
-    };
-    out.top_songs = top(songs);
-    out.top_artists = top(artists);
-    out.top_albums = top(albums);
-    out
+    Ok(crate::stats::listening_stats(&ctx.state, range))
 }
 
 /// The names in a credit like "A, B & C feat. D", split as the window's `splitCredit` (api.ts)
@@ -1874,7 +2183,7 @@ fn split_credit_like_ui(credit: &str) -> Vec<String> {
 /// Each album-artist credit → the artists it's listed under, as the window's `artistIndex` does it:
 /// a credit is split only into parts that are artists in the library (credited alone somewhere,
 /// or in two or more credits), so "Simon & Garfunkel" stays one artist.
-fn artist_index<'a>(credits: impl Iterator<Item = &'a str>) -> HashMap<String, Vec<String>> {
+pub(crate) fn artist_index<'a>(credits: impl Iterator<Item = &'a str>) -> HashMap<String, Vec<String>> {
     let unique: Vec<&str> = {
         let mut seen = HashSet::new();
         credits.filter(|c| seen.insert(*c)).collect()
@@ -1902,6 +2211,48 @@ fn artist_index<'a>(credits: impl Iterator<Item = &'a str>) -> HashMap<String, V
             (c.to_string(), if known.is_empty() { vec![c.to_string()] } else { known })
         })
         .collect()
+}
+
+/// Every artist page the window shows (the names `artist_index` lists credits under), by their
+/// lower-case name.
+pub(crate) fn artist_pages(credits: &HashMap<String, Vec<String>>) -> HashMap<String, String> {
+    credits.values().flatten().map(|n| (n.to_lowercase(), n.clone())).collect()
+}
+
+/// An album credit that names no one: compilations ("Various Artists", "VA", 群星…) or none.
+pub(crate) fn no_one(credit: &str) -> bool {
+    let n = crate::state::match_key(credit);
+    ["", "variousartists", "various", "va", "compilation", "compilations", "unknownartist", "unknown", "群星", "ヴァリアスアーティスト", "オムニバス"]
+        .contains(&n.as_str())
+}
+
+/// The artists a play counts under in the stats, each an artist page that exists: the album's
+/// artist credit, split as the artist list splits it ("A & B" under A and B when both are artists
+/// in the library). On a compilation ("Various Artists") it's the song's own performers instead,
+/// those of them that have a page; when none has one, the compilation's page.
+pub(crate) fn stat_artists(track_artist: &str, album_credit: &str, credits: &HashMap<String, Vec<String>>, pages: &HashMap<String, String>) -> Vec<String> {
+    if no_one(album_credit) {
+        let mut performers: Vec<String> = Vec::new();
+        // The whole credit when it's an artist's page ("Simon & Garfunkel"), else its names.
+        let whole = pages.get(&track_artist.trim().to_lowercase()).filter(|p| !no_one(p));
+        let names = match whole {
+            Some(page) => vec![page.clone()],
+            None => split_credit_like_ui(track_artist),
+        };
+        for n in names {
+            if let Some(page) = pages.get(&n.to_lowercase())
+                && !no_one(page) && !performers.contains(page) {
+                    performers.push(page.clone());
+                }
+        }
+        if !performers.is_empty() {
+            return performers;
+        }
+    }
+    match credits.get(album_credit) {
+        Some(names) => names.clone(),
+        None => vec![album_credit.to_string()],
+    }
 }
 
 /// The last Discover search, shown again when the page opens (without what the library has now).
@@ -2038,6 +2389,41 @@ pub fn ai_discover(ctx: &Ctx, refresh: bool) -> Result<Vec<crate::ai::Discovery>
     ai_daily_picks(ctx, refresh).map(|r| r.picks)
 }
 
+// ---------- backup and restore (backup.rs) ----------
+// All `blocking`: they read and write files.
+
+/// The snapshots, the last automatic one, and the second folder.
+pub fn backup_info(ctx: &Ctx) -> Result<crate::backup::BackupInfo, String> {
+    Ok(crate::backup::info(&ctx.state.data_dir))
+}
+
+/// "Back up now": to `path` (from the save dialog; on Android none: the shared Documents folder).
+/// `lyricOffsets`: the window's lyrics timing nudges (JSON), kept with the data first.
+pub fn backup_create(ctx: &Ctx, path: Option<String>, lyric_offsets: Option<String>) -> Result<crate::backup::Made, String> {
+    crate::backup::create_now(&ctx.state, path, lyric_offsets)
+}
+
+/// Reads and checks a backup without using it: what a restore would replace.
+pub fn backup_preview(ctx: &Ctx, path: String) -> Result<crate::backup::Preview, String> {
+    let _ = ctx;
+    crate::backup::preview(std::path::Path::new(&path))
+}
+
+/// Restores a backup (a snapshot of the data as it is now is made first).
+pub fn backup_restore(ctx: &Ctx, path: String) -> Result<crate::backup::Restored, String> {
+    crate::backup::restore(ctx, std::path::Path::new(&path))
+}
+
+/// The second folder automatic snapshots are copied to (None or "" turns it off).
+pub fn backup_set_folder(ctx: &Ctx, folder: Option<String>) -> Result<crate::backup::BackupInfo, String> {
+    crate::backup::set_folder(&ctx.state.data_dir, folder)
+}
+
+/// Keeps the window's lyrics timing nudges in the data folder, so automatic snapshots have them.
+pub fn backup_keep_offsets(ctx: &Ctx, lyric_offsets: String) -> Result<(), String> {
+    crate::backup::keep_offsets(&ctx.state.data_dir, &lyric_offsets)
+}
+
 /// Every command (made into Tauri commands by commands.rs).
 /// `plain` returns a value, `fallible` a Result, `blocking` a Result after slow work (network,
 /// files, AI), which Tauri runs on a worker thread. Argument names are the UI's, in camelCase.
@@ -2064,6 +2450,7 @@ macro_rules! cadence_commands {
             blocking ai_test() -> String;
             blocking ai_preview(request: String) -> String;
             blocking ai_ask(request: String) -> $crate::ai::AiMix;
+            blocking dj_suggestions() -> Vec<String>;
             blocking ai_mixes(refresh: bool) -> Vec<$crate::ai::AiMix>;
             blocking ai_discover(refresh: bool) -> Vec<$crate::ai::Discovery>;
             blocking listening_profile() -> $crate::ai::Profile;
@@ -2087,9 +2474,20 @@ macro_rules! cadence_commands {
             plain set_volume(volume: f32) -> ();
             plain set_repeat(repeat: $crate::audio::Repeat) -> ();
             plain set_shuffle(on: bool) -> ();
+            plain play_shuffled(ids: Vec<String>) -> ();
+            plain shuffle_albums(album_ids: Vec<String>) -> bool;
+            plain surprise_album(album_ids: Vec<String>) -> Option<String>;
+            plain stop_after_song(index: Option<usize>) -> ();
+            plain clear_autoplay() -> ();
+            plain get_queue_options() -> $crate::api::QueueOptions;
+            plain set_queue_options(options: $crate::api::QueueOptions) -> ();
             plain get_status() -> $crate::audio::Status;
             plain get_dsp() -> $crate::audio::DspSettings;
             plain set_dsp(dsp: $crate::audio::DspSettings) -> ();
+            blocking list_output_devices() -> $crate::api::OutputDevices;
+            plain set_output_device(device: Option<$crate::audio::DeviceRef>) -> ();
+            plain output_use_default() -> ();
+            plain set_device_profiles(enabled: bool) -> ();
             plain eq_presets() -> Vec<$crate::api::Preset>;
             fallible parse_eq_file(text: Option<String>, path: Option<String>) -> $crate::api::ParametricImport;
             plain get_history() -> $crate::history::HistoryStats;
@@ -2129,8 +2527,26 @@ macro_rules! cadence_commands {
             plain get_playlists() -> Vec<$crate::playlists::Playlist>;
             plain save_playlist(playlist: $crate::playlists::Playlist) -> $crate::playlists::Playlist;
             plain delete_playlist(id: String) -> ();
+            blocking playlist_export(name: String, ids: Vec<String>, path: Option<String>, options: $crate::playlist_io::ExportOptions) -> $crate::playlist_io::ExportDone;
+            blocking playlist_export_all(items: Vec<$crate::playlist_io::ExportItem>, folder: Option<String>, options: $crate::playlist_io::ExportOptions) -> $crate::playlist_io::ExportAllDone;
+            blocking playlist_import(paths: Vec<String>) -> Vec<$crate::playlist_io::ImportPreview>;
+            blocking playlist_import_files() -> $crate::playlist_io::ImportFiles;
+            blocking playlist_missing_save(source: String, path: Option<String>) -> $crate::playlist_io::SavedFile;
             blocking connect_listenbrainz(token: String) -> String;
             fallible disconnect_listenbrainz() -> ();
+            plain set_listenbrainz_loved(enabled: bool) -> ();
+            plain set_new_releases_online(enabled: bool) -> ();
+            plain lb_import_status() -> $crate::lbimport::Status;
+            fallible lb_import_start() -> $crate::lbimport::Status;
+            plain lb_import_pause() -> ();
+            plain lb_import_discard() -> ();
+            blocking lb_import_apply() -> $crate::lbimport::Applied;
+            blocking lb_import_save_unmatched(path: Option<String>) -> $crate::playlist_io::SavedFile;
+            blocking lb_loved_preview() -> $crate::lbloved::SyncPreview;
+            blocking lb_loved_apply() -> $crate::lbloved::SyncDone;
+            plain lb_loved_waiting() -> usize;
+            blocking new_releases() -> $crate::lbreleases::View;
+            plain new_releases_cached() -> $crate::lbreleases::View;
             blocking write_tags(ids: Vec<String>, changes: $crate::tagedit::TagChanges) -> $crate::api::TagsSaved;
             blocking find_song_info(id: String, query: Option<String>) -> $crate::api::SongInfoResults;
             blocking save_song_info(id: String, info: $crate::autotag::Candidate, keep_title: bool, whole_album: bool) -> $crate::autotag::Saved;
@@ -2144,12 +2560,25 @@ macro_rules! cadence_commands {
             plain artist_pairs() -> $crate::libfix::ArtistPairs;
             plain artist_pair_dismiss(native: String, latin: String) -> ();
             blocking merge_artist(from: String, to: String) -> $crate::libfix::Renamed;
+            plain set_artist_names_online(enabled: bool) -> ();
+            plain artist_identity() -> $crate::identity::IdentityView;
+            blocking search_keys() -> $crate::searchkeys::SearchKeys;
+            plain artist_mark_same(a: String, b: String) -> ();
+            plain artist_mark_different(name: String, others: Vec<String>) -> Vec<[String; 2]>;
+            plain artist_forget(pairs: Vec<[String; 2]>) -> ();
+            plain artist_names_status() -> $crate::musicbrainz::Status;
+            plain artist_names_pause(paused: bool) -> ();
+            plain artist_names_stop() -> ();
             plain fix_all_found() -> Vec<$crate::libfix::FoundInfo>;
             blocking fix_all_save(ids: Vec<String>) -> $crate::libfix::FixAllSaved;
             plain fix_all_discard() -> ();
             plain recent_changes() -> Vec<$crate::changes::ChangeInfo>;
             blocking undo_change(id: String) -> usize;
             blocking romanize_lyrics(lines: Vec<String>) -> Vec<String>;
+            blocking ruby_lyrics(lines: Vec<String>) -> Vec<Vec<$crate::romanize::RubyPart>>;
+            blocking translate_lyrics(track_id: String, lang: String) -> $crate::translate::Translation;
+            plain translate_cancel(track_id: String) -> ();
+            blocking lyric_search(query: String, limit: Option<usize>) -> $crate::lyricindex::Found;
             blocking find_covers(album_id: String, query: Option<String>) -> $crate::api::CoverResults;
             blocking set_album_cover(album_id: String, source: $crate::artists::Source) -> $crate::covers::Changed;
             plain artist_images() -> std::collections::HashMap<String, $crate::artists::ArtistImage>;
@@ -2163,13 +2592,24 @@ macro_rules! cadence_commands {
             blocking ai_find_lyrics(track_id: String) -> $crate::lyrics::Lyrics;
             blocking find_singers(track_id: String) -> $crate::lyrics::Lyrics;
             plain debug_tap(on: bool) -> String;
+            blocking backup_info() -> $crate::backup::BackupInfo;
+            blocking backup_create(path: Option<String>, lyric_offsets: Option<String>) -> $crate::backup::Made;
+            blocking backup_preview(path: String) -> $crate::backup::Preview;
+            blocking backup_restore(path: String) -> $crate::backup::Restored;
+            blocking backup_set_folder(folder: Option<String>) -> $crate::backup::BackupInfo;
+            blocking backup_keep_offsets(lyric_offsets: String) -> ();
+            bytes waveform(track_id: String) -> Vec<u8>;
+            plain waveforms_prepare() -> bool;
+            plain waveforms_pause(paused: bool) -> ();
+            plain waveforms_stop() -> ();
+            plain waveforms_status() -> $crate::waveform::JobStatus;
         }
     };
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{artist_index, env_vars, not_all_saved, split_credit_like_ui, without_skipped};
+    use super::{artist_index, artist_pages, env_vars, not_all_saved, split_credit_like_ui, stat_artists, without_skipped};
 
     #[test]
     fn credits_split_like_the_window_splits_them() {
@@ -2193,6 +2633,30 @@ mod tests {
         assert_eq!(index["Simon & Garfunkel"], ["Simon & Garfunkel"]);
         assert_eq!(index["Wuthering Waves & Crywolf"], ["Wuthering Waves"]);
         assert_eq!(index["Kenshi Yonezu"], ["Kenshi Yonezu"]);
+    }
+
+    #[test]
+    fn compilation_plays_count_under_their_performers() {
+        let credits = ["Kenshi Yonezu", "Various Artists", "YOASOBI", "Simon & Garfunkel"];
+        let index = artist_index(credits.iter().copied());
+        let pages = artist_pages(&index);
+        let under = |artist: &str, album: &str| stat_artists(artist, album, &index, &pages);
+        // A compilation: its performers, each one a page.
+        assert_eq!(under("Kenshi Yonezu", "Various Artists"), ["Kenshi Yonezu"]);
+        assert_eq!(under("YOASOBI & kenshi yonezu", "Various Artists"), ["YOASOBI", "Kenshi Yonezu"], "the page's spelling");
+        assert_eq!(under("Simon & Garfunkel", "VA"), ["Simon & Garfunkel"], "a page's own name isn't split");
+        // A performer without a page of their own: the compilation's page (it exists).
+        assert_eq!(under("Nobody Here", "Various Artists"), ["Various Artists"]);
+        // No album artist: the song's artist when it has a page.
+        assert_eq!(under("YOASOBI", ""), ["YOASOBI"]);
+        // An ordinary album stays under its album artist (a guest isn't counted).
+        assert_eq!(under("Kenshi Yonezu feat. Hatsune Miku", "Kenshi Yonezu"), ["Kenshi Yonezu"]);
+        // Every name returned is a page.
+        for (a, b) in [("Kenshi Yonezu", "Various Artists"), ("Nobody", "Various Artists"), ("YOASOBI", "YOASOBI")] {
+            for n in under(a, b) {
+                assert!(pages.contains_key(&n.to_lowercase()), "{n}");
+            }
+        }
     }
 
     #[test]
