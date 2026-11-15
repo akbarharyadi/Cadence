@@ -2,7 +2,7 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
-## Unreleased
+## 0.3.0 (2026-11-15)
 
 This is the biggest update so far: lighter on your computer, much more in the lyrics, new ways to find and pick
 songs, backups, and a long list of fixes.
