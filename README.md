@@ -49,6 +49,11 @@
 - **Tone per song**: gentle loudness compensation and a per-song Smart EQ from each song's measured tonal balance.
 - **Equalizer**: 10-band graphic and parametric, automatic headroom, and AutoEq / Equalizer APO headphone profiles.
 - **Crossfeed** for headphones (bs2b) and high-quality FFT resampling when the device runs at another rate.
+- **Output device** (Windows, macOS, Linux): pick where Cadence plays, and keep a chosen device even when another
+  becomes the system default. If it is unplugged, playback pauses instead of moving to other speakers. Each device
+  remembers its own equalizer, crossfeed, Direct output and volume (a switch in Sound turns that off). A device never
+  opens louder than it last played, and Direct output on a device Cadence hasn't played on before starts at no more
+  than 30 % on the volume slider.
 - **Signal path**: a live view of every step between the file and your speakers.
 
 ### Listening
@@ -61,25 +66,38 @@
   Indonesian and most other languages, on your computer, in the background (on a Windows graphics card, well under a
   minute per song). It needs an optional one-time download of about 440 MB. You can do one song from the lyrics view,
   or every song with lyrics from Settings; progress shows in the sidebar.
+- **Translations and furigana**: show a translation under each line (English, Indonesian, Japanese, Korean or
+  Chinese; a translation that comes with the lyrics is used as it is, otherwise it needs the AI DJ set up and is made
+  once per song), and furigana over kanji or pinyin over Chinese, both off until you turn them on. LRCLIB's
+  word-by-word timings are used when it has them.
+- **Find a song by a line** you remember: Search also looks inside your saved lyrics, as written and in Latin letters.
+  It reads them once, on your computer, in the background.
 - **Who sings each line**: in duets, each singer's lines get their own colour and a small name where the singer
   changes. Cadence uses names written in the lyrics ("Name: …", "[Name]", M/F/D), tells two voices apart by pitch and
   tone in songs credited to several singers, and can ask the AI DJ for the singers' credited names (⋯ → Who sings?).
 - **Sounds like**: every song is analysed once, locally ([bliss](https://github.com/Polochon-street/bliss-rs): tempo,
   timbre, loudness, harmony), for sound radio, similar songs and automatic mixes.
 - **AI DJ** (optional, with your own key; Z.ai GLM by default, Claude (Anthropic), or any OpenAI-compatible service):
-  requests in your own words (Ask the DJ), daily mixes from your listening, and new music to buy.
+  requests in your own words (Ask the DJ), daily mixes from your listening, and new music to buy. Ask the DJ only
+  picks songs you have: the AI turns the request into a plan, Cadence finds the songs on your computer, and the AI
+  (unless you turn "DJ ordering" off) only puts them in order.
 - **Made for you today**: four daily mixes, each from a different part of your library (what you play at this time of
   day, this month's most played, old favourites, deep cuts, somewhere you haven't been lately). A song is in one mix
   only, and each day's mixes differ from the last week's. Made with the AI DJ.
 - **Discover**: new songs you don't have yet, searched for on the web by the AI DJ from your recent listening, an
   artist, a genre or your own words, each with where to buy it. Songs you have, or that are on an album you have, are
   never suggested.
-- **Your Stats**: your most played songs, artists and albums for the last week, month, year or all time, and when you
-  listen.
+- **Your Stats**: your most played songs, artists and albums for the last week, month, year or all time, when you
+  listen, streaks, forgotten favorites and more, over your whole listening history (plays older than the last 20,000
+  are kept in a yearly archive, not dropped).
 - **Listen Now**: recent albums, top picks, mixes for the day, what's on repeat and what you haven't played in a while.
-- **Player**: a seek bar with time and time left, shuffle and repeat, Up Next (clear it, save it as a playlist, drag to
-  reorder), a mini player and the system tray. On computers the player sits at the top of the window or along the
+- **Player**: a seek bar with time and time left (a **waveform** in Now Playing, which you can turn off in Settings ›
+  Appearance), shuffle and repeat, Up Next (clear it, save it as a playlist, drag to reorder, stop after any song), a
+  mini player and the system tray. On computers the player sits at the top of the window or along the
   bottom (Settings → Appearance).
+- **Shuffle** that feels random: balanced (each artist spread out, recently played songs later) or fully random, plus
+  **Shuffle albums** (whole albums, in order) and, if you turn it on, **Keep playing similar songs** when the queue ends
+  (off by default).
 - **Favorites and ratings**: heart a song and rate it 1 to 5 stars; they follow the song if its file moves.
 - **Sleep timer**: stop after some minutes (with a fade-out), at the end of the song or of the album.
 - **Global hotkeys** on computers: Ctrl+Alt+Space play/pause, Ctrl+Alt+← / → skip, Ctrl+Alt+↑ / ↓ volume, Ctrl+Alt+H
@@ -93,7 +111,8 @@
 - **Needs Attention** and **Library Health**: one card per kind of problem, worst first (damaged files, extra copies,
   albums split in two, artists under two names, songs without info, then optional ones such as missing covers, years
   and genres, or lossless files that aren't). Every suggestion says how sure Cadence is, removed copies go to the
-  Recycle Bin, and every change to your files can be undone.
+  Recycle Bin (the Trash on a Mac; phones delete them for good and ask first), and changes to your files can be undone
+  (not a deletion on a phone or a Mac).
 - **CUE sheets**: albums ripped as one big file with a `.cue` sheet show up as their songs.
 - **Change cover**: pick an album cover from iTunes or Deezer (or an image file); it's shown at once and written
   into the songs' files.
@@ -104,12 +123,30 @@
   romanization under each line, for scripts you can't read; it fills in along with the karaoke.
 - **Skip songs** you don't want in rotation (or every instrumental and karaoke version): they stay in the library but
   are left out when albums, playlists, mixes and shuffles play.
-- Playlists and smart playlists (rules can use favorites, ratings, format, sample rate, bit depth and bitrate), tag
-  editing, ListenBrainz scrobbling, and media keys with the system media controls.
+- **One artist across spellings**: 米津玄師 and Kenshi Yonezu are one artist, found by either name. Cadence learns the
+  other names from MusicBrainz in the background (on by default, artist names only; Settings › Learn artist names
+  online), and search also reads names and titles in Latin letters. Nothing in your files is changed.
+- **Select several songs** in any list (Shift and Ctrl with click or arrows, long-press on a phone) and use the menu
+  on all of them, and press **Ctrl+K** (⌘K) for a command palette that reaches every page, action and song.
+  **Settings has a search box**, `?` lists every keyboard shortcut, and computers can make the interface larger or smaller
+  (Ctrl + = and Ctrl + -).
+- **Playlists** and smart playlists (rules can use favorites, ratings, format, sample rate, bit depth and bitrate), tag
+  editing, and media keys with the system media controls. Import M3U8, XSPF and CSV playlists (Spotify exports from
+  Exportify too; songs are matched, never guessed) and export M3U8 or CSV. Playlists, the queue and favorites follow a
+  song when its file moves or is replaced.
+- **ListenBrainz** (optional, with your token): scrobbling, hearts sent as loved songs, **Restore history** from your
+  listens, **Sync favorites**, and *New from artists you own* in Discover (needs no account; on by default, Settings ›
+  Look for new releases online).
+- **Backup and restore**: one file with your playlists, favorites and ratings, listening history, queue, settings, artist
+  pictures and the lyrics you picked (never your music, keys or passwords). Cadence keeps its own snapshots in the
+  `backups` folder of its data folder, at most one a day and only when something changed (the last 7 days and 4 weeks),
+  optionally copied to a second folder you choose, and takes one before every restore and every ListenBrainz import.
+  Settings › Backup.
 
 ### Android
 
-- The same library, Sound Check and lossless decoding on your phone, in a layout made for one hand.
+- The same library, Sound Check and lossless decoding on your phone, in a layout made for one hand, with a Library tab
+  for everything the desktop sidebar lists.
 - Playback continues with the screen off; control it from the lock screen, the notification, Bluetooth buttons or the
   media island.
 - A home screen widget with the cover, the song's quality and play controls.
@@ -184,11 +221,13 @@ Updates: release builds are signed for the in-app updater with the key in the
 Desktop apps install updates from `latest.json` on the latest release; Android downloads the new APK and opens the
 system installer.
 
-Checks:
+Checks (the same ones CI runs on every push to `main`, see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
 
 ```sh
 pnpm check                         # Svelte and TypeScript
-cargo test --manifest-path src-tauri/Cargo.toml
+pnpm test                          # front-end tests (vitest, with a mocked backend)
+pnpm check:size                    # file and function size limits (AGENTS.md section 2)
+cargo test --lib --manifest-path src-tauri/Cargo.toml
 ```
 
 ### Releases
@@ -215,7 +254,10 @@ Cadence is a [Tauri 2](https://tauri.app) app: a Rust core with a [Svelte 5](htt
 | Loudness, tone, EQ, crossfeed, vocal reduction | `src-tauri/src/audio/` |
 | Library scan, tags ([lofty](https://github.com/Serial-ATA/lofty-rs)), artwork, folder watching | `src-tauri/src/library.rs`, `jobs.rs` |
 | Sound analysis and mixes ([bliss](https://github.com/Polochon-street/bliss-rs)) | `src-tauri/src/sonic.rs` |
-| Lyrics, AI DJ, catalogue lookups | `src-tauri/src/lyrics.rs`, `ai.rs`, `catalog.rs` |
+| Lyrics, translation, find-by-lyric, AI DJ, catalogue lookups | `src-tauri/src/lyrics.rs`, `translate.rs`, `lyricindex.rs`, `ai.rs`, `dj.rs`, `catalog.rs` |
+| One artist across scripts, search keys | `src-tauri/src/identity.rs`, `musicbrainz.rs`, `searchkeys.rs` |
+| Saved data, history, backups | `src-tauri/src/state.rs`, `history.rs`, `backup.rs` |
+| ListenBrainz | `src-tauri/src/scrobble.rs`, `lbapi.rs`, `lbimport.rs`, `lbloved.rs`, `lbreleases.rs` |
 | Lyrics that follow the singer: vocal separation, forced alignment ([ONNX Runtime](https://onnxruntime.ai) via [ort](https://ort.pyke.io)) | `src-tauri/src/voice/` |
 | Interface | `src/lib` (components, views, store) |
 | Android: media session, notification, widget | `src-tauri/gen/android/app/src/main/java/com/cadence/player` |
@@ -225,6 +267,12 @@ A worker thread decodes ahead into a lock-free ring buffer; the device callback 
 fades and volume, so the interface and the disk never cause dropouts. Settings, the library cache, artwork and lyrics
 live in the app data folder (`%APPDATA%\com.cadence.player` on Windows). API keys are kept in the system credential
 store (Windows Credential Manager, macOS Keychain, Secret Service on Linux; app-private storage on Android).
+
+Everything you decide (settings, playlists, favorites, ratings, history, picked lyrics) is saved by writing a temporary
+file and putting it in place in one step, with a `.bak` of the last good version; a file Cadence can't read is left
+alone, never replaced with defaults. Backups are one zip file (Settings › Backup) with those files and a list of the
+songs they mention, so a backup restored where your music lives somewhere else still finds its songs; caches that
+Cadence can build again (the library, sound analysis, waveforms, covers, the voice models, translations) are not in it.
 
 Design notes and research: [docs/research-features-and-ai.md](docs/research-features-and-ai.md) and, for lyrics that
 follow the singer, [docs/research-lyrics-alignment.md](docs/research-lyrics-alignment.md).
@@ -237,24 +285,26 @@ It only goes online for these, and sends only what's listed:
 
 | Service | When | What it sends |
 |---|---|---|
-| [LRCLIB](https://lrclib.net) | A song has no lyrics (can be turned off). Word-by-word timings come in the same answer when LRCLIB has them (no extra request) | Artist, title, album and length |
-| iTunes Search (Apple) | Fill in missing song info (can be turned off), Fix Song Info, Change Cover | The file name, or the words you search for |
+| [LRCLIB](https://lrclib.net) | A song has no lyrics (on by default; can be turned off). Word-by-word timings come in the same answer when LRCLIB has them (no extra request) | Artist, title, album and length |
+| iTunes Search (Apple) | Fill in missing song info (on by default; can be turned off), Fix Song Info, Change Cover | The file name, or the words you search for |
 | [Deezer](https://developers.deezer.com/api) | Fix song info, Change Cover, artist pictures, checking AI music suggestions | Artist and album or song names |
-| [MusicBrainz](https://musicbrainz.org/doc/MusicBrainz_API) | Learning what else your artists are called, so one artist written two ways (米津玄師 / Kenshi Yonezu) is one artist and search finds them by any name: in the background, one name about every second, each name once (names it doesn't know are asked again after a month). Can be turned off (Settings › Learn artist names online) | Artist names from your library, and an app identifier (Cadence, its version and this project's page) |
+| [MusicBrainz](https://musicbrainz.org/doc/MusicBrainz_API) | Learning what else your artists are called, so one artist written two ways (米津玄師 / Kenshi Yonezu) is one artist and search finds them by any name: in the background, one name about every second, each name once (names it doesn't know are asked again after a month). On by default; can be turned off (Settings › Learn artist names online) | Artist names from your library, and an app identifier (Cadence, its version and this project's page) |
 | GitHub | Checking for updates | Nothing beyond the request itself |
 | PyPI or GitHub, Hugging Face | Only when you download the voice models for following the singer | Nothing beyond the requests themselves |
-| Your AI service (Z.ai GLM, Claude from Anthropic, or another) | Only if you add your own key (Ask the DJ, daily mixes, Discover, who sings) | What Settings shows before you turn it on |
+| Your AI service (Z.ai GLM, Claude from Anthropic, or another) | Only if you add your own key (Ask the DJ, daily mixes, Discover, who sings) | What Settings shows before you turn it on. For *Ask the DJ*, the plan request holds your request, the date and time, and counts about your library (how many songs it has, how many in each language, the top genres and the decades, with their counts), but no song, title or artist; only if the AI also orders the list does a second request send up to 150 of the songs Cadence picked (title, artist, year, language, genre and a few words about the sound) |
 | Your AI service, for lyrics translations | Only with the AI set up and **Translation** turned on in the lyrics, for the song on screen, once per song and language (kept afterwards; translations that come with the lyrics need nothing) | The song's title and artist, and its lyrics' lines |
-| [ListenBrainz](https://listenbrainz.org) | Only if you connect it (your token is kept in the system's credential store). **Sent:** each song you hear half of or four minutes of, with its artist, title, album, length and track number, the MusicBrainz ids in its tags (recording, release, artists) when it has them, and Cadence's name and version; the song playing now; and, unless you turn it off (Settings › Scrobbling), a song you heart or un-heart as loved or not, with its recording id, or, for a song whose file has none, its artist and title to look the id up. **Fetched, only when you ask:** *Restore history from ListenBrainz* reads your listens (newest first, one request a second, a thousand at a time) and *Sync favorites* reads the songs you love there; both are matched to your library on this computer, show what they would change, and change nothing until you say yes (a safety copy of your data is made first) | What is listed under Sent. Nothing is sent without a connected account |
-| [ListenBrainz](https://listenbrainz.org) fresh releases | Once a day at most, when Discover opens, and only if *Look for new releases online* is on (Settings). It needs no account or token | Nothing about you or your library: one request for the recent and upcoming releases of everyone, which Cadence filters to your artists on this computer. Cover pictures of the releases shown come from the Cover Art Archive, one request for each row that is on screen |
+| [ListenBrainz](https://listenbrainz.org) | Only if you connect it (your token is kept in the system's credential store). **Sent:** each song you hear half of or four minutes of, with its artist, title, album, length and track number, the MusicBrainz ids in its tags (recording, release, artists) when it has them, and Cadence's name and version; the song playing now; and, unless you turn it off (it is on by default; Settings › Scrobbling), a song you heart or un-heart as loved or not, with its recording id, or, for a song whose file has none, its artist and title to look the id up. **Fetched, only when you ask:** *Restore history from ListenBrainz* reads your listens (newest first, one request a second, a thousand at a time) and *Sync favorites* reads the songs you love there; both are matched to your library on this computer, show what they would change, and change nothing until you say yes (before plays are added to your history a safety copy of your data is made; a sync only adds hearts here, it never takes one away). **Sent when you say yes to *Sync favorites*:** your favorites that ListenBrainz doesn't have as loved yet, each as above (its recording id, or its artist and title to look the id up) | What is listed under Sent. Nothing is sent without a connected account |
+| [ListenBrainz](https://listenbrainz.org) fresh releases | Once a day at most, when Discover opens, and only if *Look for new releases online* is on (it is on by default; Settings). It needs no account or token | The release list itself: nothing about you or your library, one request for the recent and upcoming releases of everyone, which Cadence filters to your artists on this computer. Then the cover pictures of the releases shown are loaded from the Cover Art Archive and archive.org, one request for each row that is on screen: those are releases by artists in your library, so which covers are requested reflects your library. Turned off, nothing is shown or loaded, not even releases found before |
 
 The website counts visits with Cloudflare Web Analytics, which uses no cookies and keeps no personal data.
 
 ## Contributing
 
 Bug reports and pull requests are welcome. For a bug, include your system, the audio device, the file format
-(Settings and the signal path show it) and the steps to reproduce. Please run `pnpm check` and `cargo test` before
-opening a pull request.
+(Settings and the signal path show it) and the steps to reproduce. Please run `pnpm check`, `pnpm test`,
+`pnpm check:size` and `cargo test --lib` before opening a pull request; CI runs the same four. [`AGENTS.md`](AGENTS.md)
+has the rules the code follows (size limits, where things go, safety and privacy rules); it is written for coding
+agents but is the best map of the code for people too.
 
 ## Credits
 

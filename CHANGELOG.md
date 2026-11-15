@@ -2,6 +2,158 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## Unreleased
+
+This is the biggest update so far: lighter on your computer, much more in the lyrics, new ways to find and pick
+songs, backups, and a long list of fixes.
+
+### What you'll notice first
+
+- **Much lighter on your computer.** Cadence now uses far less processor while playing, and almost none while
+  paused or hidden: the moving backgrounds stop when the music is paused or the window is out of sight. On one Windows PC,
+  playing with Now Playing open went from about 41 % of one processor core to about 7 %, and paused from about
+  34 % to about 0.6 %; memory use is about the same.
+- **Lyrics in your language, furigana, and find a song by a line.** Show a translation under each line (English,
+  Indonesian, Japanese, Korean or Chinese), put furigana over kanji and pinyin over Chinese, and search your
+  library for a song by a line you remember.
+- **Command palette and selecting several songs.** Press Ctrl+K (⌘K on a Mac) to go anywhere, run an action or find
+  music. Select several songs in any list (Shift or Ctrl and click, or long-press on a phone) and play, queue,
+  add them to a playlist or use the song menu on all of them together.
+- **One artist, however it's spelled.** 米津玄師 and Kenshi Yonezu are one artist: one page, one count in Your
+  Stats, and search finds them by either name, and by their reading in Latin letters ("tokyo" finds とうきょう).
+- **Backup and restore.** One file with your playlists, favorites, ratings, history, queue, settings and picked
+  lyrics, and Cadence keeps its own snapshot, at most once a day, when it opens and something has changed.
+- **Choose your output device** (Windows, macOS and Linux), with its own equalizer, crossfeed, Direct output and
+  volume for each one.
+- **A shuffle that feels random.** Balanced shuffle spreads each artist out and plays songs you heard recently
+  later. New too: shuffle albums, keep playing similar songs when the queue ends, and stop after any song.
+- **A waveform seek bar** in Now Playing.
+- **Playlists in and out.** Import M3U8, XSPF and CSV (including Spotify exports from Exportify) and export M3U8
+  or CSV.
+- **ListenBrainz does more.** Restore your listening history from it, send hearts as loved songs, and see new
+  releases by your artists in Discover.
+
+### Things that work differently now
+
+- **Volume safety.** Cadence never opens a device louder than it last played there. The first time Direct output
+  opens on a device it hasn't played on before, it starts at no more than 30 % on the volume slider, and tells
+  you when it lowered the volume.
+- **A device you chose stays chosen.** If it's unplugged, playback pauses instead of moving to the speakers, and
+  carries on by itself if it comes back within two minutes (or tap "Play on" the default device).
+- **Learning artist names online is on by default.** Cadence asks MusicBrainz, in the background, what else each
+  artist in your library is called. Only artist names are sent. Turn it off in Settings › Learn artist names
+  online.
+- **New releases are on by default too.** When Discover opens, at most once a day, Cadence asks ListenBrainz for
+  the week's new releases (nothing about you is sent) and shows those by your artists, with covers from the Cover
+  Art Archive. Turn it off in Settings › Look for new releases online. It needs no account.
+- **If you use ListenBrainz,** hearting or un-hearting a song now also tells it. Turn that off in Settings ›
+  Scrobbling.
+- **Shuffle is balanced** unless you choose "Fully random" (Sound › Shuffle and the end of the queue).
+  **Keep playing similar songs** is off until you turn it on there.
+- **The waveform seek bar is on**; turn it off in Settings › Appearance. The waveforms are drawn in the background
+  and kept; you can prepare them for all songs there too.
+- **Daily snapshots** are kept in the `backups` folder inside Cadence's data folder (the last 7 days and 4 weeks), and
+  Settings can copy them to a second folder, such as one on another drive. Your music files, keys and passwords are
+  not in them. Restoring first makes a snapshot of what you have now, so you can go back.
+
+### Playing music
+
+- **Balanced shuffle, album shuffle, autoplay, stop after any song.** "Shuffle albums" plays albums whole and in
+  order, one after another, on Albums, an artist and a playlist. "Keep playing similar songs" adds ten songs that
+  sound like the last ones, never the same artist twice in a row, and not what you played in the last hours. Put
+  "Stop after" on any song in Up Next. Shuffle order and the songs autoplay added are remembered when you
+  restart.
+- **Songs from a one-file album (CUE sheet) start exactly where they should**, not a moment early.
+- **No clicks** when you change the volume or the equalizer while a song plays.
+- **Unmute returns to the volume you had**, not full volume.
+- **Leveling keeps loud songs from clipping**: Sound Check now measures the true peak between samples and keeps it
+  below -1 dB. Songs measured before get it when they are measured again.
+- **Dither at 16 and 24 bit** when the sound has been changed (volume, equalizer, Sound Check, resampling) and the
+  device takes whole steps. Music nothing changed still reaches the device bit for bit.
+- **Resampling keeps the top treble** instead of rolling it off when a device runs at another rate.
+- **Direct output on Windows asks Windows for pro-audio priority**, as audio software does, so other programs are
+  less likely to disturb it.
+- **Restoring a backup puts the queue back** as it was, paused where you left off.
+
+### Your library
+
+- **Multi-select in every song list** with the usual keys (Shift and Ctrl with click or arrows, Ctrl+A, Escape to
+  clear, type a title's first letters to jump to it), and a bar with what you can do with the selection.
+- **Import and export playlists.** Songs are matched by their file, then by title, artist and length, across
+  spellings and scripts, and never guessed: you see what was found, what wasn't and what was ambiguous.
+- **Playlists and the queue follow a song** when its file is moved, renamed, or replaced (an m4a swapped for a FLAC,
+  a duplicate removed): they point at the copy you have now, and favorites and ratings come along.
+- **Back and Forward** (Alt + arrows, or the mouse buttons) return you to where you were scrolled, and Forward
+  works.
+- **Phones get a Library tab** with Songs, Albums, Artists, Needs Attention, Library Health and your playlists.
+- **Your Stats covers your whole listening history**, with more to see: streaks, "On this day", forgotten favorites,
+  new artists, albums heard through, and your listening by decade and language.- **Settings has a search box and a list of keyboard shortcuts**; press ? anywhere for the same list.
+- **Make the interface larger or smaller** on computers (Settings › Appearance, or Ctrl + = and Ctrl + -).
+- **Artists under two names** in Needs Attention can be shown as one artist without changing any file, and Undo
+  takes that back.
+
+### Lyrics
+
+- **Translations** under each line, in English, Indonesian, Japanese, Korean or Chinese. Translations that come with
+  the lyrics are used as they are. Otherwise Cadence asks the AI you set up, once per song and language, and keeps
+  the answer. Without the AI set up, you're told so.
+- **Furigana** above kanji (Japanese) and **pinyin above** the characters (Chinese), kept in step with the karaoke
+  sweep. Both are off until you turn them on in the lyrics view.
+- **Find a song by a line.** Type a line you remember in Search: it finds songs by what's sung, as written or in Latin
+  letters ("ame ga" finds a line written 雨が). Cadence reads your saved lyrics once, on your computer, in the
+  background.
+- **Word-by-word lyrics from LRCLIB** are used when it has them, so the highlight follows each word without
+  following the singer first.
+- **Better lyric matches online.** The search uses the artist and album too, and tries looser searches when the
+  first finds little.
+- **Lyric lines and the mini player keep your timing nudge.**
+
+### Finding things
+
+- **Command palette (Ctrl+K)** for pages, actions and your music, with the shortcut shown beside each action.
+- **Search works across scripts**: an artist's other spellings and aliases, names and titles read in Latin letters
+  (kana as romaji, Hangul romanized, Chinese as pinyin where the music is Chinese), and the lyrics line search above.
+- **Press `/` or Ctrl+F to search**, from anywhere you're not typing.
+
+### Sound and devices
+
+- **Output device** on the Sound page: pick one, or follow the system default. A chosen device is kept even when
+  another becomes the default (a monitor, a Bluetooth headset). Windows notices at once when one is plugged in or
+  removed; on macOS and Linux use "Refresh the list". Android routes its own devices.
+- **Remember sound settings per device** (on by default): each device keeps its equalizer, crossfeed, "Keep it full
+  when quieter", Direct output and volume. A device used for the first time starts from your current settings.
+- **Ask the DJ picks from your library** instead of inventing songs: the AI turns your request into a plan, Cadence
+  finds the songs, and the AI (if you leave "DJ ordering" on) only orders and names them. A language your library
+  has few songs in is said, not padded. It needs the AI set up.
+
+### Safety of your data
+
+- **Saves can't half-finish.** Settings, playlists, favorites, history and the rest are written to a temporary file
+  and put in place in one step, with a copy of the last good version kept. A file Cadence can't read is left alone,
+  not replaced by defaults.
+- **History is never thrown away.** Beyond the last 20,000 plays, older ones now move to a yearly archive instead of
+  being dropped, and Your Stats counts them.
+- **Backups before risky changes.** A snapshot is made before every restore and every ListenBrainz import, and a
+  restore that was cut short is undone the next time Cadence starts.
+- **Updates tell you when they fail**, with what happened and a Try again button, instead of doing nothing.
+- **Saving song info to several songs tries every file**, saves the ones it can, and lists the ones it couldn't.
+- **Undo brings favorites and ratings back** with a duplicate you removed, and keeps your year and date.
+- **ListenBrainz listens can't pile up forever:** ones it refuses as bad are let go, a sign-in it rejects is
+  checked again before you're signed out, and the newest are kept for when you connect again.
+
+### Smaller fixes
+
+- Playlist edits (removing, dragging) hit the song you meant, even when another song in it is missing from your library.
+- Escape closes only the top dialog, and Escape inside a dropdown closes just the dropdown.
+- After you edit an album's title or artist, its page stays open instead of saying it's no longer in your library.
+- Dialogs give the keyboard back to where it was when they close.
+- On Android, "Delete copies" in Needs Attention asks first and ticks nothing for you, because phones delete for
+  good. On a Mac, removed copies go to the Trash.
+- Adding songs a playlist already has asks first.
+- A dropdown inside a dialog is no longer cut off by the dialog's edge.
+- The seek slider in Now Playing no longer freezes after a click.
+- On Windows, a window hidden in the tray or minimized stops drawing and getting updates until you show it again.
+
 ## 0.2.40 (2026-11-10)
 
 - **More varied "Made for you today".** The four daily mixes now each come from a different part of your

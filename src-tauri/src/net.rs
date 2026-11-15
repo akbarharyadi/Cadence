@@ -12,6 +12,44 @@ pub fn builder() -> reqwest::blocking::ClientBuilder {
     b
 }
 
+/// The most a JSON answer of the online services Cadence asks may be: far more than any real one
+/// (ListenBrainz's biggest pages are a few hundred KB), so a broken or hostile server can't fill
+/// the memory.
+pub const MAX_BODY: u64 = 16 << 20;
+
+/// Reads at most `limit` bytes of a body; more is an error, not a cut-off answer.
+pub fn read_limited(r: impl std::io::Read, limit: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    r.take(limit + 1).read_to_end(&mut out)?;
+    if out.len() as u64 > limit {
+        return Err(std::io::Error::other(format!("the answer is larger than {} MB", limit >> 20)));
+    }
+    Ok(out)
+}
+
+/// A response's body as text, at most `MAX_BODY` bytes.
+pub fn text(r: reqwest::blocking::Response) -> std::io::Result<String> {
+    let bytes = read_limited(r, MAX_BODY)?;
+    String::from_utf8(bytes).map_err(std::io::Error::other)
+}
+
+/// A response's body as JSON, at most `MAX_BODY` bytes.
+pub fn json<T: serde::de::DeserializeOwned>(r: reqwest::blocking::Response) -> std::io::Result<T> {
+    let bytes = read_limited(r, MAX_BODY)?;
+    serde_json::from_slice(&bytes).map_err(std::io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bodies_are_read_up_to_a_limit() {
+        assert_eq!(super::read_limited(&b"12345"[..], 5).unwrap(), b"12345");
+        assert!(super::read_limited(&b"123456"[..], 5).is_err());
+        assert!(super::read_limited(std::io::repeat(b'x'), 1 << 20).is_err(), "an endless body stops at the limit");
+    }
+}
+
 /// The phone's trusted certificate authorities (PEM files), read once.
 #[cfg(target_os = "android")]
 fn android_roots() -> &'static Vec<reqwest::Certificate> {

@@ -10,8 +10,10 @@
 //! music lives elsewhere can find its songs again (`relink`).
 //!
 //! Rolling snapshots of the same kind are kept in `backups/` in the data folder: one when Cadence
-//! starts if the last is a day old and something changed (7 daily and 4 weekly are kept), and one
-//! before every restore (`safety-…`), optionally copied to a second folder.
+//! starts if the last is a day old and something changed (7 daily and 4 weekly are kept,
+//! optionally copied to a second folder), and one before every restore (`safety-restore-…`) and
+//! every ListenBrainz import (`safety-…`). A restore cut short is undone at the next start
+//! (`recover_interrupted`).
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -31,6 +33,15 @@ const LINKS: &str = "tracks.json";
 pub const OFFSETS: &str = "lyric-offsets.json";
 /// Songs a restore couldn't find yet: tried again after every rescan.
 const PENDING: &str = "relink-pending.json";
+/// Written (atomically) before a restore replaces the first file and removed when it's done: found
+/// at startup, the restore was cut short and is undone (`recover_interrupted`).
+const MARKER: &str = "restore-in-progress.json";
+/// The safety snapshots taken before a restore: their own rotation (`SAFETY_KEPT` of them), so the
+/// snapshots before ListenBrainz imports and favourites syncs (`safety-…`) can't push them out.
+const RESTORE_SAFETY: &str = "safety-restore";
+/// Automatic snapshots as copied to the second folder: a name no other program uses, and only
+/// files of this name whose manifest is an automatic Cadence snapshot are ever removed there.
+const COPY_PREFIX: &str = "cadence-auto";
 
 /// Limits: no backup of a music player's own data comes near these; an archive that does is
 /// something else (or made to fill the disk).
@@ -247,17 +258,93 @@ fn pictures(data_dir: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// The sources' names, sizes and times, hashed: changes when any of them does.
-fn fingerprint(sources: &[Source]) -> String {
+/// A file's size and modified time (nanoseconds).
+fn stamp_of(m: Option<&std::fs::Metadata>) -> (u64, u128) {
+    let modified = m.and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+    (m.map_or(0, |m| m.len()), modified)
+}
+
+/// Names, sizes and times, hashed.
+fn hash_entries(entries: &[(String, u64, u128)]) -> String {
     let mut h = blake3::Hasher::new();
-    for s in sources {
-        let m = std::fs::metadata(&s.path).ok();
-        let modified = m.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
-        h.update(s.name.as_bytes());
-        h.update(&m.map_or(0, |m| m.len()).to_le_bytes());
+    for (name, len, modified) in entries {
+        h.update(name.as_bytes());
+        h.update(&len.to_le_bytes());
         h.update(&modified.to_le_bytes());
     }
     h.finalize().to_hex().to_string()
+}
+
+/// The sources' names, sizes and times, hashed: changes when any of them does.
+fn fingerprint(sources: &[Source]) -> String {
+    let entries: Vec<(String, u64, u128)> = sources
+        .iter()
+        .map(|s| {
+            let (len, modified) = stamp_of(std::fs::metadata(&s.path).ok().as_ref());
+            (s.name.clone(), len, modified)
+        })
+        .collect();
+    hash_entries(&entries)
+}
+
+/// Which saved lyrics are the listener's own (`is_picked`), by the lyrics file's size and time:
+/// at startup only lyrics files that changed since are opened (`backups/picked-lyrics.json`, this
+/// device's, not backed up).
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct PickedIndex {
+    lyrics: HashMap<String, (u64, u128, bool)>,
+}
+
+/// `fingerprint(&sources(data_dir))` from the folders' listings: no lyrics file is opened but the
+/// ones that changed since the last time (to know whether they're picked).
+fn fingerprint_now(data_dir: &Path) -> String {
+    let mut entries: Vec<(String, u64, u128)> = Vec::new();
+    for n in WHOLE {
+        if let Ok(m) = std::fs::metadata(data_dir.join(n))
+            && m.is_file()
+        {
+            let (len, modified) = stamp_of(Some(&m));
+            entries.push((n.to_string(), len, modified));
+        }
+    }
+    for p in crate::history::archive_files(data_dir) {
+        let name = format!("history-archive/{}", p.file_name().unwrap_or_default().to_string_lossy());
+        if kind(&name) == Some(Kind::Archive) {
+            let (len, modified) = stamp_of(std::fs::metadata(&p).ok().as_ref());
+            entries.push((name, len, modified));
+        }
+    }
+    let index_file = backups_dir(data_dir).join("picked-lyrics.json");
+    let old: PickedIndex = std::fs::read(&index_file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let mut now = PickedIndex::default();
+    for p in lyric_files(data_dir) {
+        let id = p.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let (len, modified) = stamp_of(std::fs::metadata(&p).ok().as_ref());
+        let picked = match old.lyrics.get(&id) {
+            Some(&(l, m, picked)) if (l, m) == (len, modified) => picked,
+            _ => is_picked(&p),
+        };
+        if picked {
+            entries.push((format!("lyrics/{}", p.file_name().unwrap_or_default().to_string_lossy()), len, modified));
+        }
+        now.lyrics.insert(id, (len, modified, picked));
+    }
+    if now.lyrics != old.lyrics {
+        let _ = std::fs::create_dir_all(backups_dir(data_dir));
+        crate::state::write_json_with(&index_file, &now, false);
+    }
+    for p in pictures(data_dir) {
+        let name = format!("art/artists/{}", p.file_name().unwrap_or_default().to_string_lossy());
+        if kind(&name) == Some(Kind::Picture)
+            && let Ok(m) = std::fs::metadata(&p)
+            && m.is_file()
+        {
+            let (len, modified) = stamp_of(Some(&m));
+            entries.push((name, len, modified));
+        }
+    }
+    hash_entries(&entries)
 }
 
 /// Settings keys that hold secrets (none do today: keys and tokens are in the system's credential
@@ -289,9 +376,16 @@ fn strip_secrets(v: &mut serde_json::Value) -> bool {
 }
 
 /// A file as it goes into a backup: checked (a damaged one is left out, so a backup can always
-/// be restored), settings without secrets.
+/// be restored; a history year with damaged lines goes in as it is: its other plays count), settings
+/// without secrets.
 fn prepare(name: &str, bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     check(name, &bytes)?;
+    if kind(name) == Some(Kind::Archive) {
+        let (lines, damaged) = archive_lines(&bytes);
+        if damaged > 0 {
+            log::warn!("backup: {name} has {damaged} of {lines} plays that can't be read; kept as it is");
+        }
+    }
     if name == "settings.json" {
         let mut v: serde_json::Value = serde_json::from_slice(&bytes).map_err(io)?;
         if strip_secrets(&mut v) {
@@ -419,6 +513,16 @@ pub struct Archive {
     links: HashMap<String, Link>,
 }
 
+/// (Plays, of those damaged) in a history year's bytes.
+fn archive_lines(bytes: &[u8]) -> (usize, usize) {
+    let (mut lines, mut damaged) = (0usize, 0usize);
+    for l in bytes.split(|b| *b == b'\n').filter(|l| !l.iter().all(u8::is_ascii_whitespace)) {
+        lines += 1;
+        damaged += serde_json::from_slice::<crate::history::PlayEvent>(l).is_err() as usize;
+    }
+    (lines, damaged)
+}
+
 /// "0.2.40" → [0, 2, 40].
 fn version(v: &str) -> Vec<u64> {
     v.split(['.', '-', '+']).map_while(|p| p.parse().ok()).collect()
@@ -444,18 +548,9 @@ fn check(name: &str, bytes: &[u8]) -> Result<(), String> {
             r.map_err(|e| bad(e.to_string()))
         }
         Some(Kind::Lyrics) => serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(bytes).map(drop).map_err(|e| bad(e.to_string())),
-        Some(Kind::Archive) => {
-            let text = std::str::from_utf8(bytes).map_err(|e| bad(e.to_string()))?;
-            let (mut lines, mut damaged) = (0usize, 0usize);
-            for l in text.lines().filter(|l| !l.trim().is_empty()) {
-                lines += 1;
-                damaged += serde_json::from_str::<crate::history::PlayEvent>(l).is_err() as usize;
-            }
-            if damaged > 2 + lines / 100 {
-                return Err(bad(format!("{damaged} of {lines} plays can't be read")));
-            }
-            Ok(())
-        }
+        // A year of plays is kept and put back as it is, damaged lines and all (the history skips
+        // those when it reads it; leaving the year out would lose every play in it).
+        Some(Kind::Archive) => Ok(()),
         Some(Kind::Picture) => {
             let image = bytes.starts_with(&[0xFF, 0xD8, 0xFF]) || bytes.starts_with(b"\x89PNG\r\n\x1a\n");
             if image { Ok(()) } else { Err(bad("not a JPEG or PNG picture".into())) }
@@ -580,7 +675,7 @@ fn describe(a: &Archive) -> Vec<String> {
     let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let mut out = Vec::new();
     if get("settings.json").is_some() {
-        out.push("Settings (this device keeps its own music folders, volume and ListenBrainz account)".to_string());
+        out.push("Settings (this device keeps its own music folders, ListenBrainz account, output device and sound settings: volume, Direct output, equalizer and crossfeed)".to_string());
     }
     if let Some(p) = get("playlists.json").and_then(|b| serde_json::from_slice::<crate::playlists::Playlists>(b).ok()) {
         out.push(format!("Playlists ({})", p.items.len()));
@@ -643,6 +738,12 @@ pub struct Restored {
     pub lyric_offsets: Option<String>,
     pub app: String,
     pub created: u64,
+    /// Files that couldn't be written because they couldn't be read when Cadence started (another
+    /// program held them): Cadence shows the restored data, but these files on disk are as they
+    /// were until Cadence is started again and the restore is done once more.
+    pub held_back: Vec<String>,
+    /// Years of listening history the backup doesn't have, moved here (not deleted) ("": none).
+    pub history_aside: String,
 }
 
 /// Puts the data's latest state on disk (settings waiting to be saved, the queue's position).
@@ -662,12 +763,17 @@ fn library_links(state: &AppState) -> HashMap<String, Link> {
 
 /// A snapshot of the data now into `backups/` (`kind`: "auto" or "safety").
 pub(crate) fn snapshot(state: &AppState, kind_label: &str) -> Result<PathBuf, String> {
+    snapshot_named(state, kind_label, kind_label)
+}
+
+/// A snapshot into `backups/<prefix>-<unix seconds>.zip`, of `kind_label` in its manifest.
+fn snapshot_named(state: &AppState, prefix: &str, kind_label: &str) -> Result<PathBuf, String> {
     let dir = backups_dir(&state.data_dir);
     let now = crate::history::now();
-    let mut path = dir.join(format!("{kind_label}-{now}.zip"));
+    let mut path = dir.join(format!("{prefix}-{now}.zip"));
     let mut n = 1;
     while path.exists() {
-        path = dir.join(format!("{kind_label}-{now}-{n}.zip"));
+        path = dir.join(format!("{prefix}-{now}-{n}.zip"));
         n += 1;
     }
     let links = library_links(state);
@@ -675,43 +781,262 @@ pub(crate) fn snapshot(state: &AppState, kind_label: &str) -> Result<PathBuf, St
     Ok(path)
 }
 
+/// A restore is running (one at a time; jobs that write what a restore replaces refuse meanwhile).
+static RESTORING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn restoring() -> bool {
+    RESTORING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// What would write over files a restore puts back, running now (a restore waits for it to end).
+/// (A scan is told apart by `Hold::take`, which holds the library.)
+fn busy_with(_state: &AppState) -> Option<&'static str> {
+    if crate::libfix::catalogue_job_running() {
+        return Some("Needs Attention is checking songs or artists online");
+    }
+    if crate::lbimport::applying() {
+        return Some("the ListenBrainz history is being added");
+    }
+    if crate::lbloved::applying() {
+        return Some("favorites are being synced with ListenBrainz");
+    }
+    if RUNNING.load(std::sync::atomic::Ordering::SeqCst) {
+        return Some("a backup is being made");
+    }
+    None
+}
+
+/// Held for a restore: the restore flag, the library (a scan asked for meanwhile waits and runs
+/// once the restore is done, so it can't move songs in the files being replaced), and the session
+/// saves (`state::hold_session_saves`). Let go of when dropped, whatever way the restore ends.
+struct Hold {
+    ctx: Ctx,
+    /// The restored queue the player was handed: session saves start again once it shows it.
+    expect: Vec<String>,
+}
+
+impl Hold {
+    fn take(ctx: &Ctx) -> Result<Hold, String> {
+        if RESTORING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Err("A restore is already running.".into());
+        }
+        let busy = {
+            let mut lib = ctx.state.library.lock();
+            let busy = lib.scanning;
+            if !busy {
+                lib.scanning = true;
+            }
+            busy
+        };
+        let why = if busy { Some("the library is being scanned") } else { busy_with(&ctx.state) };
+        if let Some(why) = why {
+            if !busy {
+                ctx.state.library.lock().scanning = false;
+            }
+            RESTORING.store(false, std::sync::atomic::Ordering::SeqCst);
+            return Err(format!("Nothing was restored: {why}. Try again when it has finished."));
+        }
+        Ok(Hold { ctx: ctx.clone(), expect: Vec::new() })
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        crate::state::release_session_saves(std::mem::take(&mut self.expect));
+        let again = {
+            let mut lib = self.ctx.state.library.lock();
+            lib.scanning = false;
+            std::mem::take(&mut lib.rescan_pending)
+        };
+        RESTORING.store(false, std::sync::atomic::Ordering::SeqCst);
+        if again {
+            crate::jobs::start_scan(self.ctx.clone());
+        }
+    }
+}
+
+/// What `MARKER` says: which restore was cut short.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct Marker {
+    /// The safety snapshot of the data before (put back if the restore is cut short).
+    safety: String,
+    /// The backup being restored.
+    backup: String,
+    started: u64,
+    /// relink-pending.json before the restore (None: there was none).
+    pending: Option<String>,
+}
+
+fn write_marker(dir: &Path, m: &Marker) -> Result<(), String> {
+    let bytes = serde_json::to_vec(m).map_err(io)?;
+    crate::state::write_file(&dir.join(MARKER), &bytes, false).map_err(|e| format!("Nothing was restored: Cadence couldn't note the restore first ({e})."))
+}
+
+fn remove_marker(dir: &Path) {
+    let _ = std::fs::remove_file(dir.join(MARKER));
+}
+
+/// relink-pending.json as it was (`None`: there was none).
+fn put_pending_back(dir: &Path, before: &Option<String>) {
+    let file = dir.join(PENDING);
+    match before {
+        Some(text) => {
+            let _ = crate::state::write_file(&file, text.as_bytes(), false);
+        }
+        None => {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
+}
+
+/// A restore that was cut short (Cadence closed, crashed or lost power in the middle).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Interrupted {
+    /// When it was found and dealt with (unix seconds).
+    pub at: u64,
+    /// The backup that was being restored.
+    pub backup: String,
+    /// True: the data was put back as it was before the restore (from its safety snapshot).
+    /// False: the safety snapshot couldn't be read, and the backup was put back whole instead.
+    pub rolled_back: bool,
+    /// Why neither could be done ("" when one was).
+    pub error: String,
+    /// One sentence for the Backup section.
+    pub message: String,
+}
+
+/// At startup, before anything reads the data folder: a restore cut short (`MARKER` is there) is
+/// undone — the safety snapshot taken just before it is put back whole, so Cadence never runs on a
+/// mix of old and new files (the backup is put back whole instead when the snapshot can't be
+/// read). What happened is kept for the Backup section (`BackupInfo::interrupted`).
+///
+/// (Why here and not after loading: every file the restore replaces is read by `hub::open`; done
+/// first, nothing has loaded any of it yet, and there is no running app whose memory could differ
+/// from the disk.)
+pub fn recover_interrupted(data_dir: &Path) -> Option<Interrupted> {
+    let file = data_dir.join(MARKER);
+    let bytes = std::fs::read(&file).ok()?;
+    let marker: Marker = serde_json::from_slice(&bytes).unwrap_or_default();
+    log::warn!("a restore of {} was cut short; putting the data back as it was", marker.backup);
+    let back = |path: &str| -> Result<(), String> {
+        let a = open(Path::new(path))?;
+        put_back(data_dir, None, &a).map(drop)
+    };
+    let mut note = Interrupted { at: crate::history::now(), backup: marker.backup.clone(), ..Default::default() };
+    match back(&marker.safety) {
+        Ok(()) => {
+            put_pending_back(data_dir, &marker.pending);
+            note.rolled_back = true;
+            note.message = "A restore was interrupted — your data was put back as it was before.".into();
+        }
+        Err(first) => {
+            log::error!("can't put back the snapshot from before the restore ({first}); finishing the restore instead");
+            match back(&marker.backup) {
+                Ok(()) => note.message = "A restore was interrupted, and your data from before it couldn't be read: the backup was restored whole instead.".into(),
+                Err(second) => {
+                    log::error!("can't finish the restore either ({second})");
+                    note.error = format!("{first}; {second}");
+                    note.message = "A restore was interrupted and couldn't be undone: some files may be from the backup and some from before. Restore a backup from the list below.".into();
+                }
+            }
+        }
+    }
+    stats_cache_drop(data_dir);
+    remove_marker(data_dir);
+    let mut cfg = config(data_dir);
+    cfg.interrupted = Some(note.clone());
+    save_config(data_dir, &cfg);
+    Some(note)
+}
+
+/// Summaries of the history computed from the replaced files (a no-op before the app runs).
+fn stats_cache_drop(data_dir: &Path) {
+    crate::stats::invalidate(data_dir);
+}
+
 /// Restores a backup into the running app. In order, stopping at the first problem:
 /// 1. the whole backup is read and checked (`open`); nothing has changed yet;
-/// 2. a snapshot of the data as it is now goes into `backups/` (`safety-…`); no snapshot, no restore;
-/// 3. each file is replaced through the usual atomic save (with its `.bak`), and what Cadence holds
+/// 2. a restore waits for nothing: when something that writes these files is running (a scan,
+///    Needs Attention's online checks, a ListenBrainz history import or favourites sync being
+///    applied, a snapshot being made), it's refused with what to wait for; while it runs, scans
+///    wait and the session isn't saved (`Hold`);
+/// 3. a snapshot of the data as it is now goes into `backups/` (`safety-restore-…`, a rotation
+///    of their own); no snapshot, no restore;
+/// 4. a note that the restore is under way is written (`MARKER`): if Cadence is closed or crashes
+///    before the end, the next start puts the snapshot back (`recover_interrupted`);
+/// 5. each file is replaced through the usual atomic save (with its `.bak`), and what Cadence holds
 ///    in memory is replaced with it at the same moment (the file's lock held, so no save of the old
 ///    data can come between); if a file can't be written, the safety snapshot is put back;
-/// 4. songs that aren't in the library under the backup's ids are found again (`relink`);
-/// 5. the player gets the restored settings and queue (paused), and the window is told to reload.
+/// 6. the artists are worked out again from the restored decisions, then songs that aren't in the
+///    library under the backup's ids are found again (`relink`); caches built from the replaced
+///    files are dropped;
+/// 7. the player gets the restored settings and queue (paused), the note is removed, and the
+///    window is told to reload.
 pub fn restore(ctx: &Ctx, path: &Path) -> Result<Restored, String> {
     let archive = open(path)?;
     let state = &ctx.state;
+    let mut hold = Hold::take(ctx)?;
     flush(state);
-    let safety = snapshot(state, "safety").map_err(|e| format!("Nothing was restored: a copy of your data as it is now couldn't be made first ({e})."))?;
-    rotate_safety(&backups_dir(&state.data_dir));
+    crate::state::hold_session_saves();
+    let backups = backups_dir(&state.data_dir);
+    let safety = snapshot_named(state, RESTORE_SAFETY, "safety").map_err(|e| format!("Nothing was restored: a copy of your data as it is now couldn't be made first ({e})."))?;
+    rotate_restore_safety(&backups);
+    let marker = Marker {
+        safety: safety.to_string_lossy().into_owned(),
+        backup: path.to_string_lossy().into_owned(),
+        started: crate::history::now(),
+        pending: std::fs::read_to_string(state.data_dir.join(PENDING)).ok(),
+    };
+    write_marker(&state.data_dir, &marker)?;
     let old_settings = state.settings.lock().clone();
-    let files = match put_back(state, &archive) {
-        Ok(n) => n,
+    let put = match put_back(&state.data_dir, Some(state), &archive) {
+        Ok(p) => p,
         Err(e) => {
             // Back to how it was.
-            if let Ok(before) = open(&safety) {
-                let _ = put_back(state, &before);
+            let undone = open(&safety).and_then(|before| put_back(&state.data_dir, Some(state), &before).map(drop));
+            put_pending_back(&state.data_dir, &marker.pending);
+            stats_cache_drop(&state.data_dir);
+            if let Err(e2) = undone {
+                // The note stays: the next start tries again, before anything is loaded.
+                log::error!("restore failed ({e}) and the data couldn't be put back yet ({e2})");
+                return Err(format!("The backup couldn't be restored ({e}), and your data couldn't be put back as it was yet ({e2}). Restart Cadence: it puts it back first."));
             }
-            crate::stats::invalidate(&state.data_dir);
+            remove_marker(&state.data_dir);
             return Err(format!("The backup couldn't be restored ({e}); your data is as it was."));
         }
     };
-    crate::stats::invalidate(&state.data_dir);
+    // The artists from the restored decisions (artist-names.json) before the songs are matched.
+    crate::identity::rebuild_after_change(ctx);
     let restored_ids: Vec<String> = archive.files.iter().filter(|(_, k, _)| *k == Kind::Lyrics).filter_map(|(n, _, _)| Path::new(n).file_stem().map(|s| s.to_string_lossy().into_owned())).collect();
     let linked = relink(state, &archive.links, &restored_ids);
-    crate::stats::invalidate(&state.data_dir);
-    apply_to_player(ctx, &old_settings, archive.files.iter().any(|(n, _, _)| n == "session.json"));
+    // What was worked out from the files just replaced.
+    stats_cache_drop(&state.data_dir);
+    crate::searchkeys::invalidate();
+    crate::dj::invalidate();
+    for id in restored_ids.iter().chain(linked.moved.values()) {
+        crate::lyricindex::touched(id);
+    }
+    let session = archive.files.iter().any(|(n, _, _)| n == "session.json");
+    hold.expect = apply_to_player(ctx, &old_settings, session);
+    remove_marker(&state.data_dir);
+    {
+        let mut cfg = config(&state.data_dir);
+        if cfg.interrupted.take().is_some() {
+            save_config(&state.data_dir, &cfg);
+        }
+    }
+    drop(hold);
     for e in ["library-changed", "playlists-changed", "history-changed", "attention-changed", "marks-changed"] {
         ctx.emit(e, ());
     }
     let lyric_offsets = archive.files.iter().any(|(n, _, _)| n == OFFSETS).then(|| std::fs::read_to_string(state.data_dir.join(OFFSETS)).unwrap_or_else(|_| "{}".into()));
+    if !put.held.is_empty() {
+        log::warn!("restore: {} couldn't be written (they couldn't be read when Cadence started)", put.held.join(", "));
+    }
     Ok(Restored {
-        files,
+        files: put.files,
         relinked: linked.relinked,
         unresolved: linked.unresolved,
         unresolved_history: linked.unresolved_history,
@@ -719,26 +1044,60 @@ pub fn restore(ctx: &Ctx, path: &Path) -> Result<Restored, String> {
         lyric_offsets,
         app: archive.manifest.app.clone(),
         created: archive.manifest.created,
+        held_back: put.held,
+        history_aside: put.aside.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
     })
 }
 
-/// The restored settings with what belongs to this device kept: its music folders (unless it has
-/// none yet), its volume (a DAC's level), the ListenBrainz account whose token is in this device's
-/// credential store, and whether a batch job was running here. Unchanged bytes when nothing
-/// differs.
-fn merged_settings(current: Option<&crate::state::Settings>, bytes: &[u8]) -> Result<(Vec<u8>, crate::state::Settings), String> {
+/// The settings keys that belong to this device and are never taken from a backup: its music
+/// folders (unless it has none yet), its ListenBrainz account (the token is in this device's
+/// credential store) and whether a batch job was running here. The output device and everything
+/// tied to this computer's audio hardware is kept too (`keep_device_sound`).
+const DEVICE_KEYS: &[&str] = &["listenbrainzUser", "voiceBatch"];
+
+/// This device's sound hardware settings put over the restored ones: the output device, the
+/// per-device memory (on or off, every device's settings and which device they're in use for),
+/// the volume, and the settings in use that are a device's own. Which fields those are is
+/// `profiles::Profile`'s to say (`Profile::of` / `put_into`: the equalizer, crossfeed, "keep it
+/// full when quieter" and Direct output with its rate), so the list can't drift from what the
+/// profiles hold. What isn't tied to a device (Sound Check, crossfade, Smart EQ, sing-along,
+/// shuffle, autoplay) comes from the backup.
+///
+/// A backup made with Direct output on for a DAC, restored on the laptop's speakers at full
+/// volume, would otherwise open the speakers in exclusive mode at once, and name the DAC as the
+/// device in use, so that moving to it later would skip putting its own (safe) volume back.
+fn keep_device_sound(current: &crate::state::Settings, restored: &mut crate::state::Settings) {
+    restored.volume = current.volume;
+    restored.output_device = current.output_device.clone();
+    restored.device_profiles = current.device_profiles;
+    restored.sound_profiles = current.sound_profiles.clone();
+    crate::profiles::Profile::of("", &current.dsp, current.volume).put_into(&mut restored.dsp);
+}
+
+/// The restored settings with what belongs to this device kept (`DEVICE_KEYS`, its folders unless
+/// it has none yet, and its sound hardware settings: `keep_device_sound`). `own`: this device has
+/// a settings file of its own (otherwise its account and folders aren't kept, only its sound).
+/// Unchanged bytes when nothing differs.
+fn merged_settings(current: &crate::state::Settings, own: bool, bytes: &[u8]) -> Result<(Vec<u8>, crate::state::Settings), String> {
     let original: serde_json::Value = serde_json::from_slice(bytes).map_err(io)?;
-    let restored = serde_json::to_value(serde_json::from_value::<crate::state::Settings>(original.clone()).map_err(io)?).map_err(io)?;
+    let restored_settings: crate::state::Settings = serde_json::from_value(original.clone()).map_err(io)?;
+    let restored = serde_json::to_value(&restored_settings).map_err(io)?;
+    let mut with_device = restored_settings;
+    keep_device_sound(current, &mut with_device);
+    let device = serde_json::to_value(&with_device).map_err(io)?;
+    let cur = serde_json::to_value(current).map_err(io)?;
     let mut v = original.clone();
-    if let (Some(cur), Some(obj)) = (current, v.as_object_mut()) {
-        let cur = serde_json::to_value(cur).map_err(io)?;
-        let mut keep = vec!["volume", "listenbrainzUser", "voiceBatch"];
-        if cur.get("folders").and_then(|f| f.as_array()).is_some_and(|f| !f.is_empty()) {
-            keep.push("folders");
+    if let Some(obj) = v.as_object_mut() {
+        let mut keep: Vec<(&str, &serde_json::Value)> = ["volume", "outputDevice", "deviceProfiles", "soundProfiles", "dsp"].iter().filter_map(|k| device.get(*k).map(|x| (*k, x))).collect();
+        if own {
+            keep.extend(DEVICE_KEYS.iter().filter_map(|k| cur.get(*k).map(|x| (*k, x))));
+            if let Some(f) = cur.get("folders").filter(|f| f.as_array().is_some_and(|f| !f.is_empty())) {
+                keep.push(("folders", f));
+            }
         }
-        for k in keep {
+        for (k, x) in keep {
             // Only where it differs: a backup whose values are this device's anyway stays as it was.
-            if let Some(x) = cur.get(k).filter(|x| restored.get(k) != Some(*x)) {
+            if restored.get(k) != Some(x) {
                 obj.insert(k.to_string(), x.clone());
             }
         }
@@ -748,12 +1107,17 @@ fn merged_settings(current: Option<&crate::state::Settings>, bytes: &[u8]) -> Re
     Ok((out, settings))
 }
 
+/// A file name in a path written on any system ("C:\Users\…\abc.jpg" on Android too).
+fn file_name_anywhere(p: &str) -> Option<&str> {
+    p.rsplit(['/', '\\']).next().filter(|n| !n.is_empty() && *n != "." && *n != "..")
+}
+
 /// The artist pictures' index pointing at this data folder's art (the backup may come from
-/// another computer or user).
+/// another computer, system or user).
 fn local_pictures(data_dir: &Path, bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut index: HashMap<String, crate::artists::ArtistImage> = serde_json::from_slice(bytes).map_err(io)?;
     let dir = data_dir.join("art").join("artists");
-    let here = |p: &str| Path::new(p).file_name().map_or_else(|| p.to_string(), |n| dir.join(n).to_string_lossy().into_owned());
+    let here = |p: &str| file_name_anywhere(p).map_or_else(|| p.to_string(), |n| dir.join(n).to_string_lossy().into_owned());
     let mut changed = false;
     for img in index.values_mut() {
         let (l, s) = (here(&img.large), here(&img.small));
@@ -763,84 +1127,172 @@ fn local_pictures(data_dir: &Path, bytes: &[u8]) -> Result<Vec<u8>, String> {
     if changed { serde_json::to_vec(&index).map_err(io) } else { Ok(bytes.to_vec()) }
 }
 
-/// Replaces the data folder's files with the backup's (see `restore`, step 3). Returns how many.
-fn put_back(state: &AppState, a: &Archive) -> Result<usize, String> {
-    let dir = &state.data_dir;
-    let write = |name: &str, bytes: &[u8], bak: bool| crate::state::write_file(&dir.join(name), bytes, bak).map_err(|e| format!("{name}: {e}"));
-    let mut n = 0;
+/// What `put_back` did.
+#[derive(Default)]
+struct PutBack {
+    files: usize,
+    /// Files not written: held back this session (`state::held_back`).
+    held: Vec<String>,
+    /// Where history years the backup doesn't have were moved.
+    aside: Option<PathBuf>,
+}
+
+/// One file of a restore, through the atomic save; a file held back this session is noted (the
+/// save routine leaves it alone and says it went well).
+fn write_one(dir: &Path, name: &str, bytes: &[u8], bak: bool, held: &mut Vec<String>) -> Result<(), String> {
+    let path = dir.join(name);
+    if crate::state::held_back(&path) {
+        held.push(name.to_string());
+    }
+    crate::state::write_file(&path, bytes, bak).map_err(|e| format!("{name}: {e}"))
+}
+
+/// Moves history years the backup doesn't have out of the archive (never deleted): into
+/// `backups/history-aside-<unix seconds>/`. Returns that folder when something was moved.
+fn set_years_aside(dir: &Path, keep: &[&str]) -> Result<Option<PathBuf>, String> {
+    let mut aside: Option<PathBuf> = None;
+    for f in crate::history::archive_files(dir) {
+        let file = f.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = format!("history-archive/{file}");
+        if keep.contains(&name.as_str()) {
+            continue;
+        }
+        let folder = match &aside {
+            Some(a) => a.clone(),
+            None => {
+                let mut a = backups_dir(dir).join(format!("history-aside-{}", crate::history::now()));
+                let mut n = 1;
+                while a.exists() {
+                    a = backups_dir(dir).join(format!("history-aside-{}-{n}", crate::history::now()));
+                    n += 1;
+                }
+                std::fs::create_dir_all(&a).map_err(|e| format!("{}: {e}", a.display()))?;
+                aside = Some(a.clone());
+                a
+            }
+        };
+        let to = folder.join(&file);
+        if std::fs::rename(&f, &to).is_err() {
+            // Another drive, say: copied, then removed only once the copy is there.
+            std::fs::copy(&f, &to).map_err(|e| format!("{name}: {e}"))?;
+            let _ = std::fs::remove_file(&f);
+        }
+        log::info!("restore: {name} isn't in the backup; kept in {}", folder.display());
+    }
+    Ok(aside)
+}
+
+/// Replaces the data folder's files with the backup's (see `restore`, step 5): in the running app
+/// (`state`: memory and disk together) or, at startup before anything is loaded (None), on disk
+/// alone.
+fn put_back(dir: &Path, state: Option<&AppState>, a: &Archive) -> Result<PutBack, String> {
+    let mut out = PutBack::default();
     for (name, kind, bytes) in &a.files {
         match (*kind, name.as_str()) {
             (Kind::Whole, "settings.json") => {
-                let current = dir.join("settings.json").exists().then(|| state.settings.lock().clone());
-                let (bytes, parsed) = merged_settings(current.as_ref(), bytes)?;
-                let mut s = state.settings.lock();
-                write(name, &bytes, true)?;
-                *s = parsed;
+                let own = dir.join("settings.json").exists();
+                let current: crate::state::Settings = match state {
+                    Some(s) => s.settings.lock().clone(),
+                    None => crate::state::read_json(&dir.join("settings.json")),
+                };
+                let (bytes, parsed) = merged_settings(&current, own, bytes)?;
+                match state {
+                    Some(st) => {
+                        let mut s = st.settings.lock();
+                        write_one(dir, name, &bytes, true, &mut out.held)?;
+                        *s = parsed;
+                    }
+                    None => write_one(dir, name, &bytes, true, &mut out.held)?,
+                }
             }
             (Kind::Whole, "playlists.json") => {
-                let mut p = state.playlists.lock();
-                write(name, bytes, true)?;
-                *p = serde_json::from_slice(bytes).map_err(io)?;
+                let mut p = state.map(|s| s.playlists.lock());
+                write_one(dir, name, bytes, true, &mut out.held)?;
+                if let Some(p) = p.as_mut() {
+                    **p = serde_json::from_slice(bytes).map_err(io)?;
+                }
             }
             (Kind::Whole, "marks.json") => {
-                let mut m = state.marks.lock();
-                write(name, bytes, true)?;
-                *m = serde_json::from_slice(bytes).map_err(io)?;
+                let mut m = state.map(|s| s.marks.lock());
+                write_one(dir, name, bytes, true, &mut out.held)?;
+                if let Some(m) = m.as_mut() {
+                    **m = serde_json::from_slice(bytes).map_err(io)?;
+                }
             }
             (Kind::Whole, "history.json") => {
                 // The archive with it, under the history's lock (plays are archived under it too).
-                let mut h = state.history.lock();
-                write(name, bytes, true)?;
-                *h = serde_json::from_slice(bytes).map_err(io)?;
-                let years: Vec<&(String, Kind, Vec<u8>)> = a.files.iter().filter(|(_, k, _)| *k == Kind::Archive).collect();
-                for (y, _, b) in &years {
-                    write(y, b, false)?;
-                    n += 1;
+                let mut h = state.map(|s| s.history.lock());
+                write_one(dir, name, bytes, true, &mut out.held)?;
+                if let Some(h) = h.as_mut() {
+                    **h = serde_json::from_slice(bytes).map_err(io)?;
                 }
-                // Years the backup doesn't have are gone from the restored history (they're in
-                // the safety snapshot).
-                for f in crate::history::archive_files(dir) {
-                    let name = format!("history-archive/{}", f.file_name().unwrap_or_default().to_string_lossy());
-                    if !years.iter().any(|(y, _, _)| *y == name) {
-                        let _ = std::fs::remove_file(&f);
-                    }
+                let years: Vec<&(String, Kind, Vec<u8>)> = a.files.iter().filter(|(_, k, _)| *k == Kind::Archive).collect();
+                // Years the backup doesn't have are moved aside first (never deleted: one may be
+                // a year a snapshot left out, or one the backup was made without).
+                let keep: Vec<&str> = years.iter().map(|(y, _, _)| y.as_str()).collect();
+                out.aside = set_years_aside(dir, &keep)?;
+                for (y, _, b) in &years {
+                    write_one(dir, y, b, false, &mut out.held)?;
+                    out.files += 1;
                 }
             }
-            (Kind::Whole, "artist-images.json") => write(name, &local_pictures(dir, bytes)?, true)?,
-            (Kind::Whole, _) => write(name, bytes, true)?,
+            (Kind::Whole, "artist-images.json") => write_one(dir, name, &local_pictures(dir, bytes)?, true, &mut out.held)?,
+            (Kind::Whole, "artist-names.json") => {
+                // With the artist check's and the listener's changes kept out meanwhile.
+                let _one = crate::libfix::NAMES.lock();
+                write_one(dir, name, bytes, true, &mut out.held)?;
+            }
+            (Kind::Whole, _) => write_one(dir, name, bytes, true, &mut out.held)?,
             // With history.json (a backup always has it when it has an archive).
             (Kind::Archive, _) if a.files.iter().any(|(n, _, _)| n == "history.json") => continue,
-            (Kind::Archive | Kind::Lyrics | Kind::Picture, _) => write(name, bytes, false)?,
+            (Kind::Archive | Kind::Lyrics | Kind::Picture, _) => write_one(dir, name, bytes, false, &mut out.held)?,
         }
-        n += 1;
+        out.files += 1;
     }
-    Ok(n)
+    Ok(out)
 }
 
-/// The player and the rest of the app follow the restored settings (and queue).
-fn apply_to_player(ctx: &Ctx, old: &crate::state::Settings, session: bool) {
-    let state = &ctx.state;
-    let new = state.settings.lock().clone();
-    // Only what changed (turning shuffle "on" again would shuffle the queue anew).
+/// What the player is told after a restore: only what changed (turning shuffle "on" again would
+/// shuffle the queue anew). The sound of this device is never among it: the restored settings
+/// keep this device's Direct output, volume and per-device settings (`keep_device_sound`), so a
+/// restore can't switch the output to exclusive mode or change how loud it plays.
+fn player_commands(old: &crate::state::Settings, new: &crate::state::Settings) -> Vec<crate::audio::Cmd> {
+    let mut out = Vec::new();
     if new.dsp != old.dsp {
-        state.engine.send(crate::audio::Cmd::SetDsp(new.dsp.clone()));
+        out.push(crate::audio::Cmd::SetDsp(new.dsp.clone()));
     }
     if serde_json::to_value(new.repeat).ok() != serde_json::to_value(old.repeat).ok() {
-        state.engine.send(crate::audio::Cmd::SetRepeat(new.repeat));
+        out.push(crate::audio::Cmd::SetRepeat(new.repeat));
     }
     if new.shuffle != old.shuffle {
-        state.engine.send(crate::audio::Cmd::SetShuffle(new.shuffle));
+        out.push(crate::audio::Cmd::SetShuffle(new.shuffle));
+    }
+    if new.shuffle_mode != old.shuffle_mode {
+        out.push(crate::audio::Cmd::SetShuffleMode(new.shuffle_mode));
+    }
+    if new.autoplay != old.autoplay {
+        out.push(crate::audio::Cmd::SetAutoplay(new.autoplay));
+    }
+    out
+}
+
+/// The player and the rest of the app follow the restored settings (and queue). The queue handed
+/// to the player (empty: none).
+fn apply_to_player(ctx: &Ctx, old: &crate::state::Settings, session: bool) -> Vec<String> {
+    let state = &ctx.state;
+    let new = state.settings.lock().clone();
+    for cmd in player_commands(old, &new) {
+        state.engine.send(cmd);
     }
     if new.global_hotkeys != old.global_hotkeys {
         ctx.host().set_hotkeys(new.global_hotkeys);
     }
+    crate::lbloved::set_sending(new.listenbrainz_loved);
     if new.folders != old.folders {
         crate::jobs::watch_folders(ctx.clone());
         crate::jobs::start_scan(ctx.clone());
     }
-    if session {
-        state.restore_session();
-    }
+    if session { state.restore_session() } else { Vec::new() }
 }
 
 // ---------- finding songs again ----------
@@ -851,6 +1303,14 @@ pub struct Linked {
     pub relinked: usize,
     pub unresolved: usize,
     pub unresolved_history: usize,
+    /// Old id → new id of the songs found again.
+    pub moved: HashMap<String, String>,
+}
+
+/// Whether a song's remembered file is under one of this device's music folders (else it's where
+/// another computer kept its music).
+fn under_music_folder(path: &str, roots: &[PathBuf]) -> bool {
+    !path.is_empty() && roots.iter().any(|r| !r.as_os_str().is_empty() && Path::new(path).starts_with(r))
 }
 
 /// Points what was restored at the songs as the library has them now. A song whose id isn't in the
@@ -880,6 +1340,7 @@ pub(crate) fn relink(state: &AppState, links: &HashMap<String, Link>, lyrics: &[
     }
     let marked: HashMap<String, Track> = state.marks.lock().as_tracks().into_iter().map(|t| (t.id.clone(), t)).collect();
     let folders = state.settings.lock().folders.clone();
+    let roots: Vec<PathBuf> = folders.iter().map(PathBuf::from).collect();
     let pairs: Vec<(String, String)> = {
         let lib = state.library.lock();
         let gone: Vec<Track> = kept
@@ -892,8 +1353,14 @@ pub(crate) fn relink(state: &AppState, links: &HashMap<String, Link>, lyrics: &[
             // Still there: a rescan adds it under this very id.
             .filter(|t| t.path.is_empty() || !Path::new(&t.path).exists())
             .map(|mut t| {
-                // Where the backup's music was may not exist here at all: told by its tags only.
-                t.path.clear();
+                if !under_music_folder(&t.path, &roots) {
+                    // Where another computer kept its music (no folder of this device's): told
+                    // by its tags only.
+                    t.path.clear();
+                }
+                // Under one of this device's music folders, the path stays: the matcher follows
+                // the song only when that folder can be reached and the file isn't there
+                // (`state::really_gone`), never while the drive is merely unplugged.
                 t
             })
             .collect();
@@ -930,7 +1397,7 @@ pub(crate) fn relink(state: &AppState, links: &HashMap<String, Link>, lyrics: &[
         let since = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<Pending>(&b).ok()).map_or_else(crate::history::now, |p| p.since);
         crate::state::write_json_with(&file, &Pending { since, links: pending }, false);
     }
-    Linked { relinked: moved.len(), unresolved, unresolved_history }
+    Linked { relinked: moved.len(), unresolved, unresolved_history, moved }
 }
 
 /// Songs found again (old id → new id): moved in the favourites, playlists, history (and its
@@ -1079,6 +1546,8 @@ struct Config {
     fingerprint: String,
     /// Why the last copy to `folder` failed ("" when it worked).
     folder_error: String,
+    /// The last restore that was cut short, until a restore goes through.
+    interrupted: Option<Interrupted>,
 }
 
 fn config(data_dir: &Path) -> Config {
@@ -1137,19 +1606,43 @@ fn kept(times: &[u64], utc_offset: i64) -> HashSet<u64> {
     keep
 }
 
-/// Removes automatic snapshots `kept` doesn't keep.
+/// Removes automatic snapshots `kept` doesn't keep (in Cadence's own `backups/`).
 fn rotate(dir: &Path) {
-    let all = listed(dir, "auto");
+    rotate_named(dir, "auto", false);
+}
+
+/// Removes `<prefix>-<secs>.zip` snapshots `kept` doesn't keep. `check`: only files whose manifest
+/// says they're automatic Cadence snapshots (a folder of the listener's, where other files live).
+fn rotate_named(dir: &Path, prefix: &str, check: bool) {
+    let all = listed(dir, prefix);
     let keep = kept(&all.iter().map(|(t, _)| *t).collect::<Vec<_>>(), crate::stats::local_offset());
     for (t, p) in all {
-        if !keep.contains(&t) {
+        if !keep.contains(&t) && (!check || is_auto_snapshot(&p)) {
             let _ = std::fs::remove_file(p);
         }
     }
 }
 
+/// Whether a file is an automatic snapshot Cadence made: a zip whose manifest (of a format this
+/// Cadence knows) says so and lists only files a Cadence backup holds.
+fn is_auto_snapshot(p: &Path) -> bool {
+    let Ok(f) = std::fs::File::open(p) else { return false };
+    let Ok(mut z) = zip::ZipArchive::new(std::io::BufReader::new(f)) else { return false };
+    let Ok(entry) = z.by_name(MANIFEST) else { return false };
+    let Ok(bytes) = read_entry(entry, MAX_MANIFEST) else { return false };
+    let Ok(m) = serde_json::from_slice::<Manifest>(&bytes) else { return false };
+    m.kind == "auto" && m.format <= FORMAT && m.files.iter().all(|f| kind(&f.name).is_some())
+}
+
 pub(crate) fn rotate_safety(dir: &Path) {
     for (_, p) in listed(dir, "safety").into_iter().skip(SAFETY_KEPT) {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// The snapshots before restores, rotated apart from the other safety snapshots.
+fn rotate_restore_safety(dir: &Path) {
+    for (_, p) in listed(dir, RESTORE_SAFETY).into_iter().skip(SAFETY_KEPT) {
         let _ = std::fs::remove_file(p);
     }
 }
@@ -1167,7 +1660,8 @@ pub fn snapshot_if_due(ctx: &Ctx) -> Option<PathBuf> {
     let state = &ctx.state;
     let dir = backups_dir(&state.data_dir);
     let mut cfg = config(&state.data_dir);
-    let fp = fingerprint(&sources(&state.data_dir));
+    // (From the folders' listings: no lyrics file is read on a normal start.)
+    let fp = fingerprint_now(&state.data_dir);
     if !due(&dir, crate::history::now(), &fp, &cfg.fingerprint) {
         return None;
     }
@@ -1198,13 +1692,15 @@ pub fn snapshot_if_due(ctx: &Ctx) -> Option<PathBuf> {
 /// An automatic snapshot is being made now (the window may open after its start was announced).
 static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Copies a snapshot into the second folder and rotates the snapshots there the same way.
+/// Copies a snapshot into the second folder (as `cadence-auto-<secs>.zip`) and rotates the copies
+/// there the same way, removing only files of that name that are automatic Cadence snapshots.
 fn copy_out(snapshot: &Path, folder: &Path) -> Result<(), String> {
     std::fs::create_dir_all(folder).map_err(|e| format!("Can't reach {}: {e}", folder.display()))?;
-    let name = snapshot.file_name().ok_or("no name")?;
+    let name = snapshot.file_name().ok_or("no name")?.to_string_lossy().into_owned();
+    let rest = name.strip_prefix("auto").ok_or("not an automatic snapshot")?;
     let bytes = std::fs::read(snapshot).map_err(io)?;
-    crate::state::write_file(&folder.join(name), &bytes, false).map_err(|e| format!("Can't copy to {}: {e}", folder.display()))?;
-    rotate(folder);
+    crate::state::write_file(&folder.join(format!("{COPY_PREFIX}{rest}")), &bytes, false).map_err(|e| format!("Can't copy to {}: {e}", folder.display()))?;
+    rotate_named(folder, COPY_PREFIX, true);
     Ok(())
 }
 
@@ -1237,15 +1733,18 @@ pub struct BackupInfo {
     pub dir: String,
     /// An automatic snapshot is being made right now.
     pub running: bool,
+    /// A restore was cut short (Cadence closed or crashed in the middle) and dealt with at the
+    /// next start; None when the last restore went through.
+    pub interrupted: Option<Interrupted>,
 }
 
 pub fn info(data_dir: &Path) -> BackupInfo {
     let dir = backups_dir(data_dir);
     let cfg = config(data_dir);
     let size = |p: &Path| std::fs::metadata(p).map_or(0, |m| m.len());
-    let mut snapshots: Vec<SnapshotInfo> = ["auto", "safety"]
+    let mut snapshots: Vec<SnapshotInfo> = [("auto", "auto"), ("safety", "safety"), (RESTORE_SAFETY, "safety")]
         .iter()
-        .flat_map(|k| listed(&dir, k).into_iter().map(move |(t, p)| (k, t, p)))
+        .flat_map(|&(prefix, k)| listed(&dir, prefix).into_iter().map(move |(t, p)| (k, t, p)))
         .map(|(k, t, p)| SnapshotInfo { name: p.file_name().unwrap_or_default().to_string_lossy().into_owned(), size: size(&p), path: p.to_string_lossy().into_owned(), kind: k.to_string(), created: t })
         .collect();
     let export = export_dir(data_dir);
@@ -1266,6 +1765,7 @@ pub fn info(data_dir: &Path) -> BackupInfo {
         export_dir: export.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
         dir: dir.to_string_lossy().into_owned(),
         running: RUNNING.load(std::sync::atomic::Ordering::SeqCst),
+        interrupted: cfg.interrupted,
     }
 }
 
@@ -1429,6 +1929,7 @@ mod tests {
 
     #[test]
     fn a_backup_restores_every_file_byte_for_byte() {
+        let _one = SERIAL.lock();
         let b = base("roundtrip");
         let data = b.join("data");
         fill(&data);
@@ -1451,9 +1952,19 @@ mod tests {
         let r = restore(&ctx, &out).unwrap();
         assert_eq!(r.files, included.len());
         for n in included {
+            if n == "settings.json" {
+                // (The test's player notes this computer's audio device in the settings as it
+                // starts, and a restore keeps that: compared as settings, not byte for byte.)
+                let (a, b): (serde_json::Value, serde_json::Value) = (serde_json::from_slice(&std::fs::read(data.join(n)).unwrap()).unwrap(), serde_json::from_slice(&before[n]).unwrap());
+                for k in ["folders", "volume", "shuffle", "skipped", "listenbrainzUser"] {
+                    assert_eq!(a.get(k), b.get(k), "settings.json {k}");
+                }
+                continue;
+            }
             assert_eq!(std::fs::read(data.join(n)).unwrap(), before[n], "{n}");
         }
         assert!(!data.join("history-archive/2026.jsonl").exists());
+        assert!(Path::new(&r.history_aside).join("2026.jsonl").exists(), "a year the backup doesn't have is kept aside, not deleted");
         // What Cadence holds in memory is the restored data too.
         assert_eq!(ctx.state.marks.lock().view()["s1"].rating, 5);
         assert_eq!(ctx.state.playlists.lock().items.len(), 2);
@@ -1461,6 +1972,9 @@ mod tests {
         assert_eq!(r.lyric_offsets.as_deref().map(|s| s.contains("s2:voice")), Some(true));
         // The safety snapshot of the data as it was just before.
         assert!(Path::new(&r.safety).exists());
+        assert!(Path::new(&r.safety).file_name().unwrap().to_string_lossy().starts_with(RESTORE_SAFETY));
+        assert!(!data.join(MARKER).exists(), "the note of the restore is gone once it's done");
+        assert!(r.held_back.is_empty());
         let safety = open(Path::new(&r.safety)).unwrap();
         assert_eq!(safety.manifest.kind, "safety");
         assert!(safety.files.iter().any(|(n, _, b)| n == "attention.json" && b == b"{}"));
@@ -1526,6 +2040,7 @@ mod tests {
 
     #[test]
     fn bad_archives_are_refused_without_touching_anything() {
+        let _one = SERIAL.lock();
         let b = base("refused");
         let ctx = core(&b);
         let data = b.join("data");
@@ -1589,7 +2104,7 @@ mod tests {
             assert_eq!(everything(&data), before, "{name} touched the data");
             assert!(!b.join("evil.json").exists() && !data.join("evil.json").exists());
         }
-        assert!(listed(&backups_dir(&data), "safety").is_empty(), "refused before any snapshot");
+        assert!(listed(&backups_dir(&data), "safety").is_empty() && listed(&backups_dir(&data), RESTORE_SAFETY).is_empty(), "refused before any snapshot");
         let _ = std::fs::remove_dir_all(&b);
     }
 
@@ -1646,6 +2161,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_is_skipped_when_nothing_changed() {
+        let _one = SERIAL.lock();
         let b = base("due");
         let ctx = core(&b);
         let data = b.join("data");
@@ -1668,13 +2184,14 @@ mod tests {
         std::fs::create_dir_all(&second).unwrap();
         let info = set_folder(&data, Some(second.to_string_lossy().into_owned())).unwrap();
         assert_eq!(info.folder, second.to_string_lossy());
-        assert_eq!(listed(&second, "auto").len(), 1);
+        assert_eq!(listed(&second, COPY_PREFIX).len(), 1);
         assert!(set_folder(&data, Some(data.join("backups").to_string_lossy().into_owned())).is_err());
         let _ = std::fs::remove_dir_all(&b);
     }
 
     #[test]
     fn restored_songs_are_found_again_where_it_is_certain() {
+        let _one = SERIAL.lock();
         let b = base("relink");
         let ctx = core(&b);
         let data = b.join("data");
@@ -1752,4 +2269,317 @@ mod tests {
         assert!(!WHOLE.contains(&"search-readings.json"));
     }
 
+
+    /// Restores share the app-wide "a restore is running" flag: one test's restore at a time.
+    static SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    #[test]
+    fn an_interrupted_restore_is_undone_at_the_next_start() {
+        let _one = SERIAL.lock();
+        let b = base("interrupted");
+        let data = b.join("data");
+        fill(&data);
+        // The backup: other favourites and playlists, and no 2025 history year.
+        let other = b.join("other");
+        fill(&other);
+        std::fs::write(other.join("marks.json"), r#"{"items":{"s2":{"rating":1,"loved":false,"title":"Invented","artist":"Nobody","album":"None","duration":100.0}}}"#).unwrap();
+        std::fs::write(other.join("playlists.json"), r#"{"items":[]}"#).unwrap();
+        std::fs::remove_file(other.join("history-archive/2025.jsonl")).unwrap();
+        let backup = b.join("backup.zip");
+        create(&other, &backup, "manual", &no_links).unwrap();
+        let before = everything(&data);
+        // A restore cut short: the safety snapshot and the note were written, then two files
+        // were replaced and a year set aside, and Cadence died.
+        let safety = backups_dir(&data).join(format!("{RESTORE_SAFETY}-1.zip"));
+        create(&data, &safety, "safety", &no_links).unwrap();
+        write_marker(&data, &Marker { safety: safety.to_string_lossy().into(), backup: backup.to_string_lossy().into(), started: 1, pending: None }).unwrap();
+        std::fs::copy(other.join("marks.json"), data.join("marks.json")).unwrap();
+        std::fs::copy(other.join("playlists.json"), data.join("playlists.json")).unwrap();
+        set_years_aside(&data, &[]).unwrap();
+        // The next start: put back as it was, before anything is loaded.
+        let note = recover_interrupted(&data).expect("found");
+        assert!(note.rolled_back && note.error.is_empty(), "{note:?}");
+        assert!(note.message.contains("put back as it was before"));
+        for (path, bytes) in &before {
+            if path.contains("backups") || path.ends_with(".bak") {
+                continue;
+            }
+            assert_eq!(std::fs::read(path).ok().as_ref(), Some(bytes), "{path}");
+        }
+        assert!(!data.join(MARKER).exists());
+        assert_eq!(info(&data).interrupted.map(|i| i.rolled_back), Some(true), "the Backup section can say so");
+        // Nothing to do on the start after.
+        assert!(recover_interrupted(&data).is_none());
+        // The app opened on it has the old data.
+        let ctx = core(&b);
+        assert_eq!(ctx.state.marks.lock().view()["s1"].rating, 5);
+        // A restore that goes through clears the note.
+        let r = restore(&ctx, &backup).unwrap();
+        assert!(r.files > 0);
+        assert!(info(&data).interrupted.is_none());
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn an_interrupted_restore_without_its_snapshot_is_finished_instead() {
+        let b = base("interrupted2");
+        let data = b.join("data");
+        fill(&data);
+        let other = b.join("other");
+        fill(&other);
+        std::fs::write(other.join("playlists.json"), r#"{"items":[]}"#).unwrap();
+        let backup = b.join("backup.zip");
+        create(&other, &backup, "manual", &no_links).unwrap();
+        write_marker(&data, &Marker { safety: b.join("gone.zip").to_string_lossy().into(), backup: backup.to_string_lossy().into(), started: 1, pending: None }).unwrap();
+        let note = recover_interrupted(&data).unwrap();
+        assert!(!note.rolled_back && note.error.is_empty(), "{note:?}");
+        assert_eq!(std::fs::read(data.join("playlists.json")).unwrap(), br#"{"items":[]}"#, "the backup, whole");
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_restore_while_the_music_drive_is_unplugged_does_not_follow_look_alikes() {
+        let _one = SERIAL.lock();
+        let b = base("unplugged");
+        let ctx = core(&b);
+        let data = b.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        // This device's music folder is an external drive, unplugged now.
+        let drive = b.join("external").join("Music");
+        ctx.state.settings.lock().folders = vec![drive.to_string_lossy().into_owned()];
+        let at = |name: &str| drive.join(name).to_string_lossy().into_owned();
+        let old = [song("o-1", "Made Up Tune", "Invented Band", "Pretend LP", 200.0, &at("Tune.flac")), song("o-2", "Other Tune", "Invented Band", "Pretend LP", 180.0, "Z:/Another Computer/Other.flac")];
+        let links: HashMap<String, Link> = old.iter().map(|t| (t.id.clone(), Link::of(t))).collect();
+        std::fs::write(data.join("playlists.json"), r#"{"items":[{"id":"p","name":"P","trackIds":["o-1","o-2"],"created":1,"updated":1}]}"#).unwrap();
+        let out = b.join("b.zip");
+        create(&data, &out, "manual", &|id| links.get(id).cloned()).unwrap();
+        // Same-titled copies on another drive that is plugged in.
+        let elsewhere = b.join("internal");
+        ctx.state.library.lock().set_tracks(
+            vec![
+                song("n-1", "Made Up Tune", "Invented Band", "Pretend LP", 200.1, &elsewhere.join("Tune.flac").to_string_lossy()),
+                song("n-2", "Other Tune", "Invented Band", "Pretend LP", 180.2, &elsewhere.join("Other.flac").to_string_lossy()),
+            ],
+            Vec::new(),
+        );
+        let r = restore(&ctx, &out).unwrap();
+        // The song under this device's unplugged folder stays; the one from another computer's
+        // layout (no folder of this device's) is found by its tags.
+        assert_eq!(ctx.state.playlists.lock().items[0].track_ids, ["o-1", "n-2"], "{r:?}");
+        assert_eq!((r.relinked, r.unresolved), (1, 1));
+        // After a rescan with the drive still away: still not followed (the retries keep the rule).
+        retry_pending(&ctx);
+        assert_eq!(ctx.state.playlists.lock().items[0].track_ids[0], "o-1");
+        // The drive is back and the file really is gone from it: now it's followed.
+        std::fs::create_dir_all(&drive).unwrap();
+        retry_pending(&ctx);
+        assert_eq!(ctx.state.playlists.lock().items[0].track_ids[0], "n-1");
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_restore_keeps_this_devices_sound_and_takes_the_rest() {
+        use crate::profiles::{Profile, Profiles};
+        let _one = SERIAL.lock();
+        let b = base("device-sound");
+        let ctx = core(&b);
+        let data = b.join("data");
+        let speakers = crate::audio::DeviceRef { id: "speakers".into(), name: "Laptop speakers".into() };
+        let dac = crate::audio::DeviceRef { id: "dac".into(), name: "USB DAC".into() };
+        // This device: the speakers, shared mode, full volume.
+        let here = {
+            let mut s = ctx.state.settings.lock();
+            s.volume = 1.0;
+            s.dsp.exclusive = false;
+            s.output_device = Some(speakers.clone());
+            s.sound_profiles = Profiles { current: Some("speakers".into()), devices: std::collections::BTreeMap::from([("speakers".into(), Profile::of("Laptop speakers", &s.dsp, 1.0))]), ..Default::default() };
+            s.clone()
+        };
+        crate::state::write_json(&data.join("settings.json"), &here);
+        // The backup: made on the DAC with Direct output, another device current, a low volume,
+        // and some settings that aren't a device's (crossfade, shuffle).
+        let mut theirs = here.clone();
+        theirs.volume = 0.2;
+        theirs.dsp.exclusive = true;
+        theirs.dsp.exclusive_rate = 96_000;
+        theirs.dsp.crossfade.enabled = true;
+        theirs.close_to_tray = !here.close_to_tray;
+        theirs.output_device = Some(dac.clone());
+        theirs.sound_profiles = Profiles { current: Some("dac".into()), devices: std::collections::BTreeMap::from([("dac".into(), Profile::of("USB DAC", &theirs.dsp, 0.2))]), ..Default::default() };
+        let other = b.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        crate::state::write_json(&other.join("settings.json"), &theirs);
+        let out = b.join("b.zip");
+        create(&other, &out, "manual", &no_links).unwrap();
+        // What the player is told: never Direct output.
+        let (_, merged) = merged_settings(&here, true, &serde_json::to_vec(&theirs).unwrap()).unwrap();
+        let cmds = player_commands(&here, &merged);
+        assert!(!cmds.iter().any(|c| matches!(c, crate::audio::Cmd::SetDsp(d) if d.exclusive)), "no exclusive mode from a restore");
+        assert!(cmds.iter().any(|c| matches!(c, crate::audio::Cmd::SetDsp(d) if d.crossfade.enabled)), "the crossfade is the backup's");
+        assert!(merged.dsp.crossfade.enabled && !merged.dsp.exclusive && merged.volume == 1.0);
+        // The restore itself, with the crossfade as it is here: the player is sent nothing (a test
+        // never opens this computer's audio device).
+        theirs.dsp.crossfade = here.dsp.crossfade;
+        crate::state::write_json(&other.join("settings.json"), &theirs);
+        create(&other, &out, "manual", &no_links).unwrap();
+        let (_, merged) = merged_settings(&here, true, &serde_json::to_vec(&theirs).unwrap()).unwrap();
+        assert!(player_commands(&here, &merged).is_empty(), "nothing for the player: its sound is this device's");
+        restore(&ctx, &out).unwrap();
+        let s = ctx.state.settings.lock().clone();
+        assert!(!s.dsp.exclusive && s.dsp.exclusive_rate == here.dsp.exclusive_rate);
+        assert_eq!(s.volume, 1.0);
+        assert_eq!(s.output_device, Some(speakers));
+        // (The test's player may note the computer's own default device in the profiles as it
+        // starts: compared with the backup's devices, not byte for byte.)
+        assert!(s.sound_profiles.current.as_deref() != Some("dac") && !s.sound_profiles.devices.contains_key("dac"), "the device in use and every device's settings stay this device's: {:?}", s.sound_profiles);
+        assert_eq!(s.sound_profiles.devices.get("speakers"), here.sound_profiles.devices.get("speakers"));
+        assert_eq!(s.close_to_tray, !here.close_to_tray, "what isn't tied to a device comes from the backup");
+        // Saved so too.
+        let disk: crate::state::Settings = serde_json::from_slice(&std::fs::read(data.join("settings.json")).unwrap()).unwrap();
+        assert!(!disk.dsp.exclusive && disk.sound_profiles.current.as_deref() != Some("dac") && disk.volume == 1.0);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_restore_waits_for_jobs_that_write_the_same_files() {
+        let _one = SERIAL.lock();
+        let b = base("busy");
+        let ctx = core(&b);
+        let data = b.join("data");
+        fill(&data);
+        let out = b.join("b.zip");
+        create(&data, &out, "manual", &no_links).unwrap();
+        let before = everything(&data);
+        ctx.state.library.lock().scanning = true;
+        let err = restore(&ctx, &out).unwrap_err();
+        assert!(err.contains("scanned"), "{err}");
+        assert_eq!(everything(&data), before, "nothing touched, no snapshot");
+        assert!(!restoring());
+        ctx.state.library.lock().scanning = false;
+        // While a restore runs: scans asked for wait, and run once it's done.
+        let hold = Hold::take(&ctx).unwrap();
+        assert!(restoring() && ctx.state.library.lock().scanning);
+        assert!(Hold::take(&ctx).is_err(), "one restore at a time");
+        drop(hold);
+        assert!(!restoring() && !ctx.state.library.lock().scanning);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn a_damaged_year_is_backed_up_and_years_are_never_deleted() {
+        let _one = SERIAL.lock();
+        let b = base("damaged-year");
+        let data = b.join("data");
+        fill(&data);
+        // Mostly damaged (a disk error): still one good play in it.
+        let good = serde_json::to_string(&play("s1", 1_720_000_000)).unwrap();
+        let damaged = format!("{good}\n{}", "{\"trackId\": \"broken\n".repeat(20));
+        std::fs::write(data.join("history-archive/2024.jsonl"), &damaged).unwrap();
+        let out = b.join("b.zip");
+        let made = create(&data, &out, "manual", &no_links).unwrap();
+        assert!(!made.skipped.contains(&"history-archive/2024.jsonl".to_string()));
+        let a = open(&out).unwrap();
+        assert!(a.files.iter().any(|(n, _, bytes)| n == "history-archive/2024.jsonl" && bytes == damaged.as_bytes()), "as it is");
+        // A backup without 2025: restoring it moves 2025 aside, never deletes it.
+        let other = b.join("other");
+        fill(&other);
+        std::fs::remove_file(other.join("history-archive/2025.jsonl")).unwrap();
+        let without = b.join("without.zip");
+        create(&other, &without, "manual", &no_links).unwrap();
+        let year = std::fs::read(data.join("history-archive/2025.jsonl")).unwrap();
+        let ctx = core(&b);
+        let r = restore(&ctx, &without).unwrap();
+        assert!(!data.join("history-archive/2025.jsonl").exists());
+        assert!(!r.history_aside.is_empty());
+        assert_eq!(std::fs::read(Path::new(&r.history_aside).join("2025.jsonl")).unwrap(), year);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn the_second_folder_only_loses_cadences_own_snapshots() {
+        let b = base("second-folder");
+        let data = b.join("data");
+        fill(&data);
+        let second = b.join("second");
+        std::fs::create_dir_all(&second).unwrap();
+        // The listener's own files, one named like Cadence's old copies and one like its new ones.
+        std::fs::write(second.join("auto-1700000000.zip"), b"my own file").unwrap();
+        std::fs::write(second.join(format!("{COPY_PREFIX}-1700000000.zip")), b"not a zip").unwrap();
+        // Sixty days of Cadence's copies.
+        let now = 1_800_000_000u64;
+        for d in 0..60 {
+            create(&data, &second.join(format!("{COPY_PREFIX}-{}.zip", now - d * DAY)), "auto", &no_links).unwrap();
+        }
+        let snap = backups_dir(&data).join(format!("auto-{now}.zip"));
+        create(&data, &snap, "auto", &no_links).unwrap();
+        copy_out(&snap, &second).unwrap();
+        assert!(second.join("auto-1700000000.zip").exists(), "an unrelated auto-<n>.zip is never removed");
+        assert!(second.join(format!("{COPY_PREFIX}-1700000000.zip")).exists(), "nor a file of that name that isn't a snapshot");
+        let ours = listed(&second, COPY_PREFIX).into_iter().filter(|(_, p)| is_auto_snapshot(p)).count();
+        assert_eq!(ours, DAILY + WEEKLY);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn the_startup_fingerprint_needs_no_lyrics_read() {
+        let b = base("fingerprint");
+        let data = b.join("data");
+        fill(&data);
+        assert_eq!(fingerprint_now(&data), fingerprint(&sources(&data)), "the same as what a snapshot records");
+        let first = fingerprint_now(&data);
+        assert_eq!(fingerprint_now(&data), first, "nothing changed");
+        // Lyrics fetched online (not picked): no change.
+        std::fs::write(data.join("lyrics/s9.json"), r#"{"lyrics":null,"checked":2,"picked":false,"v":1}"#).unwrap();
+        assert_eq!(fingerprint_now(&data), first);
+        // Lyrics the listener picked: a change.
+        std::fs::write(data.join("lyrics/s9.json"), r#"{"lyrics":null,"checked":3,"picked":true,"v":1}"#).unwrap();
+        assert_ne!(fingerprint_now(&data), first);
+        assert_eq!(fingerprint_now(&data), fingerprint(&sources(&data)));
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn pictures_from_another_system_point_here() {
+        assert_eq!(file_name_anywhere(r"C:\Users\someone\AppData\Roaming\Cadence\art\artists\abc-1.jpg"), Some("abc-1.jpg"));
+        assert_eq!(file_name_anywhere("/data/user/0/app/files/art/artists/abc-1_s.jpg"), Some("abc-1_s.jpg"));
+        assert_eq!(file_name_anywhere(r"C:\x\"), None);
+        let dir = Path::new("/here");
+        let json = serde_json::json!({"a": {"large": r"C:\Users\u\art\artists\abc-1.jpg", "small": r"C:\Users\u\art\artists\abc-1_s.jpg"}}).to_string();
+        let out: HashMap<String, crate::artists::ArtistImage> = serde_json::from_slice(&local_pictures(dir, json.as_bytes()).unwrap()).unwrap();
+        assert_eq!(Path::new(&out["a"].large).file_name().unwrap(), "abc-1.jpg");
+        assert!(Path::new(&out["a"].large).starts_with(dir.join("art").join("artists")));
+    }
+
+    #[test]
+    fn the_session_is_not_saved_over_a_restored_one() {
+        let _one = SERIAL.lock();
+        let (old, restored) = (vec!["old-1".to_string(), "old-2".to_string()], vec!["new-1".to_string()]);
+        crate::state::hold_session_saves();
+        // The player's status every few seconds while music plays: not saved during a restore.
+        assert!(!crate::state::session_save_allowed(&old));
+        // The restore handed the player its queue: statuses of the old queue still in flight
+        // don't save; the first of the restored queue does, and from then on all do.
+        crate::state::release_session_saves(restored.clone());
+        assert!(!crate::state::session_save_allowed(&old));
+        assert!(crate::state::session_save_allowed(&restored));
+        assert!(crate::state::session_save_allowed(&old));
+        // A restore without a queue: saves at once.
+        crate::state::hold_session_saves();
+        crate::state::release_session_saves(Vec::new());
+        assert!(crate::state::session_save_allowed(&old));
+    }
+
+    #[test]
+    fn restore_safety_snapshots_have_their_own_rotation() {
+        let b = base("safety-slots");
+        for t in 0..8u64 {
+            std::fs::write(b.join(format!("{RESTORE_SAFETY}-{}.zip", 1000 + t)), b"x").unwrap();
+            std::fs::write(b.join(format!("safety-{}.zip", 2000 + t)), b"x").unwrap();
+        }
+        rotate_safety(&b);
+        assert_eq!(listed(&b, RESTORE_SAFETY).len(), 8, "imports' snapshots don't push out the ones before restores");
+        rotate_restore_safety(&b);
+        assert_eq!((listed(&b, RESTORE_SAFETY).len(), listed(&b, "safety").len()), (SAFETY_KEPT, SAFETY_KEPT));
+        let _ = std::fs::remove_dir_all(&b);
+    }
 }

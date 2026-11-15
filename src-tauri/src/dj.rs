@@ -49,6 +49,9 @@ pub struct Song {
     pub artist: String,
     pub lang: Lang,
     pub lang_conf: f32,
+    /// The language most of the lead artist's surely tagged songs are in (Unknown when there is no
+    /// clear majority): a language filter takes this song in when its own language is unknown.
+    pub artist_lang: Lang,
     pub year: Option<u16>,
     /// Indexes into `Facts::genres` (a tag like "Pop; Rock" is two).
     pub genres: Vec<u16>,
@@ -160,7 +163,9 @@ pub fn build_facts(tracks: &[TrackIn], traits: &HashMap<String, Traits>, lyrics:
         let mut genres = Vec::new();
         for part in genre_parts(t.genre) {
             let key = fold(part);
-            if key.is_empty() {
+            // (A genre's index is a u16: past 65,535 different genres, new ones are left out
+            // rather than numbered over the first ones.)
+            if key.is_empty() || (!genre_of.contains_key(&key) && f.genres.len() >= u16::MAX as usize) {
                 continue;
             }
             let g = *genre_of.entry(key.clone()).or_insert_with(|| {
@@ -186,6 +191,7 @@ pub fn build_facts(tracks: &[TrackIn], traits: &HashMap<String, Traits>, lyrics:
             artist: t.artist.to_string(),
             lang: Lang::Unknown,
             lang_conf: 0.0,
+            artist_lang: Lang::Unknown,
             year: t.year.filter(|y| (1900..=2100).contains(y)).map(|y| y as u16),
             genres,
             secs: t.secs as f32,
@@ -222,6 +228,25 @@ pub fn build_facts(tracks: &[TrackIn], traits: &HashMap<String, Traits>, lyrics:
             *decades.entry(y / 10 * 10).or_default() += 1;
         }
     }
+    // Each artist's majority language among their surely tagged songs (at least two, more than
+    // half), for their songs Cadence can't tell on their own.
+    let mut votes: HashMap<u32, HashMap<Lang, u32>> = HashMap::new();
+    for s in &f.songs {
+        if s.lang != Lang::Unknown && s.lang_conf >= LANG_MIN {
+            *votes.entry(s.artist_key).or_default().entry(s.lang).or_default() += 1;
+        }
+    }
+    let majority: HashMap<u32, Lang> = votes
+        .into_iter()
+        .filter_map(|(a, v)| {
+            let total: u32 = v.values().sum();
+            let (&l, &n) = v.iter().max_by_key(|(l, n)| (**n, std::cmp::Reverse(**l)))?;
+            (n >= 2 && n * 2 > total).then_some((a, l))
+        })
+        .collect();
+    for s in f.songs.iter_mut() {
+        s.artist_lang = majority.get(&s.artist_key).copied().unwrap_or(Lang::Unknown);
+    }
     f.languages = langs.into_iter().collect();
     f.languages.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     f.decades = decades.into_iter().collect();
@@ -238,9 +263,24 @@ impl Facts {
         g
     }
 
-    /// Whether a song is (surely enough) in a language.
+    /// Whether a song is (surely enough) in a language: its own language, or, when Cadence can't
+    /// tell the song's, the majority language of its artist's songs.
     pub fn sung_in(&self, s: &Song, langs: &[Lang]) -> bool {
-        langs.contains(&s.lang) && s.lang_conf >= LANG_MIN
+        if Self::sure(s) {
+            langs.contains(&s.lang)
+        } else {
+            s.artist_lang != Lang::Unknown && langs.contains(&s.artist_lang)
+        }
+    }
+
+    /// Whether the song's own language is known well enough.
+    fn sure(s: &Song) -> bool {
+        s.lang != Lang::Unknown && s.lang_conf >= LANG_MIN
+    }
+
+    /// A song a language filter leaves out only because nothing tells its language.
+    fn untold(s: &Song) -> bool {
+        !Self::sure(s) && s.artist_lang == Lang::Unknown
     }
 }
 
@@ -250,23 +290,33 @@ type Key = (std::path::PathBuf, u64, u64, usize, usize, u64);
 static KEPT: Mutex<Option<(Key, Arc<Facts>)>> = Mutex::new(None);
 /// One build at a time (the Home page's chips, a question and Your Stats may ask together).
 static BUILDING: Mutex<()> = Mutex::new(());
+/// Saved lyrics change the facts (their languages) only a little: the lyrics folder's time counts
+/// in steps of this many seconds, so lyrics fetched while songs play don't rebuild the facts each
+/// time (`invalidate` does it at once where it matters, after a restore).
+const LYRICS_STEP: u64 = 3600;
 
-fn key_now(state: &crate::state::AppState) -> Key {
-    let id = crate::identity::current();
+/// `id`: the identity the facts are (to be) built from, so the key says what they were built from.
+fn key_now(state: &crate::state::AppState, id: &Identity) -> Key {
     let tracks = state.library.lock().snapshot.tracks.len();
     let sonic = state.sonic.lock().tracks.len();
     let lyrics = std::fs::metadata(state.data_dir.join("lyrics"))
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_secs());
+        .map_or(0, |d| d.as_secs() / LYRICS_STEP);
     (state.data_dir.clone(), crate::identity::wanted(), id.version(), tracks, sonic, lyrics)
+}
+
+/// The facts kept are worked out again on their next use (a restore replaced what they come from).
+pub fn invalidate() {
+    *KEPT.lock() = None;
 }
 
 /// The library's facts, worked out again only when the library, the artists, the sound analysis
 /// or the saved lyrics changed. Don't call it holding the library's or the sound's lock.
 pub fn facts(state: &crate::state::AppState) -> Arc<Facts> {
-    let key = key_now(state);
+    let id = crate::identity::current();
+    let key = key_now(state, &id);
     if let Some((k, f)) = KEPT.lock().as_ref()
         && *k == key
     {
@@ -279,7 +329,6 @@ pub fn facts(state: &crate::state::AppState) -> Arc<Facts> {
         return f.clone();
     }
     let started = std::time::Instant::now();
-    let id = crate::identity::current();
     let (tracks, traits) = {
         let lib = state.library.lock();
         let sonic = state.sonic.lock();
@@ -528,6 +577,16 @@ pub fn parse_plan(v: &Value) -> Result<Plan, String> {
 
 // ---------- the local phrase parser (no AI) ----------
 
+/// Where an ASCII needle first appears in `hay`, ignoring ASCII case. The position is a char
+/// boundary of `hay` (an ASCII byte never sits inside a multi-byte character).
+fn find_ascii_ci(hay: &str, needle: &str) -> Option<usize> {
+    let n = needle.as_bytes();
+    if n.is_empty() || !needle.is_ascii() {
+        return None;
+    }
+    hay.as_bytes().windows(n.len()).position(|w| w.eq_ignore_ascii_case(n))
+}
+
 fn has_word(hay: &str, w: &str) -> bool {
     hay.match_indices(w).any(|(i, _)| {
         let before = hay[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
@@ -623,21 +682,24 @@ pub fn parse_local(request: &str, facts: &Facts) -> Plan {
     }
     // "in 3 months", "for 2 weeks".
     for (i, t) in tokens.iter().enumerate() {
-        if let (Ok(n), Some(unit)) = (t.parse::<u16>(), tokens.get(i + 1)) {
+        // (In u64 and clamped: "3000 years" or "99999999999 hours" must not overflow.)
+        if let (Ok(n), Some(unit)) = (t.parse::<u64>(), tokens.get(i + 1)) {
+            let clamp16 = |x: u64, lo: u64, hi: u64| x.clamp(lo, hi) as u16;
             let days = match unit.trim_end_matches('s') {
                 "day" => Some(n),
-                "week" => Some(n * 7),
-                "month" => Some(n * 30),
-                "year" => Some(n * 365),
+                "week" => Some(n.saturating_mul(7)),
+                "month" => Some(n.saturating_mul(30)),
+                "year" => Some(n.saturating_mul(365)),
                 _ => None,
             };
             if let Some(d) = days && p.familiarity == Familiarity::Forgotten {
-                p.not_played_days = Some(d.max(1));
+                // The same cap the AI's plan gets (ten years).
+                p.not_played_days = Some(clamp16(d, 1, 3650));
             }
             match unit.trim_end_matches('s') {
-                "song" | "track" | "lagu" => p.count = Some(n.clamp(5, 100)),
-                "minute" | "min" | "menit" => p.minutes = Some(n.clamp(10, 600)),
-                "hour" | "jam" => p.minutes = Some((n * 60).clamp(10, 600)),
+                "song" | "track" | "lagu" => p.count = Some(clamp16(n, 5, 100)),
+                "minute" | "min" | "menit" => p.minutes = Some(clamp16(n, 10, 600)),
+                "hour" | "jam" => p.minutes = Some(clamp16(n.saturating_mul(60), 10, 600)),
                 _ => {}
             }
         }
@@ -656,11 +718,14 @@ pub fn parse_local(request: &str, facts: &Facts) -> Plan {
         p.order = Order::WindDown;
     }
     // "by X", "like X", "without X": the words after, up to a comma or "from"/"in".
+    // Searched in the request itself (ASCII case-insensitively), never in its lowercase: lowercasing
+    // can change byte lengths ("İ", the Kelvin sign), so a position found there may fall inside a
+    // character of the original.
     let phrase = |after: &str| -> Option<String> {
-        let i = r.find(after)? + after.len();
-        let rest = &request[i.min(request.len())..];
-        let end = [",", " from ", " in ", " and ", " for ", " that ", " with "].iter().filter_map(|s| rest.to_lowercase().find(s)).min().unwrap_or(rest.len());
-        let s = rest[..end].trim().trim_matches(|c: char| !c.is_alphanumeric() && !crate::identity::cjk(&c.to_string()));
+        let i = find_ascii_ci(request, after)? + after.len();
+        let rest = request.get(i..)?;
+        let end = [",", " from ", " in ", " and ", " for ", " that ", " with "].iter().filter_map(|s| find_ascii_ci(rest, s)).min().unwrap_or(rest.len());
+        let s = rest.get(..end)?.trim().trim_matches(|c: char| !c.is_alphanumeric() && !crate::identity::cjk(&c.to_string()));
         (!s.is_empty()).then(|| s.to_string())
     };
     for (after, only) in [(" by ", true), ("songs like ", false), (" like ", false)] {
@@ -792,6 +857,9 @@ pub struct Retrieved {
     pub in_language: Option<usize>,
     /// Songs by the artists asked for at all (when only their songs were asked for).
     pub by_artists: Option<usize>,
+    /// With a language asked for: songs left out only because Cadence can't tell their language
+    /// (nor their artist's), said in the notice.
+    pub untold: usize,
     pub per_artist: usize,
     pub per_album: usize,
 }
@@ -919,6 +987,7 @@ pub fn retrieve(facts: &Facts, q: &Query, t: &Taste) -> Retrieved {
     let allowed = |s: &Song| !q.never.contains(&s.id) && !s.credit.iter().any(|a| q.exclude.contains(a));
     let in_language = (!p.languages.is_empty()).then(|| facts.songs.iter().filter(|s| facts.sung_in(s, &p.languages) && allowed(s)).count());
     let by_artists = p.only_artists.then(|| facts.songs.iter().filter(|s| s.credit.iter().any(|a| q.include.contains(a)) && allowed(s)).count());
+    let untold = if p.languages.is_empty() { 0 } else { facts.songs.iter().filter(|s| Facts::untold(s) && allowed(s)).count() };
 
     // Scores.
     let target = sound_target(p);
@@ -1051,7 +1120,7 @@ pub fn retrieve(facts: &Facts, q: &Query, t: &Taste) -> Retrieved {
         *b += 1;
         pool.push(i);
     }
-    Retrieved { matched: list.len(), pool, wanted, relaxed, in_language, by_artists, per_artist, per_album }
+    Retrieved { matched: list.len(), pool, wanted, relaxed, in_language, by_artists, untold, per_artist, per_album }
 }
 
 /// The playlist from `order` (the model's numbers into `r.pool`, or None for the local order):
@@ -1228,8 +1297,23 @@ pub fn understood(p: &Plan, songs: usize) -> String {
     parts.join(" · ")
 }
 
-/// One plain sentence when a constraint was relaxed or couldn't be met (empty otherwise).
+/// One plain sentence when a constraint was relaxed or couldn't be met (empty otherwise), and, with
+/// a language asked for, how many songs were left out because their language can't be told.
 pub fn notice(p: &Plan, r: &Retrieved, songs: usize) -> String {
+    let main = main_notice(p, r, songs);
+    let untold = match r.untold {
+        0 => String::new(),
+        1 => "One song whose language Cadence can't tell was left out.".to_string(),
+        n => format!("{n} songs whose language Cadence can't tell were left out."),
+    };
+    match (main.is_empty(), untold.is_empty()) {
+        (_, true) => main,
+        (true, false) => untold,
+        (false, false) => format!("{main} {untold}"),
+    }
+}
+
+fn main_notice(p: &Plan, r: &Retrieved, songs: usize) -> String {
     if let Some(n) = r.in_language
         && n < r.wanted
     {
@@ -1791,7 +1875,9 @@ mod tests {
         let mix = run(&f, &w, &id, "Japanese songs", Some(&llm)).unwrap();
         assert_eq!(mix.track_ids.len(), 25);
         assert!(mix.track_ids.iter().all(|t| lang_of(&f, t).lang == Lang::Ja));
-        assert!(mix.notice.is_empty());
+        // The four "Imaginary Tune"s (Latin titles, no lyrics, an artist with nothing known) can't
+        // be told: said, not silently dropped.
+        assert_eq!(mix.notice, "4 songs whose language Cadence can't tell were left out.");
         assert!(mix.understood.starts_with("Japanese"), "{}", mix.understood);
         // Indonesian: 18 songs only. All of them (capped per artist), nothing else, and it says so.
         let llm = Canned::new(vec![Ok(plan_json(json!({ "languages": ["id"], "moods": ["sad"], "count": 25 }))), Err("offline".into())]);
@@ -1973,6 +2059,79 @@ mod tests {
         assert_eq!(p.exclude_artists, ["Prolific Act"]);
         let p = parse_local("lagu galau tahun 2000an", &f);
         assert_eq!((p.decades.clone(), p.moods.clone()), (vec![2000], vec!["sad".to_string()]));
+    }
+
+    #[test]
+    fn the_phrase_parser_survives_any_text() {
+        let lib = library();
+        let f = facts_of(&lib, &Identity::new());
+        // Lowercasing "İ" (2 bytes) gives 3 bytes, the Kelvin sign 3 → 1: positions found in the
+        // lowercase used to slice the original inside a character.
+        let p = parse_local("İ by 米津玄師", &f);
+        assert_eq!((p.artists.clone(), p.only_artists), (vec!["米津玄師".to_string()], true));
+        let p = parse_local("İİİİ songs like KKK Band, from the 90s", &f);
+        assert_eq!(p.artists, ["KKK Band"]);
+        let p = parse_local("Songs BY Ünïcödé Ärtist and friends", &f);
+        assert_eq!(p.artists, ["Ünïcödé Ärtist"]);
+        for r in ["İ", "by", " by ", "without İ", "ǅ by ǅ", "\u{0130} like \u{212A}", "🎵 by 🎶, in", " not ", "ﬃ without ﬃ"] {
+            let _ = parse_local(r, &f);
+        }
+        // Absurd numbers are capped, not overflowed.
+        let p = parse_local("songs I haven't heard in 3000 years", &f);
+        assert_eq!((p.familiarity, p.not_played_days), (Familiarity::Forgotten, Some(3650)));
+        let p = parse_local("forgotten songs for 99999999999999 hours, 70000 songs", &f);
+        assert_eq!((p.minutes, p.count), (Some(600), Some(100)));
+        assert_eq!(parse_local("rediscover 65535 weeks", &f).not_played_days, Some(3650));
+    }
+
+    #[test]
+    fn unknown_language_songs_follow_their_artist_or_are_counted() {
+        let id = Identity::new();
+        let mut lib = library();
+        // A mostly Indonesian group (3 Indonesian, 2 English lyrics) with 3 songs without lyrics
+        // (Latin titles say nothing): too mixed for the tagger's own artist majority to be sure,
+        // but the group's majority is Indonesian.
+        let id_lyrics = crate::songlang::latin(&INDONESIAN.join("\n"));
+        let en_lyrics = crate::songlang::latin(&ENGLISH.join("\n"));
+        for k in 0..8 {
+            let tid = format!("u{k}");
+            lib.tracks.push(crate::library::Track {
+                id: tid.clone(),
+                title: format!("Zxq {k}"),
+                artist: "Grup Campur".into(),
+                album: "Campuran".into(),
+                album_artist: "Grup Campur".into(),
+                album_id: format!("solo{k}"),
+                genre: "Pop".into(),
+                year: Some(2005),
+                duration: 200.0,
+                ..Default::default()
+            });
+            match k {
+                0..3 => drop(lib.lyrics.insert(tid, id_lyrics)),
+                3..5 => drop(lib.lyrics.insert(tid, en_lyrics)),
+                _ => {}
+            }
+        }
+        let f = facts_of(&lib, &id);
+        let s = lang_of(&f, "u6");
+        assert!(s.lang == Lang::Unknown || s.lang_conf < LANG_MIN, "{:?} {}", s.lang, s.lang_conf);
+        assert_eq!(s.artist_lang, Lang::Id);
+        let w = World::new();
+        let p = Plan { languages: vec![Lang::Id], count: Some(40), ..Default::default() };
+        let q = Query { plan: &p, include: HashSet::new(), exclude: HashSet::new(), never: &w.never, seed: 1 };
+        let r = retrieve(&f, &q, &w.taste());
+        assert_eq!(r.in_language, Some(24), "18 + the group's 3 told + 3 by their artist");
+        assert!(r.pool.iter().any(|&i| f.songs[i as usize].id == "u6"));
+        assert!(!r.pool.iter().any(|&i| ["u3", "u4"].contains(&f.songs[i as usize].id.as_str())), "surely English stays out");
+        assert!(!r.pool.iter().any(|&i| f.songs[i as usize].artist == "Kenshi Yonezu"), "no artist majority: not taken in");
+        assert_eq!(r.untold, 4);
+        let n = notice(&p, &r, 24);
+        assert!(n.contains("only 24 Indonesian songs") && n.ends_with("4 songs whose language Cadence can't tell were left out."), "{n}");
+        // No language asked: nothing counted.
+        let p = Plan::default();
+        let q = Query { plan: &p, include: HashSet::new(), exclude: HashSet::new(), never: &w.never, seed: 1 };
+        assert_eq!(retrieve(&f, &q, &w.taste()).untold, 0);
     }
 
     #[test]

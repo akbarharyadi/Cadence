@@ -118,8 +118,13 @@ pub fn run() {
             #[cfg(target_os = "android")]
             secrets::init(&data_dir);
             let local_dir = app.path().app_local_data_dir().unwrap_or_else(|_| data_dir.clone());
+            // A restore cut short (the app was closed or crashed in the middle) is undone first,
+            // before anything reads the data folder: Cadence never runs on half-restored files.
+            backup::recover_interrupted(&data_dir);
             let (ctx, status) = hub::open(data_dir, &local_dir, Arc::new(TauriHost(app.handle().clone())));
             app.manage(ctx.clone());
+            // Whether hearts may be sent to ListenBrainz: the sender checks it before each turn.
+            lbloved::set_sending(ctx.state.settings.lock().listenbrainz_loved);
 
             let main = app.get_webview_window("main").expect("main window");
             // Windows' media overlay is tied to the window; macOS and Linux don't need it.
@@ -170,17 +175,19 @@ pub fn run() {
             // Hidden in the tray or minimized: the window's page stops drawing (see winvis.rs).
             #[cfg(desktop)]
             match event {
-                WindowEvent::Resized(size) => winvis::on_event(
-                    window.app_handle(),
-                    window.label(),
-                    winvis::WinEvent::Resized { width: size.width, height: size.height },
-                ),
+                // The size can't tell a minimized frameless window (see winvis.rs): ask the window.
+                WindowEvent::Resized(_) | WindowEvent::Moved(_) => {
+                    if let Ok(minimized) = window.is_minimized() {
+                        winvis::on_event(window.app_handle(), window.label(), winvis::WinEvent::Minimized(minimized));
+                    }
+                }
                 WindowEvent::Destroyed => winvis::on_event(window.app_handle(), window.label(), winvis::WinEvent::Closed),
                 _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_library,
+            commands::get_library_part,
             commands::voice_status,
             commands::voice_install,
             commands::voice_remove,

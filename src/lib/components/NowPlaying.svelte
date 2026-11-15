@@ -136,6 +136,8 @@
   onkeydown={(e) => {
     // Only when nothing above Now Playing (a menu, a dialog, an open dropdown) wants the key.
     if (e.key !== "Escape" || e.defaultPrevented || app.menu || document.querySelector("[aria-modal='true'], [role=menu]")) return;
+    // Used here: nothing under Now Playing (a song list's selection) also takes this Escape.
+    e.preventDefault();
     app.nowPlayingOpen = false;
   }}
 />

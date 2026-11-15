@@ -57,6 +57,8 @@ pub use loudness::measure_album;
 
 /// Output level (linear) above which the Windows mixer's limiter starts working.
 const CLIP_THRESHOLD: f32 = 0.985;
+/// How long the worker waits for a command while nothing plays (it is woken by any command).
+const IDLE_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Default)]
 pub struct QueueItem {
@@ -242,10 +244,17 @@ pub enum Cmd {
         more: bool,
     },
     /// Songs for the end of the queue, asked for by `Status::more` (the next album of an album
-    /// shuffle, or Autoplay's songs: `auto`).
+    /// shuffle, or Autoplay's songs: `auto`). `queue`: the queue they were picked for
+    /// (`Status::queue_gen`); dropped when another one has been loaded since (None: any).
     Extend {
         items: Vec<QueueItem>,
         auto: bool,
+        queue: Option<u64>,
+    },
+    /// The album shuffle of queue `queue` (`Status::queue_gen`) has played every album (Repeat
+    /// off): it ends there, and Autoplay may take over when it's on.
+    AlbumsDone {
+        queue: u64,
     },
     /// "Stop after this song": pauses once the song at this queue place has played (None: no
     /// longer). One at a time; it follows the song when the queue changes around it.
@@ -286,8 +295,22 @@ pub enum Cmd {
     StopAfter(Option<StopAfter>),
     /// New gain measurements for songs (from the background loudness scan).
     UpdateGains(Vec<(String, SongGain)>),
+    /// The volume, for whatever device is open when it arrives.
     SetVolume(f32),
+    /// The volume, for the device that was open at `device_gen` (`Status::device_gen`): dropped
+    /// when playback has moved to another device (or mode) since, so the volume meant for one
+    /// device never lands on the next.
+    SetVolumeFor {
+        volume: f32,
+        device_gen: u64,
+    },
+    /// The sound settings, for whatever device is open when they arrive.
     SetDsp(DspSettings),
+    /// The sound settings, for the device that was open at `device_gen` (as `SetVolumeFor`).
+    SetDspFor {
+        dsp: DspSettings,
+        device_gen: u64,
+    },
     SetRepeat(Repeat),
     /// Shuffle the songs after the current one (and every list played from now on); off puts
     /// them back in their order.
@@ -307,9 +330,29 @@ pub enum Cmd {
     SetProfiles(Option<ProfileSource>),
 }
 
-/// Asked when playback moves to another device: the sound settings and volume to use there (None:
-/// keep the ones in use). Runs on the engine's worker thread, never in the audio callback.
-pub type ProfileSource = Box<dyn FnMut(&DeviceRef) -> Option<(DspSettings, f32)> + Send>;
+/// Where sound settings per device are kept (`profiles`). Called on the engine's worker thread,
+/// never in the audio callback. The engine decides which device is open; the book only keeps
+/// what it's told and gives each device's own back.
+pub trait SoundBook: Send {
+    /// Playback moves from `from` (the device the engine had open, None: none yet this run) to
+    /// `to`; `dsp` and `volume` are what the engine has in effect (on `from`). Returns `to`'s own
+    /// settings and volume to put in use (None: keep the ones in use).
+    fn moved(&mut self, from: Option<&DeviceRef>, to: &DeviceRef, dsp: &DspSettings, volume: f32) -> Option<(DspSettings, f32)>;
+    /// The volume last in effect on device `id` in this mode (`direct`: Direct output), if known.
+    fn saved_volume(&mut self, id: &str, direct: bool) -> Option<f32>;
+    /// What the engine has in effect now on `device` (None: none opened yet), in this mode: kept
+    /// as the device's own. `in_use`: the engine changed it by itself (a safety cap, a change
+    /// meant for another device left out, a move), so the settings in use are written back too.
+    fn applied(&mut self, device: Option<&DeviceRef>, direct: bool, dsp: &DspSettings, volume: f32, in_use: bool);
+}
+
+/// The engine's `SoundBook` (`Cmd::SetProfiles`).
+pub type ProfileSource = Box<dyn SoundBook>;
+
+/// The volume a device without a volume of its own may play at with Direct output: 30 % on the
+/// volume slider (the engine's volume is the slider's value squared). Direct output sends full
+/// scale to the DAC, with no system volume after it.
+pub const NEW_DIRECT_VOLUME: f32 = 0.09;
 
 /// When playback should pause by itself.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -397,6 +440,11 @@ pub struct Status {
     pub device_missing: Option<DeviceMissing>,
     /// Goes up when the system's output devices changed (the device list is out of date).
     pub devices: u64,
+    /// Goes up each time playback moves to another device or output mode: what the volume and
+    /// sound settings in the window are for (`Cmd::SetVolumeFor`).
+    pub device_gen: u64,
+    /// Goes up each time a new queue is loaded (`Cmd::Extend`'s `queue`).
+    pub queue_gen: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -436,6 +484,8 @@ pub struct Engine {
     shared: Arc<Shared>,
     /// The order shuffle put aside (`Worker::unshuffled`), for the saved session.
     unshuffled: Arc<Mutex<Arc<Vec<String>>>>,
+    /// `Status::device_gen`, as the worker has it right now (it alone writes it).
+    device_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Engine {
@@ -470,16 +520,32 @@ impl Engine {
         let shared2 = shared.clone();
         let unshuffled: Arc<Mutex<Arc<Vec<String>>>> = Default::default();
         let unshuffled2 = unshuffled.clone();
+        let device_gen: Arc<std::sync::atomic::AtomicU64> = Default::default();
+        let device_gen2 = device_gen.clone();
         std::thread::Builder::new()
             .name("cadence-audio".into())
             .spawn(move || {
                 let mut w = Worker::new(rx, status2, Box::new(on_status), shared2, volume, dsp, repeat, shuffle);
+                // Tests that start the whole core (backup's) never open this computer's devices:
+                // no device is listed, and nothing would be opened if one were.
+                #[cfg(test)]
+                {
+                    w.null_output = true;
+                    w.list_devices = || Ok(devices::Present::default());
+                }
                 w.memory = unshuffled2;
+                w.device_gen = device_gen2;
                 w.choice = device;
                 w.run()
             })
             .expect("audio thread");
-        Self { tx, status, shared, unshuffled }
+        Self { tx, status, shared, unshuffled, device_gen }
+    }
+
+    /// Which device (and mode) the engine is playing on now, as a number that goes up each time
+    /// that changes (`Status::device_gen`): volume and sound settings are stamped with it.
+    pub fn device_generation(&self) -> u64 {
+        self.device_gen.load(Ordering::Acquire)
     }
 
     /// The order shuffle put aside, to put back when it's turned off (empty: none).
@@ -641,13 +707,54 @@ struct Worker {
     /// Windows: what WASAPI says about devices coming, going, and the default changing.
     #[cfg(windows)]
     watcher: Option<devices::watch::Watcher>,
+    /// Windows: when to try starting the watcher (again), and how many times it failed (None:
+    /// given up, or running).
+    #[cfg(windows)]
+    watch_next: Option<Instant>,
+    #[cfg(windows)]
+    watch_tries: u32,
+    /// The watcher's counters (None: nothing tells Cadence about devices; off Windows, or the
+    /// watcher isn't running).
+    events: Option<Arc<devices::Events>>,
     /// The watcher's count when last looked at.
     devices_seen: u64,
     /// `Status::devices`.
     devices_seq: u64,
+    /// The device list as last read, and the watcher's count then (None: read it again next
+    /// time). With the watcher running, opening the output (every rate switch in exclusive mode)
+    /// doesn't ask the system for the list again until something changed.
+    listed: devices::Present,
+    listed_seen: Option<u64>,
+    /// `Status::device_gen` (shared with `Engine::device_generation`; only this thread writes it).
+    device_gen: Arc<std::sync::atomic::AtomicU64>,
+    /// The sound settings in effect, as one (what `SoundBook::applied` is told).
+    applied_dsp: DspSettings,
+    /// The volume last in effect on each device (by id; "" before any) in each mode (true:
+    /// Direct output) this run: playback coming to a device is never louder than this.
+    levels: std::collections::HashMap<(String, bool), f32>,
+    /// What's in effect changed: tell the book (`SoundBook::applied`) on this round.
+    book_dirty: bool,
+    /// ...and the engine changed it by itself (a safety cap, a dropped change, a move): the
+    /// settings in use are written back too.
+    book_sync: bool,
+    /// Told once (as the status error, like a skipped song): the volume was lowered for safety.
+    notice: Option<String>,
+    /// The output being opened now is an automatic move while playing (the chosen device is back,
+    /// the system default changed).
+    auto_move: bool,
+    /// The automatic move went to a much louder level: the song stays paused there.
+    hold: bool,
+    /// The mode the output last opened actually ran in (true: Direct output; a Direct output that
+    /// fell back to the mixer is false); None: none opened since the mode was last changed.
+    open_mode: Option<bool>,
+    /// `Status::queue_gen`.
+    queue_gen: u64,
     /// Tests: "open" a silent output instead of a device, and count the opens.
     #[cfg(test)]
     null_output: bool,
+    /// Tests: the silent output fails to open, as a device that's listed but gone.
+    #[cfg(test)]
+    fail_opens: bool,
     #[cfg(test)]
     opens: u32,
 }
@@ -680,6 +787,7 @@ impl Worker {
         repeat: Repeat,
         shuffle: bool,
     ) -> Self {
+        let applied_dsp = dsp.clone();
         Self {
             rx,
             shared,
@@ -747,22 +855,42 @@ impl Worker {
             list_devices: system_devices,
             #[cfg(windows)]
             watcher: None,
+            #[cfg(windows)]
+            watch_next: Some(Instant::now()),
+            #[cfg(windows)]
+            watch_tries: 0,
+            events: None,
             devices_seen: 0,
             devices_seq: 0,
+            listed: devices::Present::default(),
+            listed_seen: None,
+            device_gen: Default::default(),
+            applied_dsp,
+            levels: Default::default(),
+            book_dirty: false,
+            book_sync: false,
+            notice: None,
+            auto_move: false,
+            hold: false,
+            open_mode: None,
+            queue_gen: 0,
             #[cfg(test)]
             null_output: false,
+            #[cfg(test)]
+            fail_opens: false,
             #[cfg(test)]
             opens: 0,
         }
     }
 
     fn run(mut self) {
+        // (Not in tests: nothing there asks Windows about this computer's devices.)
         #[cfg(windows)]
-        {
+        if !cfg!(test) {
             // cpal's device enumerator is made by the first thread that lists devices and lives
             // with it: this one, which lives as long as Cadence (as before devices could be chosen).
             let _ = (self.list_devices)();
-            self.watcher = devices::watch::start();
+            self.keep_watching();
         }
         // Exclusive mode takes the device only once something plays.
         if !self.exclusive {
@@ -770,8 +898,14 @@ impl Worker {
         }
         loop {
             let busy = self.decoding && self.has_room();
+            // Paused or stopped, nothing to decode: a command still wakes it at once, and device
+            // changes, a failed output and the paused status wait at most a second (polling every
+            // 20 ms was 50 wake-ups a second all day while nothing played).
+            let idle = !self.shared.playing.load(Ordering::Relaxed);
             match self.rx.recv_timeout(if busy {
                 Duration::ZERO
+            } else if idle {
+                IDLE_POLL
             } else {
                 Duration::from_millis(20)
             }) {
@@ -785,14 +919,18 @@ impl Worker {
             if self.shared.failed.swap(false, Ordering::AcqRel) {
                 self.recover_output();
             }
-            // Devices came or went, or the default changed (two atomic reads when nothing did).
+            // The watcher didn't start: tried again a few times, a while apart.
             #[cfg(windows)]
-            if let Some(seen) = self.watcher.as_ref().map(|w| w.events.changed.load(Ordering::Acquire))
+            if !cfg!(test) {
+                self.keep_watching();
+            }
+            // Devices came or went, or the default changed (two atomic reads when nothing did).
+            if let Some(seen) = self.events.as_ref().map(|e| e.changed.load(Ordering::Acquire))
                 && seen != self.devices_seen
             {
                 self.devices_seen = seen;
                 self.devices_seq += 1;
-                let default = self.watcher.as_ref().is_some_and(|w| w.events.default_changed.swap(false, Ordering::AcqRel));
+                let default = self.events.as_ref().is_some_and(|e| e.default_changed.swap(false, Ordering::AcqRel));
                 self.devices_changed(default);
             }
             #[cfg(target_os = "android")]
@@ -810,6 +948,10 @@ impl Worker {
             self.fill();
             self.update_position();
             self.release_if_idle();
+            // What's in effect changed this round: written into the settings once, not per command.
+            if self.book_dirty {
+                self.sync_book();
+            }
             let interval = if self.shared.playing.load(Ordering::Relaxed) {
                 250
             } else {
@@ -824,6 +966,11 @@ impl Worker {
     // ---------- output device ----------
 
     /// Opens the output: exclusive at `rate` when that's enabled (falling back to shared mode), else shared.
+    ///
+    /// Every output Cadence opens comes through here (whatever the reason: a song starting, a seek,
+    /// a rate switch, the device chosen, the default followed, the chosen device back, a mode
+    /// change, a fallback), and so through the hearing-safety rule (`hold_to_limit`) before the
+    /// first sample.
     fn open_output(&mut self, rate: Option<u32>) {
         // Release the current device first: exclusive mode needs it free.
         self.out = None;
@@ -831,20 +978,44 @@ impl Worker {
         if !self.opened_at.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
             self.quick_failures = 0;
         }
+        let auto_move = std::mem::take(&mut self.auto_move);
         // Which device (None: the system default, the platform's own way).
         let Ok(device) = self.device_to_open() else {
             self.dirty = true;
             return;
         };
+        let before = self.volume;
         // Another device: its own sound settings first (Direct output is one of them).
-        if let Some(d) = &device {
-            self.switched_to(d);
+        let moved = match &device {
+            Some(d) => self.switched_to(d),
+            None => false,
+        };
+        // The mode it opens in (falling back to the mixer only ever makes it quieter).
+        let direct = self.exclusive && !self.plain && rate.is_some();
+        self.hold_to_limit(direct);
+        if moved && auto_move && self.volume > before * 2.0 + 1e-6 {
+            // An automatic move to a device whose own level is much higher than what was playing:
+            // levels of different devices aren't comparable, but a jump nobody asked for is the
+            // one to avoid, so the song waits there for Play.
+            let name = device.as_ref().map(|d| devices::display_name(&d.name)).unwrap_or_default();
+            log::info!("moved to {name} by itself at a much higher volume ({before:.3} → {:.3}): paused there", self.volume);
+            self.hold = true;
+            self.notice = Some(format!("Playback moved to {name}, which is set much louder, so it's paused. Press Play to carry on."));
+        }
+        #[cfg(test)]
+        if self.null_output && self.fail_opens {
+            let chosen = !self.stand_in && device.as_ref().is_some_and(|d| self.choice.as_ref().is_some_and(|c| c.id == d.id));
+            self.open_failed(device, chosen, anyhow::anyhow!("the test device won't open"));
+            self.dirty = true;
+            return;
         }
         #[cfg(test)]
         if self.null_output {
             let (prod, _) = ringbuf::traits::Split::split(ringbuf::HeapRb::<f32>::new(1 << 16));
             let exclusive = self.exclusive;
             self.out = Some(Output { backend: output::Backend::Null, prod, rate: rate.unwrap_or(44_100), channels: 2, device: format!("test exclusive={exclusive}"), bits: None });
+            self.open_mode = Some(direct);
+            self.remember_level();
             self.opened_at = Some(Instant::now());
             self.opens += 1;
             self.dirty = true;
@@ -852,10 +1023,22 @@ impl Worker {
         }
         // Windows always names the device (also the default: see `devices`); elsewhere the system
         // default is opened as before, so it keeps following the system's own changes.
-        let id: Option<&str> = match &device {
+        let mut id: Option<&str> = match &device {
             Some(d) if cfg!(windows) || (self.choice.is_some() && !self.stand_in) => Some(d.id.as_str()),
             _ => None,
         };
+        // Linux: a sound card's raw entry can't be opened through the mixer while PipeWire or
+        // PulseAudio holds the card (only Direct output uses it): the system default instead.
+        const RAW_NOTE: &str = "can only be played on with Direct output (the sound server holds the card), so Cadence is playing on the system default.";
+        if self.note.as_deref().is_some_and(|n| n.ends_with(RAW_NOTE)) {
+            self.note = None;
+        }
+        if !direct && id.is_some_and(devices::raw_hardware) && devices::sound_server(&self.listed) {
+            let name = device.as_ref().map(|d| devices::display_name(&d.name)).unwrap_or_default();
+            log::warn!("{name} is a sound card's own entry, which the sound server holds: playing on the system default");
+            self.note = Some(format!("“{name}” {RAW_NOTE}"));
+            id = None;
+        }
         let opened = match (self.exclusive, rate) {
             _ if self.plain => output::open_shared(self.shared.clone(), id),
             #[cfg(windows)]
@@ -914,6 +1097,7 @@ impl Worker {
             }
             _ => output::open_shared(self.shared.clone(), id),
         };
+        let chosen = !self.stand_in && id.is_some() && device.as_ref().is_some_and(|d| self.choice.as_ref().is_some_and(|c| c.id == d.id));
         match opened {
             Ok(out) => {
                 log::info!(
@@ -923,17 +1107,168 @@ impl Worker {
                     out.channels,
                     out.exclusive()
                 );
+                self.open_mode = Some(out.exclusive());
                 self.out = Some(out);
+                self.remember_level();
                 self.opened_at = Some(Instant::now());
                 self.error = None;
             }
-            Err(e) => {
+            Err(e) => self.open_failed(device, chosen, e),
+        }
+        self.dirty = true;
+    }
+
+    /// The output couldn't be opened on `device` (`chosen`: the device the listener chose).
+    fn open_failed(&mut self, device: Option<DeviceRef>, chosen: bool, e: anyhow::Error) {
+        self.out = None;
+        match device.filter(|_| chosen) {
+            Some(d) => {
+                // Still listed but gone (it was just unplugged, and the list hasn't caught up), or
+                // not taking streams for now: as if it weren't connected. Paused, and tried again
+                // when the system says devices changed (or Play is pressed); never another device.
+                log::warn!("{} couldn't be opened ({e:#}): waiting for it", d.name);
+                self.listed_seen = None;
+                let fallback = self.listed.default_name();
+                self.wait_for(d, fallback);
+            }
+            None => {
                 log::error!("no output device: {e:#}");
-                self.out = None;
                 self.error = Some(format!("No audio output: {e}"));
             }
         }
+    }
+
+    /// The hearing-safety rule, for the device being opened (or open) in this mode (`direct`:
+    /// Direct output): the volume may not be higher than the one last in effect on that device in
+    /// that mode (this run's, else the book's, which is kept across runs); a device with none
+    /// plays at no more than `NEW_DIRECT_VOLUME` with Direct output, at the volume in use through
+    /// the mixer. Lowered, the volume is told (the status carries it, so the slider follows) and
+    /// kept. Whatever any other part of Cadence did to the settings, nothing louder gets past here.
+    fn hold_to_limit(&mut self, direct: bool) {
+        let key = self.device_key();
+        let sane = |v: Option<f32>| v.filter(|v| v.is_finite() && (0.0..=1.0).contains(v));
+        let limit = sane(self.levels.get(&(key.clone(), direct)).copied())
+            .or_else(|| sane(self.profiles.as_mut().and_then(|b| b.saved_volume(&key, direct))))
+            .or(direct.then_some(NEW_DIRECT_VOLUME));
+        if let Some(limit) = limit.filter(|&l| self.volume > l + 1e-6) {
+            let name = self.device.as_ref().map(|d| devices::display_name(&d.name)).unwrap_or_else(|| "this output".into());
+            log::warn!("volume {:.3} is above the {limit:.3} last used on {name}{}: lowered", self.volume, if direct { " with Direct output" } else { "" });
+            self.set_volume(limit);
+            self.book_dirty = true;
+            self.book_sync = true;
+            self.notice = Some(format!("Volume lowered to {}% for {name}{}.", (limit.sqrt() * 100.0).round(), if direct { " (Direct output)" } else { "" }));
+        }
+        // A level the book doesn't have yet (the first open of a device in a mode) is kept, so the
+        // next run knows it too.
+        if self.levels.insert((key, direct), self.volume) != Some(self.volume) {
+            self.book_dirty = true;
+        }
+    }
+
+    /// Which device the volume in effect is for ("" before any was opened; Android, which routes
+    /// by itself).
+    fn device_key(&self) -> String {
+        self.device.as_ref().map(|d| d.id.clone()).unwrap_or_default()
+    }
+
+    /// The mode the volume is heard in: the one the output last opened in actually runs in (also
+    /// while it's let go: a Direct output that fell back to the mixer counts as the mixer), else
+    /// the one it would open in.
+    fn level_mode(&self) -> bool {
+        self.open_mode.unwrap_or(self.exclusive && !self.plain)
+    }
+
+    /// The volume in effect now is the device's, in the mode it's heard in.
+    fn remember_level(&mut self) {
+        let key = (self.device_key(), self.level_mode());
+        self.levels.insert(key, self.volume);
+    }
+
+    /// The listener set the volume (for the device open now).
+    fn user_volume(&mut self, v: f32) {
+        self.set_volume(v);
+        self.remember_level();
+        self.book_dirty = true;
+    }
+
+    /// The listener changed the sound settings (for the device open now).
+    fn user_dsp(&mut self, dsp: DspSettings) {
+        // A new loudness gain has to start at the current position, not half a second later.
+        if self.set_dsp(dsp) {
+            self.restart_here(None);
+        }
+        self.book_dirty = true;
+    }
+
+    /// Whether a command stamped `gen` is for the device (and mode) open now. One that isn't was
+    /// meant for the one before: dropped, and the settings are written back as they are in effect
+    /// (so the window shows what's heard).
+    fn for_this_device(&mut self, stamp: u64, what: &str) -> bool {
+        let now = self.device_gen.load(Ordering::Acquire);
+        if stamp == now {
+            return true;
+        }
+        log::info!("a {what} change meant for the output before ({stamp}, now {now}) was left out");
+        self.book_dirty = true;
+        self.book_sync = true;
+        false
+    }
+
+    /// Playback moved to another device or output mode: commands stamped before are stale.
+    fn next_device_gen(&mut self) {
+        self.device_gen.fetch_add(1, Ordering::AcqRel);
         self.dirty = true;
+    }
+
+    /// Tells the book what's in effect now (it writes it into the settings).
+    fn sync_book(&mut self) {
+        self.book_dirty = false;
+        let in_use = std::mem::take(&mut self.book_sync);
+        let (device, direct) = (self.device.clone(), self.level_mode());
+        if let Some(b) = self.profiles.as_mut() {
+            b.applied(device.as_ref(), direct, &self.applied_dsp, self.volume, in_use);
+        }
+    }
+
+    /// Windows: starts the device watcher, and if it doesn't start, tries again a few times with
+    /// longer and longer waits (without it, following the system default and carrying on when the
+    /// chosen device is back don't work).
+    #[cfg(windows)]
+    fn keep_watching(&mut self) {
+        if self.watcher.is_some() || !self.watch_next.is_some_and(|t| Instant::now() >= t) {
+            return;
+        }
+        match devices::watch::start() {
+            Some(w) => {
+                if self.watch_tries > 0 {
+                    log::info!("hearing about output device changes now (after {} failed tries)", self.watch_tries);
+                }
+                self.events = Some(w.events.clone());
+                self.watcher = Some(w);
+                self.devices_seen = 0;
+                self.listed_seen = None;
+                self.watch_next = None;
+                if self.watch_tries > 0 {
+                    // Whatever changed meanwhile went unheard.
+                    self.devices_seq += 1;
+                    self.devices_changed(true);
+                }
+                self.watch_tries = 0;
+            }
+            None => {
+                self.watch_tries += 1;
+                self.watch_next = devices::watch_retry_delay(self.watch_tries).map(|d| {
+                    log::warn!("the output device watcher didn't start (try {}); trying again in {d:?}", self.watch_tries);
+                    Instant::now() + d
+                });
+                if self.watch_next.is_none() {
+                    log::error!(
+                        "the output device watcher couldn't be started after {} tries: until Cadence restarts it won't follow the system default, nor carry on by itself when the chosen device is back (the Sound page's device list and Play still find it)",
+                        self.watch_tries
+                    );
+                }
+            }
+        }
     }
 
     /// The device changed (unplugged, new default...): reopen and continue where we were.
@@ -954,6 +1289,8 @@ impl Worker {
                 if cfg!(target_os = "android") { "Android mixer" } else { "system mixer" }
             ));
         }
+        // The device may have gone: the list is read afresh.
+        self.listed_seen = None;
         self.reopen(true);
     }
 
@@ -978,6 +1315,17 @@ impl Worker {
             None if !self.exclusive => self.open_output(None),
             None => {}
         }
+        // (Only for the output opened just now.)
+        self.auto_move = false;
+        self.hold = false;
+    }
+
+    /// `reopen_with` for a move nobody asked for just now (the chosen device is back, the system
+    /// default changed): the safety rule holds as for any open, and a much louder level waits for
+    /// Play (`open_output`).
+    fn move_by_itself(&mut self, play: bool) {
+        self.auto_move = play;
+        self.reopen_with(play);
     }
 
     /// The device to open now: the chosen one, or the system default (also while standing in for
@@ -989,7 +1337,7 @@ impl Worker {
             return Ok(None);
         }
         let chosen = if self.stand_in { None } else { self.choice.clone() };
-        let present = match (self.list_devices)() {
+        let present = match self.present_devices() {
             Ok(p) => p,
             Err(e) => {
                 log::warn!("can't list the output devices: {e:#}");
@@ -1015,6 +1363,21 @@ impl Worker {
         }
     }
 
+    /// The connected devices: as last read while the watcher says nothing changed since (no
+    /// enumeration on every rate switch), else read now. Without a watcher (off Windows, or it
+    /// didn't start) always read now.
+    fn present_devices(&mut self) -> Result<devices::Present> {
+        let seen = self.events.as_ref().map(|e| e.changed.load(Ordering::Acquire));
+        if seen.is_some() && seen == self.listed_seen {
+            return Ok(self.listed.clone());
+        }
+        let present = (self.list_devices)()?;
+        self.listed = present.clone();
+        // (Read before listing: a change during it means reading again next time.)
+        self.listed_seen = seen;
+        Ok(present)
+    }
+
     /// The chosen device can't be opened: pause and wait for it. Playback carries on by itself if
     /// it was playing and the device is back soon (`devices::Waiting::resumes`).
     fn wait_for(&mut self, device: DeviceRef, fallback: Option<String>) {
@@ -1035,19 +1398,24 @@ impl Worker {
     }
 
     /// Playback is about to open `d`. Another device than before: its own sound settings and
-    /// volume come into use (before it opens, so the first sample already has them).
-    fn switched_to(&mut self, d: &DeviceRef) {
+    /// volume come into use (before it opens, so the first sample already has them). Returns
+    /// whether it's another device.
+    fn switched_to(&mut self, d: &DeviceRef) -> bool {
         if let Some(cur) = self.device.as_mut().filter(|c| c.id == d.id) {
             if !d.name.trim().is_empty() {
                 cur.name = d.name.clone();
             }
-            return;
+            return false;
         }
         log::info!("output device: {}", d.name);
-        self.device = Some(d.clone());
-        self.dirty = true;
+        // The volume in effect where playback leaves is that device's (it never comes back louder).
+        self.remember_level();
+        let from = self.device.replace(d.clone());
+        // Before the book writes anything for the new device: changes still on their way for the
+        // old one are dropped from here on.
+        self.next_device_gen();
         let profile = match self.profiles.as_mut() {
-            Some(f) => f(d),
+            Some(b) => b.moved(from.as_ref(), d, &self.applied_dsp, self.volume),
             None => None,
         };
         if let Some((dsp, volume)) = profile {
@@ -1056,16 +1424,27 @@ impl Worker {
             // Live where it can be; whatever needs a restart has it as this device opens.
             self.take_dsp(dsp);
         }
+        self.book_dirty = true;
+        self.book_sync = true;
+        true
     }
 
     /// Devices came or went, or the default changed (Windows tells; elsewhere `Cmd::CheckDevices`).
+    ///
+    /// Known limit, macOS and Linux: nothing tells Cadence that a device came back, so a chosen
+    /// device that's back is only noticed when the Sound page lists the devices (which sends
+    /// `CheckDevices`) or when Play is pressed (`play` reads the list afresh while waiting); playback
+    /// doesn't carry on by itself there. (The system default is opened the system's own way there,
+    /// so the system moves it.)
     fn devices_changed(&mut self, default_changed: bool) {
         self.dirty = true;
         let following = self.choice.is_none() || self.stand_in;
         if self.missing.is_none() && !self.stand_in && !(default_changed && following) {
             return;
         }
-        let Ok(present) = (self.list_devices)() else { return };
+        // Something changed: read afresh.
+        self.listed_seen = None;
+        let Ok(present) = self.present_devices() else { return };
         if let Some(w) = self.missing.clone() {
             if present.has(&w.device.id) {
                 // Back: carry on if it was playing and that wasn't long ago; else stay paused
@@ -1075,6 +1454,12 @@ impl Worker {
                 self.missing = None;
                 if resume {
                     self.reopen_with(true);
+                    // Listed but not opening yet (`open_output` waits for it again): still waiting
+                    // as before, to carry on when it really is back.
+                    if let Some(m) = self.missing.as_mut().filter(|m| m.device.id == w.device.id) {
+                        m.since = w.since;
+                        m.resume = w.resume;
+                    }
                 }
             } else if let Some(m) = self.missing.as_mut() {
                 m.fallback = present.default_name();
@@ -1085,7 +1470,7 @@ impl Worker {
             log::info!("the chosen output device is back; playing there again");
             self.stand_in = false;
             let playing = self.shared.playing.load(Ordering::Relaxed);
-            self.reopen_with(playing);
+            self.move_by_itself(playing);
             return;
         }
         // Following the system default: a new default (another device picked in the system's sound
@@ -1094,11 +1479,16 @@ impl Worker {
         if default_changed && following && self.out.is_some() && new.is_some() && new != self.device.as_ref().map(|d| d.id.as_str()) {
             log::info!("the default output changed; playing there");
             let playing = self.shared.playing.load(Ordering::Relaxed);
-            self.reopen_with(playing);
+            self.move_by_itself(playing);
         }
     }
 
     fn set_volume(&mut self, v: f32) {
+        // (A damaged settings file or a bad message can't make it NaN: the volume stays.)
+        if !v.is_finite() {
+            log::warn!("ignored volume {v}");
+            return;
+        }
         self.volume = v.clamp(0.0, 1.0);
         self.shared.volume.store(self.volume.to_bits(), Ordering::Relaxed);
     }
@@ -1212,7 +1602,18 @@ impl Worker {
                 self.queue = items;
                 self.start_at(0, 0.0, true);
             }
-            Cmd::Extend { items, auto } => self.extend(items, auto),
+            Cmd::Extend { items, auto, queue } => {
+                if queue.is_none_or(|q| q == self.queue_gen) {
+                    self.extend(items, auto);
+                }
+            }
+            Cmd::AlbumsDone { queue } => {
+                // Every album played: the shuffle ends (Autoplay, when it's on, carries on).
+                if queue == self.queue_gen && self.albums {
+                    log::info!("album shuffle: every album has played");
+                    self.albums = false;
+                }
+            }
             Cmd::StopAt(at) => {
                 // On the playing song or one still to come.
                 self.stop_mark = at.filter(|&i| i < self.queue.len() && self.play_index.is_some_and(|pi| i >= pi));
@@ -1384,11 +1785,19 @@ impl Worker {
                     }
                 }
             }
-            Cmd::SetVolume(v) => self.set_volume(v),
-            Cmd::SetDsp(dsp) => {
-                // A new loudness gain has to start at the current position, not half a second later.
-                if self.set_dsp(dsp) {
-                    self.restart_here(None);
+            Cmd::SetVolume(v) => self.user_volume(v),
+            Cmd::SetVolumeFor { volume, device_gen } => {
+                if self.for_this_device(device_gen, "volume") {
+                    self.user_volume(volume);
+                }
+            }
+            Cmd::SetDsp(dsp) => self.user_dsp(dsp),
+            Cmd::SetDspFor { dsp, device_gen } => {
+                if self.for_this_device(device_gen, "sound settings") {
+                    self.user_dsp(dsp);
+                } else {
+                    // The window loads the settings in effect again.
+                    self.profile_seq += 1;
                 }
             }
             Cmd::SetDevice(choice) => {
@@ -1413,9 +1822,11 @@ impl Worker {
             Cmd::CheckDevices => self.devices_changed(false),
             Cmd::SetProfiles(source) => {
                 self.profiles = source;
-                // The device already open (Cadence just started): its own settings.
-                let profile = match (self.profiles.as_mut(), self.device.as_ref()) {
-                    (Some(f), Some(d)) => f(d),
+                // The device already open (Cadence just started; opened before the book came):
+                // its own settings, as for a move from nothing.
+                let device = self.device.clone();
+                let profile = match (self.profiles.as_mut(), device.as_ref()) {
+                    (Some(b), Some(d)) => b.moved(None, d, &self.applied_dsp, self.volume),
                     _ => None,
                 };
                 if let Some((dsp, volume)) = profile {
@@ -1424,6 +1835,14 @@ impl Worker {
                     if self.set_dsp(dsp) {
                         self.restart_here(None);
                     }
+                    self.book_sync = true;
+                }
+                // The book knows this device's level from before: held to it (no reopen needed);
+                // and it's told which device is open (its record is repaired if it says otherwise).
+                if device.is_some() {
+                    let direct = self.level_mode();
+                    self.hold_to_limit(direct);
+                    self.book_dirty = true;
                 }
             }
             Cmd::SetRepeat(r) => {
@@ -1482,6 +1901,7 @@ impl Worker {
     /// Takes new sound settings (filters change live); doesn't touch the output. Returns (the song
     /// must restart, the output mode changed).
     fn take_dsp(&mut self, dsp: DspSettings) -> (bool, bool) {
+        self.applied_dsp = dsp.clone();
         let leveling_changed = dsp.leveling != self.leveling || dsp.tone != self.tone_settings;
         self.tone_settings = dsp.tone;
         let mode_changed = dsp.exclusive != self.exclusive
@@ -1493,6 +1913,10 @@ impl Worker {
             // Changing the mode tries it again.
             self.plain = false;
             self.quick_failures = 0;
+            self.open_mode = None;
+            // A volume on its way for the other mode isn't for this one (Direct output has no
+            // system volume after it).
+            self.next_device_gen();
         }
         self.vocals.set_amount(dsp.vocal_cut);
         self.eq.set_settings(dsp.eq);
@@ -1541,6 +1965,9 @@ impl Worker {
 
     /// A new queue replaces the old one: what belonged to the old one goes.
     fn new_queue(&mut self) {
+        // What was asked for the old queue (its next album, Autoplay's songs) isn't for this one,
+        // and this one may be asked for anew (`upnext`), also when it's the same list again.
+        self.queue_gen += 1;
         self.set_unshuffled(Vec::new());
         self.stop_mark = None;
         self.albums = false;
@@ -1600,6 +2027,9 @@ impl Worker {
             return;
         }
         let at = self.queue.len();
+        let before = self.play_index.map(|pi| self.auto_next(pi));
+        // The song prepared after the playing one is the queue going round (Repeat All).
+        let wrapped = self.play_index.is_some_and(|pi| self.boundaries.iter().skip(1).any(|b| b.index <= pi));
         self.queue.extend(items.into_iter().map(|mut q| {
             q.auto = auto;
             q
@@ -1609,10 +2039,50 @@ impl Worker {
             // They came after the queue ran out: play on with them.
             self.ran_dry = false;
             self.start_at(at, 0.0, true);
-        } else if !self.finished && !self.decoding && self.switch_pending.is_none() && self.play_index.is_some() && self.dec_index + 1 == at && self.crossfade.is_none() {
+        } else if !self.finished && !wrapped && !self.decoding && self.switch_pending.is_none() && self.play_index.is_some() && self.dec_index + 1 == at && self.crossfade.is_none() {
             // The decoder had already reached the end of the queue: it carries on into them.
             self.finish_track();
+        } else if let Some(pi) = self.play_index
+            && !self.finished
+            && before != Some(self.auto_next(pi))
+            && self.moved_on(pi)
+        {
+            // What was prepared next (the first song again, under Repeat All) isn't next any
+            // more: the new songs come first.
+            self.restart_here(None);
         }
+        // An album shuffle's albums that have played go (the one before the playing one stays,
+        // for Prev): a long session doesn't grow the queue without end.
+        if !auto && self.albums {
+            self.trim_played_albums();
+        }
+    }
+
+    /// Takes the albums before the previous one out of the front of the queue (album shuffle).
+    fn trim_played_albums(&mut self) {
+        let Some(pi) = self.play_index else { return };
+        let start_of = |q: &[QueueItem], mut i: usize| {
+            while i > 0 && q[i - 1].album_id == q[i].album_id {
+                i -= 1;
+            }
+            i
+        };
+        let playing = start_of(&self.queue, pi.min(self.queue.len().saturating_sub(1)));
+        if playing == 0 {
+            return;
+        }
+        let keep = start_of(&self.queue, playing - 1);
+        // Something prepared from before there (the queue going round): not now.
+        let prepared_before = self.dec_index < keep
+            || self.switch_pending.is_some_and(|i| i < keep)
+            || self.crossfade.as_ref().is_some_and(|x| x.index < keep)
+            || self.boundaries.iter().any(|b| b.index < keep);
+        if keep == 0 || prepared_before {
+            return;
+        }
+        log::info!("album shuffle: {keep} songs of albums already played leave the queue");
+        self.queue.drain(..keep);
+        self.shift_indices(keep, -(keep as isize));
     }
 
     /// Whether the song after `pi` is already being decoded or buffered for the device, or waiting
@@ -1715,6 +2185,11 @@ impl Worker {
         if self.queue.is_empty() {
             return;
         }
+        // Waiting for the chosen device: Play looks for it afresh (where nothing tells Cadence
+        // devices changed, this is how one that's back is found).
+        if self.missing.is_some() {
+            self.listed_seen = None;
+        }
         let ended = !self.decoding
             && self.pending.is_empty()
             && self.shared.consumed.load(Ordering::Acquire) >= self.written;
@@ -1778,6 +2253,8 @@ impl Worker {
                     let offset = offset.unwrap_or(secs);
                     self.play_index = Some(index);
                     self.position = offset;
+                    // Moved by itself to a much louder device: paused there (`open_output`).
+                    let play = play && !std::mem::take(&mut self.hold);
                     // The chosen device isn't connected: stay paused; asked to play, carry on
                     // when it's back (if that's soon).
                     let play = match self.missing.as_mut() {
@@ -2392,8 +2869,9 @@ impl Worker {
             shuffle: self.shuffle,
             source: current.map(|b| b.info.clone()),
             output,
-            // A skipped song is told once; a lasting problem (no device) comes first.
-            error: self.error.clone().or_else(|| self.skipped.take()),
+            // A skipped song is told once, and so is a volume lowered for safety; a lasting
+            // problem (no device) comes first.
+            error: self.error.clone().or_else(|| self.skipped.take()).or_else(|| self.notice.take()),
             stop_after: self.stop.clone(),
             stop_mark: self.stop_mark,
             autoplay_from: self.auto_start(),
@@ -2411,6 +2889,8 @@ impl Worker {
                 resume: w.resume,
             }),
             devices: self.devices_seq,
+            device_gen: self.device_gen.load(Ordering::Acquire),
+            queue_gen: self.queue_gen,
         };
         (self.on_status)(&status);
         *self.status.lock() = status;
@@ -3057,7 +3537,7 @@ mod tests {
         w.autoplay = true;
         w.shared.playing.store(true, Ordering::Relaxed);
         let batch: Vec<QueueItem> = (0..10).map(|i| item(&format!("c{i}"))).collect();
-        w.handle(Cmd::Extend { items: batch, auto: true });
+        w.handle(Cmd::Extend { items: batch, auto: true, queue: None });
         assert_eq!((w.queue.len(), w.auto_start()), (14, Some(4)));
         assert_eq!(w.wants_more(), None, "a batch is enough for now");
         // The listener's songs go before Autoplay's.
@@ -3077,7 +3557,7 @@ mod tests {
         w.handle(Cmd::Enqueue { items: vec![item("e1")], next: false });
         assert_eq!(w.wants_more(), Some(More::Similar), "songs added: it may carry on after them");
         // Turning Autoplay off takes its songs out too.
-        w.handle(Cmd::Extend { items: vec![item("c1")], auto: true });
+        w.handle(Cmd::Extend { items: vec![item("c1")], auto: true, queue: None });
         w.handle(Cmd::SetAutoplay(false));
         assert_eq!(w.queue.len(), 6);
     }
@@ -3091,7 +3571,7 @@ mod tests {
         // The queue played out before the songs arrived: they play.
         w.drained();
         assert!(w.finished && w.ran_dry && !w.shared.playing.load(Ordering::Relaxed));
-        w.handle(Cmd::Extend { items: vec![more.clone()], auto: true });
+        w.handle(Cmd::Extend { items: vec![more.clone()], auto: true, queue: None });
         assert_eq!(w.play_index, Some(2));
         assert!(w.shared.playing.load(Ordering::Relaxed), "playing on");
         // The sleep timer's "end of this song" stopped it: they wait in the queue.
@@ -3100,7 +3580,7 @@ mod tests {
         w.stop = Some(StopAfter::Songs { left: 1 });
         w.drained();
         assert!(!w.ran_dry);
-        w.handle(Cmd::Extend { items: vec![more], auto: true });
+        w.handle(Cmd::Extend { items: vec![more], auto: true, queue: None });
         assert_eq!(w.play_index, Some(1));
         assert!(!w.shared.playing.load(Ordering::Relaxed));
         drop(w);
@@ -3117,7 +3597,7 @@ mod tests {
         w.shared.playing.store(true, Ordering::Relaxed);
         w.play_index = Some(0);
         assert_eq!(w.wants_more(), Some(More::Albums), "the next album, right away");
-        w.handle(Cmd::Extend { items: vec![item("b1"), item("b2")], auto: false });
+        w.handle(Cmd::Extend { items: vec![item("b1"), item("b2")], auto: false, queue: None });
         assert_eq!(w.wants_more(), None, "album B waits behind A");
         assert!(w.album_context(3) && w.album_context(4), "B plays as an album (gapless, album leveling)");
         assert!(w.queue.iter().all(|q| !q.auto));
@@ -3153,10 +3633,22 @@ mod tests {
 
     thread_local! {
         static DEVICES: std::cell::RefCell<devices::Present> = Default::default();
+        /// How many times the stand-in list was read.
+        static LISTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     }
 
     fn fake_devices() -> Result<devices::Present> {
+        LISTS.with(|n| n.set(n.get() + 1));
         Ok(DEVICES.with(|d| d.borrow().clone()))
+    }
+
+    /// The volume the renderer applies.
+    fn vol(w: &Worker) -> f32 {
+        f32::from_bits(w.shared.volume.load(Ordering::Relaxed))
+    }
+
+    fn stamp(w: &Worker) -> u64 {
+        w.device_gen.load(Ordering::Acquire)
     }
 
     /// The devices "connected" now: (id, is the default).
@@ -3305,20 +3797,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A profile source over a book of its own (as the app's, `profiles::source`, over the settings).
-    fn book_source(dsp: DspSettings, volume: f32, enabled: bool) -> (ProfileSource, Arc<Mutex<(crate::profiles::Profiles, DspSettings, f32)>>) {
-        let book = Arc::new(Mutex::new((crate::profiles::Profiles::default(), dsp, volume)));
-        let b = book.clone();
-        let source: ProfileSource = Box::new(move |d: &DeviceRef| {
-            if !enabled {
-                return None;
-            }
-            let mut g = b.lock();
-            let (p, dsp, volume) = &mut *g;
-            p.switch_to(d, dsp, volume);
-            Some((dsp.clone(), *volume))
-        });
-        (source, book)
+    /// The app's book (`profiles`) over settings of its own: the ones in use (`dsp`, `volume`),
+    /// with sound settings per device on or off.
+    fn book_source(dsp: DspSettings, volume: f32, enabled: bool) -> (ProfileSource, Arc<Mutex<crate::state::Settings>>) {
+        let settings = crate::state::Settings { dsp, volume, device_profiles: enabled, ..Default::default() };
+        let book = Arc::new(Mutex::new(settings));
+        (crate::profiles::settings_book(book.clone()), book)
     }
 
     #[test]
@@ -3339,7 +3823,7 @@ mod tests {
         dac.crossfeed.enabled = true;
         dac.exclusive = true;
         dac.tone.loudness = false;
-        book.lock().0.devices.insert("dac".into(), crate::profiles::Profile::of("dac name", &dac, 0.2));
+        book.lock().sound_profiles.devices.insert("dac".into(), crate::profiles::Profile::of("dac name", &dac, 0.2));
         w.handle(Cmd::SetDevice(Some(dref("dac"))));
         assert_eq!(w.opens, 2, "one reopen for the move, Direct output and all");
         assert_eq!((w.eq.settings().preset.as_str(), w.crossfeed.enabled(), w.exclusive, w.tone_settings.loudness), ("Rock", true, true, false));
@@ -3348,7 +3832,7 @@ mod tests {
         // Back to the speakers: theirs again.
         w.handle(Cmd::SetDevice(None));
         assert_eq!((w.opens, w.exclusive, w.volume, w.eq.settings().enabled), (3, false, 1.0, false));
-        assert_eq!(book.lock().0.devices["dac"].eq.preset, "Rock", "kept");
+        assert_eq!(book.lock().sound_profiles.devices["dac"].eq.preset, "Rock", "kept");
         drop(w);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3367,5 +3851,320 @@ mod tests {
         assert_eq!((on(&w), w.eq.settings().enabled, w.volume, w.profile_seq), (Some("dac"), true, 0.5, 0));
         drop(w);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The settings the engine starts with in these tests (`real_worker` turns Sound Check off).
+    fn base_dsp() -> DspSettings {
+        let mut d = DspSettings::default();
+        d.leveling.mode = loudness::LevelingMode::Off;
+        d
+    }
+
+    #[test]
+    fn settings_replaced_under_the_engine_never_open_a_device_at_full_scale() {
+        connect(&[("a", true), ("b", false), ("c", false)]);
+        let (mut w, dir) = device_worker("dev-restore", Some("a"));
+        let (source, book) = book_source(base_dsp(), 1.0, true);
+        w.handle(Cmd::SetProfiles(Some(source)));
+        w.sync_book();
+        assert_eq!((on(&w), w.volume, book.lock().sound_profiles.current.as_deref()), (Some("a"), 1.0, Some("a")));
+        // A restore brings another device's settings: `current` says b, Direct output on, full
+        // volume, b chosen; the engine is only sent the sound settings (as `backup` does).
+        let mut foreign = base_dsp();
+        foreign.exclusive = true;
+        {
+            let mut s = book.lock();
+            s.sound_profiles.current = Some("b".into());
+            s.sound_profiles.devices.insert("b".into(), crate::profiles::Profile::of("b name", &base_dsp(), 0.2));
+            s.dsp = foreign.clone();
+            s.volume = 1.0;
+            s.output_device = Some(dref("b"));
+        }
+        w.handle(Cmd::SetDsp(foreign));
+        w.sync_book();
+        // Direct output on a, but not at full scale: a has no Direct output volume yet.
+        assert_eq!(on(&w), Some("a"));
+        assert!(w.exclusive && w.out.as_ref().unwrap().device.contains("exclusive=true"));
+        assert!(w.volume <= NEW_DIRECT_VOLUME + 1e-6 && vol(&w) <= NEW_DIRECT_VOLUME + 1e-6, "{}", w.volume);
+        w.emit();
+        assert!(w.status.lock().error.as_deref().is_some_and(|n| n.starts_with("Volume lowered to 30% for a name")), "told: {:?}", w.status.lock().error);
+        assert_eq!(w.status.lock().volume, w.volume, "the slider follows");
+        {
+            let s = book.lock();
+            assert_eq!(s.sound_profiles.current.as_deref(), Some("a"), "repaired: a is the one open");
+            assert_eq!(s.volume, w.volume, "the settings say what's heard");
+            assert!(s.sound_profiles.devices["a"].exclusive);
+            assert_eq!(s.sound_profiles.devices["b"].volume, Some(0.2), "b's own is left alone");
+        }
+        // A change now is a's, not b's.
+        w.handle(Cmd::SetVolumeFor { volume: 0.05, device_gen: stamp(&w) });
+        w.sync_book();
+        assert_eq!(book.lock().sound_profiles.devices["a"].volume, Some(0.05));
+        assert_eq!(book.lock().sound_profiles.devices["b"].volume, Some(0.2));
+        // To b: its own volume, 0.2 (through the mixer, as its profile has it).
+        w.handle(Cmd::SetDevice(Some(dref("b"))));
+        assert_eq!((on(&w), w.volume, vol(&w), w.exclusive), (Some("b"), 0.2, 0.2, false));
+        // Turned up there, then Direct output turned on by the listener: b has no Direct output
+        // volume, so it starts at the cap (and says so).
+        w.handle(Cmd::SetVolumeFor { volume: 0.8, device_gen: stamp(&w) });
+        let mut direct = w.applied_dsp.clone();
+        direct.exclusive = true;
+        w.handle(Cmd::SetDspFor { dsp: direct, device_gen: stamp(&w) });
+        assert!(w.exclusive && w.volume <= NEW_DIRECT_VOLUME + 1e-6, "{}", w.volume);
+        assert!(w.notice.is_some());
+        // Turned up with Direct output (the listener's own), then on to c, never seen: the cap.
+        w.handle(Cmd::SetVolumeFor { volume: 0.5, device_gen: stamp(&w) });
+        assert_eq!(w.volume, 0.5);
+        w.handle(Cmd::SetDevice(Some(dref("c"))));
+        assert_eq!(on(&w), Some("c"));
+        assert!(w.exclusive && vol(&w) <= NEW_DIRECT_VOLUME + 1e-6, "{}", w.volume);
+        // And back to b with Direct output: exactly its own 0.5, not more.
+        w.handle(Cmd::SetVolumeFor { volume: 1.0, device_gen: stamp(&w) });
+        w.handle(Cmd::SetDevice(Some(dref("b"))));
+        assert_eq!((on(&w), w.exclusive, vol(&w)), (Some("b"), true, 0.5));
+        drop(w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn with_profiles_off_the_chosen_device_coming_back_is_never_louder_than_it_was() {
+        connect(&[("speakers", true), ("dac", false)]);
+        let (mut w, dir) = device_worker("dev-auto-off", Some("dac"));
+        let (source, _book) = book_source(base_dsp(), 1.0, false);
+        w.handle(Cmd::SetProfiles(Some(source)));
+        w.handle(Cmd::SetVolume(0.2));
+        // Unplugged: on the speakers for now, turned up there.
+        connect(&[("speakers", true)]);
+        w.recover_output();
+        w.handle(Cmd::UseDefaultForNow);
+        assert_eq!((on(&w), w.volume), (Some("speakers"), 0.2));
+        w.handle(Cmd::SetVolume(0.9));
+        // Back: playback moves back by itself, at the DAC's own 0.2, and plays on (quieter).
+        connect(&[("speakers", true), ("dac", false)]);
+        w.devices_changed(false);
+        assert_eq!((on(&w), playing(&w), w.volume, vol(&w)), (Some("dac"), true, 0.2, 0.2));
+        drop(w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn following_the_default_to_a_device_never_played_with_direct_output_starts_quietly() {
+        // No book at all: the rule is the engine's own.
+        connect(&[("speakers", true), ("dac", false)]);
+        let (mut w, dir) = device_worker("dev-auto-new", None);
+        let mut direct = base_dsp();
+        direct.exclusive = true;
+        w.handle(Cmd::SetDsp(direct));
+        assert!(w.volume <= NEW_DIRECT_VOLUME + 1e-6, "Direct output turned on: the cap first");
+        w.handle(Cmd::SetVolume(0.6));
+        connect(&[("speakers", false), ("dac", true)]);
+        w.devices_changed(true);
+        assert_eq!((on(&w), playing(&w)), (Some("dac"), true));
+        assert!(vol(&w) <= NEW_DIRECT_VOLUME + 1e-6, "{}", w.volume);
+        // Back to the speakers (the default again): their own 0.6.
+        connect(&[("speakers", true), ("dac", false)]);
+        w.devices_changed(true);
+        assert_eq!((on(&w), vol(&w)), (Some("speakers"), NEW_DIRECT_VOLUME), "never louder than what played: it went down meanwhile");
+        drop(w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_automatic_move_to_a_much_louder_device_waits_for_play() {
+        connect(&[("speakers", true), ("dac", false)]);
+        let (mut w, dir) = device_worker("dev-auto-loud", Some("dac"));
+        let (source, _book) = book_source(base_dsp(), 1.0, true);
+        w.handle(Cmd::SetProfiles(Some(source)));
+        w.handle(Cmd::SetVolumeFor { volume: 0.5, device_gen: stamp(&w) });
+        connect(&[("speakers", true)]);
+        w.recover_output();
+        w.handle(Cmd::UseDefaultForNow);
+        // Quiet on the speakers.
+        w.handle(Cmd::SetVolumeFor { volume: 0.05, device_gen: stamp(&w) });
+        connect(&[("speakers", true), ("dac", false)]);
+        w.devices_changed(false);
+        // On the DAC at its own 0.5, but paused there.
+        assert_eq!((on(&w), playing(&w), w.volume), (Some("dac"), false, 0.5));
+        assert!(w.notice.as_deref().is_some_and(|n| n.contains("paused")));
+        w.handle(Cmd::Play);
+        assert!(playing(&w));
+        drop(w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_volume_raised_while_direct_output_fell_back_to_the_mixer_is_not_used_with_direct_output() {
+        connect(&[("dac", true)]);
+        let (mut w, dir) = device_worker("dev-fallback", None);
+        let mut direct = base_dsp();
+        direct.exclusive = true;
+        w.handle(Cmd::SetDsp(direct));
+        w.handle(Cmd::SetVolume(0.2));
+        // Direct output wasn't available for a while: the mixer played, turned up there.
+        w.open_mode = Some(false);
+        w.handle(Cmd::SetVolume(0.8));
+        // Direct output works again as the next song starts: its own 0.2, not the mixer's 0.8.
+        w.out = None;
+        w.open_output(Some(44_100));
+        assert_eq!((w.open_mode, vol(&w)), (Some(true), 0.2));
+        drop(w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_change_meant_for_the_device_before_is_dropped() {
+        connect(&[("speakers", true), ("dac", false)]);
+        let (mut w, dir) = device_worker("dev-stale", None);
+        let (source, book) = book_source(base_dsp(), 1.0, true);
+        w.handle(Cmd::SetProfiles(Some(source)));
+        book.lock().sound_profiles.devices.insert("dac".into(), crate::profiles::Profile::of("dac name", &base_dsp(), 0.2));
+        let speakers = stamp(&w);
+        // The window sends the speakers' volume and EQ just as playback moves to the DAC.
+        w.handle(Cmd::SetDevice(Some(dref("dac"))));
+        assert_ne!(stamp(&w), speakers);
+        let seq = w.profile_seq;
+        w.handle(Cmd::SetVolumeFor { volume: 0.9, device_gen: speakers });
+        let mut bass = w.applied_dsp.clone();
+        bass.eq.enabled = true;
+        bass.eq.preset = "Bass".into();
+        w.handle(Cmd::SetDspFor { dsp: bass.clone(), device_gen: speakers });
+        w.sync_book();
+        assert_eq!((on(&w), w.volume, vol(&w), w.eq.settings().enabled), (Some("dac"), 0.2, 0.2, false));
+        assert_eq!(w.profile_seq, seq + 1, "the window loads the settings in effect again");
+        {
+            let s = book.lock();
+            assert_eq!((s.sound_profiles.devices["dac"].volume, s.volume, s.dsp.eq.enabled), (Some(0.2), 0.2, false));
+        }
+        // Stamped for the DAC: taken, and kept as the DAC's.
+        w.handle(Cmd::SetVolumeFor { volume: 0.3, device_gen: stamp(&w) });
+        w.handle(Cmd::SetDspFor { dsp: bass, device_gen: stamp(&w) });
+        w.sync_book();
+        assert_eq!((w.volume, w.eq.settings().enabled), (0.3, true));
+        assert_eq!(book.lock().sound_profiles.devices["dac"].volume, Some(0.3));
+        assert_eq!(book.lock().sound_profiles.devices["dac"].eq.preset, "Bass");
+        drop(w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_chosen_device_that_is_listed_but_will_not_open_is_waited_for() {
+        connect(&[("speakers", true), ("dac", false)]);
+        let (mut w, dir) = device_worker("dev-wont-open", Some("dac"));
+        // The stream failed; the list still has the DAC (Windows hasn't caught up yet).
+        w.fail_opens = true;
+        w.recover_output();
+        assert!(!playing(&w) && w.out.is_none() && w.error.is_none(), "waiting, not an error: {:?}", w.error);
+        assert_eq!(on(&w), Some("dac"), "nothing else was opened");
+        assert!(w.missing.as_ref().is_some_and(|m| m.resume && m.fallback.as_deref() == Some("speakers name")));
+        // Devices changed, but it still won't open: still waiting to carry on.
+        w.devices_changed(false);
+        assert!(w.missing.as_ref().is_some_and(|m| m.resume) && !playing(&w) && w.out.is_none());
+        // Now it opens: playing on, on the DAC.
+        w.fail_opens = false;
+        w.devices_changed(false);
+        assert_eq!((on(&w), playing(&w), w.missing.is_none()), (Some("dac"), true, true));
+        drop(w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_again_reads_the_device_list_only_after_a_change() {
+        connect(&[("speakers", true), ("dac", false)]);
+        let (mut w, dir) = device_worker("dev-cache", Some("dac"));
+        let events = Arc::new(devices::Events::default());
+        w.events = Some(events.clone());
+        LISTS.with(|n| n.set(0));
+        // Three rate switches: one look at the list.
+        for rate in [44_100, 96_000, 48_000] {
+            w.open_output(Some(rate));
+        }
+        assert_eq!((LISTS.with(|n| n.get()), on(&w)), (1, Some("dac")));
+        // The watcher heard of a change: read again.
+        events.changed.fetch_add(1, Ordering::AcqRel);
+        w.open_output(Some(44_100));
+        assert_eq!(LISTS.with(|n| n.get()), 2);
+        // Waiting for the chosen device: Play reads it afresh (also with nothing heard).
+        connect(&[("speakers", true)]);
+        w.recover_output();
+        assert!(w.missing.is_some());
+        connect(&[("speakers", true), ("dac", false)]);
+        w.handle(Cmd::Play);
+        assert_eq!((on(&w), playing(&w), w.missing.is_none()), (Some("dac"), true, true));
+        drop(w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_one_song_album_under_repeat_all_hands_over_to_the_next_album() {
+        let (mut w, mut cons, dir) = real_worker("albums-wrap", &["a1", "b1", "b2"], 6_000);
+        let next: Vec<QueueItem> = w.queue.drain(1..).collect();
+        w.repeat = Repeat::All;
+        w.albums = true;
+        w.start_at(0, 0.0, false);
+        let mut got = Vec::new();
+        decode_until(&mut w, &mut cons, &mut got, |w| w.boundaries.len() > 1);
+        assert_eq!(w.boundaries.iter().map(|b| b.index).collect::<Vec<_>>(), [0, 0], "a1 again: the queue goes round");
+        // The next album arrives: it comes next, not a1 once more.
+        w.handle(Cmd::Extend { items: next, auto: false, queue: None });
+        assert_eq!(w.boundaries.iter().map(|b| b.index).collect::<Vec<_>>(), [0]);
+        decode_until(&mut w, &mut cons, &mut got, |w| w.boundaries.len() > 1);
+        assert_eq!(w.boundaries.iter().map(|b| b.index).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(w.queue[1].id, "b1");
+        drop(w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn album_shuffle_lets_albums_that_have_played_go() {
+        let mut w = worker(0);
+        w.queue = ["a1", "a2", "b1", "b2", "c1", "c2"].iter().map(|id| item(id)).collect();
+        w.albums = true;
+        w.play_index = Some(4);
+        w.dec_index = 4;
+        w.stop_mark = Some(5);
+        w.handle(Cmd::Extend { items: vec![item("d1"), item("d2")], auto: false, queue: None });
+        // Album A went; B (the one before the playing album) stays for Prev.
+        assert_eq!(ids(&w), ["b1", "b2", "c1", "c2", "d1", "d2"]);
+        assert_eq!((w.play_index, w.dec_index, w.stop_mark), (Some(2), 2, Some(3)), "still c1, the mark still on c2");
+        // Not while something from before is on its way (the queue going round).
+        let mut w = worker(0);
+        w.queue = ["a1", "b1", "c1", "d1"].iter().map(|id| item(id)).collect();
+        w.albums = true;
+        w.play_index = Some(2);
+        w.dec_index = 0;
+        w.trim_played_albums();
+        assert_eq!(w.queue.len(), 4);
+        w.dec_index = 2;
+        w.trim_played_albums();
+        assert_eq!((ids(&w), w.play_index), (vec!["b1", "c1", "d1"], Some(1)));
+        // Autoplay's songs and plain queues are left as they are.
+        let mut w = worker(0);
+        w.play_index = Some(3);
+        w.dec_index = 3;
+        w.handle(Cmd::Extend { items: vec![item("c1")], auto: false, queue: None });
+        assert_eq!(w.queue.len(), 5);
+    }
+
+    #[test]
+    fn when_every_album_has_played_autoplay_takes_over_and_stale_answers_are_dropped() {
+        let mut w = worker(0);
+        w.autoplay = true;
+        w.handle(Cmd::PlayAlbums { items: vec![item("a1")], more: true });
+        let queue = w.queue_gen;
+        w.shared.playing.store(true, Ordering::Relaxed);
+        w.play_index = Some(0);
+        assert_eq!(w.wants_more(), Some(More::Albums));
+        // For a queue that's gone: ignored.
+        w.handle(Cmd::AlbumsDone { queue: queue - 1 });
+        w.handle(Cmd::Extend { items: vec![item("x1")], auto: true, queue: Some(queue - 1) });
+        assert_eq!((w.wants_more(), w.queue.len()), (Some(More::Albums), 1));
+        // Every album played: Autoplay's turn.
+        w.handle(Cmd::AlbumsDone { queue });
+        assert_eq!(w.wants_more(), Some(More::Similar));
+        w.emit();
+        assert_eq!(w.status.lock().queue_gen, queue);
+        // Another queue (also the same list again) is another number.
+        w.handle(Cmd::Load { items: vec![item("a1")], index: 0 });
+        assert_eq!(w.queue_gen, queue + 1);
     }
 }

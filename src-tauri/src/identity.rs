@@ -50,6 +50,9 @@ pub fn split_names(credit: &str) -> Vec<String> {
     crate::autotag::split_credit(&credit.replace('×', "/"))
 }
 
+/// A Latin name joins a kana or Hangul name by reading alone only from this many letters on.
+pub const MIN_READ_JOIN: usize = 4;
+
 /// Long vowels written out or not: "toukyou", "tookyoo" and "tokyo" all become "tokyo".
 pub fn collapse(romaji: &str) -> String {
     romaji.replace("ou", "o").replace("oo", "o").replace("uu", "u")
@@ -330,9 +333,18 @@ impl Identity {
                 continue;
             }
             let f = &key_of[&n];
+            // Only a name long enough to say something ("Ko" is こう and こ and many more), and
+            // only when it reads as exactly one artist: a short or ambiguous name joins only
+            // through what is known (the user, a learned pair, MusicBrainz).
+            if f.chars().count() < MIN_READ_JOIN {
+                continue;
+            }
             let hits: Vec<u32> = by_reading.get(f).into_iter().chain(by_collapsed.get(&collapse(f))).flatten().copied().collect();
-            for h in hits {
-                b.union(n, h);
+            let mut roots: Vec<u32> = hits.iter().map(|&h| b.uf.find(h)).collect();
+            roots.sort_unstable();
+            roots.dedup();
+            if let [_] = roots.as_slice() {
+                b.union(n, hits[0]);
             }
         }
 
@@ -508,7 +520,10 @@ impl Identity {
                 // The same artist or folded name (a Latin name's collapsed form only counts
                 // against a kana or Hangul name's reading, so "Moon" isn't "Mon").
                 let same = t == u && !t.starts_with("l:");
-                let read = ((t.starts_with("r:") && u.starts_with("l:")) || (t.starts_with("l:") && u.starts_with("r:"))) && t[2..] == u[2..];
+                // (Not for a short name: "Ko" is too many kana names.)
+                let read = ((t.starts_with("r:") && u.starts_with("l:")) || (t.starts_with("l:") && u.starts_with("r:")))
+                    && t.get(2..) == u.get(2..)
+                    && t.get(2..).is_some_and(|s| s.chars().count() >= MIN_READ_JOIN);
                 same || read
             })
         })
@@ -546,10 +561,15 @@ impl Identity {
 // ---------- the shared snapshot ----------
 
 static CURRENT: RwLock<Option<Identity>> = RwLock::new(None);
-/// Bumped when what the identity is built from changes (the library, decisions, MusicBrainz).
+/// Bumped when what the identity is built from changes (the library, decisions, MusicBrainz), and
+/// at the start of every build (each build's identity has a version of its own, so caches stamped
+/// with the version they were built from know when they are stale).
 static WANTED: AtomicU64 = AtomicU64::new(1);
+/// The version of the newest build stored.
 static BUILT: AtomicU64 = AtomicU64::new(0);
 static REBUILDING: AtomicBool = AtomicBool::new(false);
+/// One build at a time (the background rebuild, a decision's rebuild, startup).
+static BUILD: Mutex<()> = Mutex::new(());
 static APP: OnceLock<Ctx> = OnceLock::new();
 /// What the window was last told (a fingerprint of the merged artists), so it's told only of changes.
 static TOLD: Mutex<u64> = Mutex::new(0);
@@ -588,13 +608,45 @@ pub fn invalidate() {
         return;
     }
     let ctx = ctx.clone();
-    let _ = std::thread::Builder::new().name("cadence-identity".into()).spawn(move || {
+    let spawned = std::thread::Builder::new().name("cadence-identity".into()).spawn(move || {
         crate::jobs::background_priority();
-        while BUILT.load(Ordering::SeqCst) < WANTED.load(Ordering::SeqCst) {
+        run_pending(&REBUILDING, pending, || {
             rebuild_now(&ctx);
-        }
-        REBUILDING.store(false, Ordering::SeqCst);
+        });
     });
+    if spawned.is_err() {
+        REBUILDING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Builds while a change is pending; after letting go of the "rebuilding" flag, looks once more,
+/// so a change asked for just as the loop ended (when `invalidate` saw the flag still set and left
+/// it to this thread) isn't lost.
+fn run_pending(flag: &AtomicBool, pending: impl Fn() -> bool, mut build: impl FnMut()) {
+    loop {
+        while pending() {
+            build();
+        }
+        flag.store(false, Ordering::SeqCst);
+        if !pending() || flag.swap(true, Ordering::SeqCst) {
+            return;
+        }
+    }
+}
+
+/// A change was asked for that no stored build includes yet.
+fn pending() -> bool {
+    BUILT.load(Ordering::SeqCst) < WANTED.load(Ordering::SeqCst)
+}
+
+/// What the identity is built from was replaced (a restore): built again now, on the calling
+/// thread, when the app keeps one (`init` ran); otherwise only noted, as `invalidate` does.
+pub fn rebuild_after_change(ctx: &Ctx) {
+    if APP.get().is_some() {
+        rebuild_now(ctx);
+    } else {
+        WANTED.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// Starts keeping the identity up to date (once, at startup), and builds it.
@@ -645,12 +697,9 @@ pub fn gather(state: &crate::state::AppState) -> Input {
 /// Builds the identity now (on the calling thread) and makes it the current one. The window is
 /// told ("artist-identity-changed") when the merged artists changed.
 pub fn rebuild_now(ctx: &Ctx) -> Identity {
-    let wanted = WANTED.load(Ordering::SeqCst);
     let started = std::time::Instant::now();
-    let input = gather(&ctx.state);
-    let id = Identity::build(&input, wanted);
-    *CURRENT.write() = Some(id.clone());
-    BUILT.fetch_max(wanted, Ordering::SeqCst);
+    let (id, names) = build_and_store(|| gather(&ctx.state));
+    log::info!("artists: {} for {names} names in {:?}", id.artists().len(), started.elapsed());
     let print = fingerprint(&id);
     let changed = {
         let mut told = TOLD.lock();
@@ -658,11 +707,32 @@ pub fn rebuild_now(ctx: &Ctx) -> Identity {
         *told = print;
         changed
     };
-    log::info!("artists: {} for {} names in {:?}", id.artists().len(), input.names.len(), started.elapsed());
     if changed {
         ctx.emit("artist-identity-changed", id.version());
     }
     id
+}
+
+/// One build, serialized with every other: a version of its own taken at the start (so whatever
+/// changed before it is in it, and it's newer than every earlier build), stored only if nothing
+/// newer is stored already. Returns the identity now current and how many names it was built from.
+fn build_and_store(gather: impl FnOnce() -> Input) -> (Identity, usize) {
+    let _one = BUILD.lock();
+    let version = WANTED.fetch_add(1, Ordering::SeqCst) + 1;
+    let input = gather();
+    let id = Identity::build(&input, version);
+    let stored = {
+        let mut cur = CURRENT.write();
+        match cur.as_ref() {
+            Some(c) if c.version() > version => c.clone(),
+            _ => {
+                *cur = Some(id.clone());
+                id
+            }
+        }
+    };
+    BUILT.fetch_max(version, Ordering::SeqCst);
+    (stored, input.names.len())
 }
 
 fn fingerprint(id: &Identity) -> u64 {
@@ -853,6 +923,66 @@ mod tests {
         assert!(id.same_artist("DAOKO feat. 米津玄師", "Kenshi Yonezu"));
         assert!(id.same_artist("Hikaru Utada & 米津玄師", "Kenshi Yonezu"));
         assert!(!id.same_artist("Kenshi Yonezu", "Someone Else"));
+    }
+
+    #[test]
+    fn short_or_ambiguous_latin_names_do_not_join_by_reading() {
+        // "Ko" reads as こう (collapsed) and こ: it joins neither, nor do they join each other.
+        let id = Identity::build(&Input { names: names(&["Ko", "こう", "こ"]), ..Default::default() }, 1);
+        assert_ne!(id.of_name("Ko"), id.of_name("こう"));
+        assert_ne!(id.of_name("Ko"), id.of_name("こ"));
+        assert_ne!(id.of_name("こう"), id.of_name("こ"));
+        assert!(!Identity::new().same_artist("Ko", "こう"));
+        // Long enough but two different kana artists read the same once collapsed: no join.
+        let id = Identity::build(&Input { names: names(&["Yuki", "ゆうき", "ゆき"]), ..Default::default() }, 1);
+        assert_ne!(id.of_name("Yuki"), id.of_name("ゆうき"));
+        assert_ne!(id.of_name("Yuki"), id.of_name("ゆき"));
+        // One counterpart (two spellings of it are one artist already): joined.
+        let id = Identity::build(&Input { names: names(&["Riria.", "りりあ。", "リリア"]), ..Default::default() }, 1);
+        assert_eq!(id.of_name("Riria."), id.of_name("りりあ。"));
+        assert_eq!(id.of_name("Riria."), id.of_name("リリア"));
+        // A short name still joins through what is known.
+        let id = Identity::build(&Input { names: names(&["Ko", "こう"]), same: vec![pair("Ko", "こう")], ..Default::default() }, 1);
+        assert_eq!(id.of_name("Ko"), id.of_name("こう"));
+    }
+
+    #[test]
+    fn every_build_has_a_newer_version_and_the_newest_stays() {
+        let (a, _) = build_and_store(Input::default);
+        let (b, _) = build_and_store(Input::default);
+        assert!(b.version() > a.version(), "a rebuild after a decision is a new version");
+        assert!(wanted() >= b.version());
+        // Builds from several threads at once: one at a time, each newer, the newest kept.
+        let versions: Vec<u64> = (0..6).map(|_| std::thread::spawn(|| build_and_store(Input::default).0.version())).collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect();
+        let distinct: HashSet<u64> = versions.iter().copied().collect();
+        assert_eq!(distinct.len(), versions.len());
+        let stored = CURRENT.read().as_ref().map(|i| i.version()).unwrap();
+        assert!(stored >= *versions.iter().max().unwrap());
+    }
+
+    #[test]
+    fn a_change_asked_for_as_the_rebuild_ends_is_not_lost() {
+        let flag = AtomicBool::new(true);
+        let (wanted, built) = (AtomicU64::new(2), AtomicU64::new(1));
+        let first_false = AtomicBool::new(true);
+        let pending = || {
+            let p = built.load(Ordering::SeqCst) < wanted.load(Ordering::SeqCst);
+            // Just as the loop sees nothing pending, another change comes: its `invalidate` finds
+            // the flag still set and leaves the work to this thread.
+            if !p && first_false.swap(false, Ordering::SeqCst) {
+                wanted.fetch_add(1, Ordering::SeqCst);
+                assert!(flag.load(Ordering::SeqCst));
+            }
+            p
+        };
+        let mut builds = 0;
+        run_pending(&flag, pending, || {
+            builds += 1;
+            built.store(wanted.load(Ordering::SeqCst), Ordering::SeqCst);
+        });
+        assert_eq!(builds, 2, "the late change was built");
+        assert_eq!(built.load(Ordering::SeqCst), 3);
+        assert!(!flag.load(Ordering::SeqCst));
     }
 
     #[test]

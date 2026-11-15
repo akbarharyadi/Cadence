@@ -254,7 +254,23 @@ pub fn build(tracks: &[Track], albums: &[Album], id: &Identity, kanji: &HashMap<
 static READINGS_GEN: AtomicU64 = AtomicU64::new(0);
 static READING: AtomicBool = AtomicBool::new(false);
 static KANJI: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
-static KEPT: Mutex<Option<((u64, u64), SearchKeys)>> = Mutex::new(None);
+static KEPT: Mutex<Option<(Stamp, SearchKeys)>> = Mutex::new(None);
+static BUILDS: AtomicU64 = AtomicU64::new(0);
+
+/// What kept keys were built from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    /// The identity's version (`Identity::version`) the keys were built from.
+    identity: u64,
+    /// The latest identity change asked for then.
+    wanted: u64,
+    readings: u64,
+}
+
+/// Keys kept are built again on their next use (a restore replaced what they come from).
+pub fn invalidate() {
+    *KEPT.lock() = None;
+}
 
 fn readings_file(dir: &Path) -> std::path::PathBuf {
     dir.join("search-readings.json")
@@ -268,7 +284,10 @@ fn kanji(dir: &Path) -> HashMap<String, String> {
 pub fn current(ctx: &Ctx) -> SearchKeys {
     let state = &ctx.state;
     let id = crate::identity::current();
-    let stamp = (crate::identity::wanted().max(id.version()), READINGS_GEN.load(Ordering::SeqCst));
+    // Stamped with the identity they are built from and the latest change asked for: keys built
+    // while a rebuild is pending (a new library with the old artists) are worked out again once
+    // the new identity is there, and never count as built from it.
+    let stamp = Stamp { identity: id.version(), wanted: crate::identity::wanted(), readings: READINGS_GEN.load(Ordering::SeqCst) };
     if let Some((s, k)) = KEPT.lock().as_ref()
         && *s == stamp
     {
@@ -276,9 +295,11 @@ pub fn current(ctx: &Ctx) -> SearchKeys {
     }
     let started = std::time::Instant::now();
     let known = kanji(&state.data_dir);
+    // The window's version of the keys: a new number for every build.
+    let version = BUILDS.fetch_add(1, Ordering::SeqCst) + 1;
     let (keys, missing) = {
         let lib = state.library.lock();
-        build(&lib.snapshot.tracks, &lib.snapshot.albums, &id, &known, stamp.0 * 1000 + stamp.1)
+        build(&lib.snapshot.tracks, &lib.snapshot.albums, &id, &known, version)
     };
     log::info!("search keys: {} KB in {:?} ({} readings to work out)", keys.bytes() / 1024, started.elapsed(), missing.len());
     *KEPT.lock() = Some((stamp, keys.clone()));

@@ -36,6 +36,12 @@
     return `${base} ${n}`;
   });
   const finalName = $derived(!existing ? name.trim() : replacing ? existing.name : numbered);
+  /** Replacing would leave the playlist with far fewer songs than it has (300 → 1): asked first. */
+  const shrinks = $derived(replacing && !!existing && existing.trackIds.length >= 4 && matched.length < existing.trackIds.length / 2);
+  /** The question above was asked for this choice (another name or choice asks again). */
+  let confirmed = $state("");
+  const confirmKey = $derived(`${existing?.id ?? ""}|${choice}|${matched.length}`);
+  const asking = $derived(shrinks && confirmed === `asked:${confirmKey}`);
 
   function next() {
     transfer.imports = transfer.imports.slice(1);
@@ -43,13 +49,37 @@
 
   async function create() {
     if (busy || !matched.length || !name.trim()) return;
+    if (shrinks && confirmed !== `yes:${confirmKey}`) {
+      // First: say how many songs it would have, and how many it has now.
+      if (asking) confirmed = `yes:${confirmKey}`;
+      else {
+        confirmed = `asked:${confirmKey}`;
+        return;
+      }
+    }
     error = "";
     busy = true;
     try {
       const ids = [...matched];
-      const base = replacing && existing ? $state.snapshot(existing) : { id: "", name: finalName, trackIds: [], smart: null, created: 0, updated: 0 };
+      const before = replacing && existing ? $state.snapshot(existing) : null;
+      const base = before ?? { id: "", name: finalName, trackIds: [], smart: null, created: 0, updated: 0 };
       const saved = await app.savePlaylist({ ...base, trackIds: ids });
-      app.showToast(`${replacing ? "Replaced the songs of" : "Created"} “${saved.name}” with ${plural(ids.length, "song")}`);
+      const said = `${before ? "Replaced the songs of" : "Created"} “${saved.name}” with ${plural(ids.length, "song")}`;
+      if (before) {
+        // Undo: the playlist's songs as they were (saved again).
+        app.showToast(said, {
+          label: "Undo",
+          run: () => {
+            app.toast = app.toastAction = null;
+            app
+              .savePlaylist({ ...saved, trackIds: before.trackIds })
+              .then(() => app.showToast(`“${saved.name}” has its ${plural(before.trackIds.length, "song")} back`))
+              .catch((e) => app.showToast(`Couldn’t put the songs back: ${e}`));
+          },
+        });
+      } else {
+        app.showToast(said);
+      }
       if (remaining === 0) app.go({ name: "playlist", id: saved.id });
       next();
     } catch (e) {
@@ -106,7 +136,10 @@
           <Segmented
             label="When the name is taken"
             value={choice}
-            onchange={(v) => (choice = v)}
+            onchange={(v) => {
+              choice = v;
+              confirmed = "";
+            }}
             options={[
               { value: "new", label: `Create “${numbered}”` },
               { value: "replace", label: "Replace its songs" },
@@ -120,6 +153,13 @@
 
     {#if !matched.length}
       <p class="hint">None of its entries are in your library, so there is nothing to create.</p>
+    {/if}
+
+    {#if asking && existing}
+      <p class="error" role="alert">
+        Replacing leaves “{existing.name}” with {plural(matched.length, "song")}; it has {plural(existing.trackIds.length, "song")} now.
+        Replace anyway? (You can undo it right after.)
+      </p>
     {/if}
 
     {#if misses.length}
@@ -149,7 +189,7 @@
     {/if}
     <button class="pill ghost" onclick={() => (transfer.imports = [])}>{item.error && remaining === 0 ? "Close" : "Cancel"}</button>
     {#if !item.error}
-      <button class="pill" onclick={create} disabled={busy || !matched.length || !name.trim()}>Create playlist</button>
+      <button class="pill" onclick={create} disabled={busy || !matched.length || !name.trim()}>{asking ? "Replace anyway" : "Create playlist"}</button>
     {/if}
   {/snippet}
 </Modal>

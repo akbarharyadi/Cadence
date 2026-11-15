@@ -31,8 +31,9 @@ export interface ExtraMatch {
   artist: (a: { name: string; also?: string[] }) => boolean;
 }
 
-/** What the folded text `q` finds by other names; null when there are no keys (yet). One pass over
- *  the artist credits per query, then a lookup per item. */
+/** What the folded text `q` finds by other names; null when there are no keys (yet) or nothing
+ *  is found by them (then nobody scans the library for it: the usual case, a word that is no
+ *  alias or reading). One pass over the keys per query, then a lookup per item. */
 export function extraMatch(keys: SearchKeys | null | undefined, q: string): ExtraMatch | null {
   if (!keys || !q) return null;
   const ix = indexOf(keys);
@@ -40,8 +41,11 @@ export function extraMatch(keys: SearchKeys | null | undefined, q: string): Extr
   for (const [credit, words] of ix.credits) if (words.includes(q)) credits.add(credit);
   const albums = new Set<string>();
   for (const [id, words] of ix.albums) if (words.includes(q)) albums.add(id);
+  const tracks = new Set<string>();
+  for (const [id, words] of ix.tracks) if (words.includes(q)) tracks.add(id);
+  if (!credits.size && !albums.size && !tracks.size) return null;
   return {
-    track: (t) => credits.has(t.artist) || credits.has(t.albumArtist) || albums.has(t.albumId) || (ix.tracks.get(t.id)?.includes(q) ?? false),
+    track: (t) => credits.has(t.artist) || credits.has(t.albumArtist) || albums.has(t.albumId) || tracks.has(t.id),
     album: (a) => credits.has(a.artist) || albums.has(a.id),
     artist: (a) => credits.has(a.name) || (a.also ?? []).some((n) => credits.has(n)),
   };

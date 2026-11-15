@@ -5,8 +5,11 @@
   import Icon from "#lib/components/Icon.svelte";
   import QualityBadge from "#lib/components/QualityBadge.svelte";
   import { eqBars } from "#lib/eq.js";
+  import { lagged } from "#lib/lagged.svelte.js";
+  import { rediscover } from "#lib/homePicks.js";
   import { app } from "#lib/store.svelte.js";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { untrack } from "svelte";
 
   const newest = $derived([...app.albums].sort((a, b) => b.added - a.added));
   /** The album the page opens with: what's playing, else the last played, else the newest. */
@@ -14,8 +17,18 @@
     app.currentAlbum ?? app.albumById.get(app.recentlyPlayed[0] ?? "") ?? newest[0],
   );
   const heroState = $derived(app.currentAlbum ? "Now playing" : app.recentlyPlayed.length ? "Pick up where you left off" : "Newest in your library");
-  const playedRow = $derived(app.recentlyPlayed.map((id) => app.albumById.get(id)).filter((a): a is Album => !!a && a.id !== hero?.id));
-  const addedRow = $derived(newest.filter((a) => a.id !== hero?.id).slice(0, 30));
+  // The albums played lately change with every song (each one, in a shuffle): the rows built from
+  // them follow at most every few seconds. The playing album itself shows at once (hero, quick).
+  const recent = lagged(() => app.recentlyPlayed, 5000);
+  const playedRow = $derived(recent.value.map((id) => app.albumById.get(id)).filter((a): a is Album => !!a && a.id !== hero?.id));
+  // (The newest 31 are enough: at most one of them is the hero.)
+  const addedRow = $derived(newest.slice(0, 31).filter((a) => a.id !== hero?.id).slice(0, 30));
+  /** Albums not played lately, for "Rediscover": the whole library, so only when that or the
+   *  lately played change, not with each song. */
+  const unplayed = $derived.by(() => {
+    const played = new Set(recent.value);
+    return app.albums.filter((a) => !played.has(a.id));
+  });
   const losslessShare = $derived(app.albums.length ? app.albums.filter((a) => a.quality.includes("Lossless")).length / app.albums.length : 0);
   const totalTime = $derived(app.tracks.reduce((s, t) => s + t.duration, 0));
 
@@ -100,7 +113,9 @@
       const d = new Date();
       if (d.getHours() !== now.getHours() || d.getDate() !== now.getDate()) now = d;
     };
-    look();
+    // Untracked: reading `now` here would make this effect (and its interval) start over each
+    // time the hour turns. One 60 s interval, only while the window can be seen.
+    untrack(look);
     const timer = setInterval(look, 60_000);
     return () => clearInterval(timer);
   });
@@ -125,7 +140,7 @@
 
   // ---------- quick picks: what you played lately, one tap away ----------
   const quick = $derived.by(() => {
-    const ids = [...new Set([app.currentAlbum?.id, ...app.recentlyPlayed].filter(Boolean) as string[])];
+    const ids = [...new Set([app.currentAlbum?.id, ...recent.value].filter(Boolean) as string[])];
     const albums = ids.map((id) => app.albumById.get(id)).filter((a): a is Album => !!a);
     // Fill up with the newest albums when there isn't much history yet.
     for (const a of newest) {
@@ -178,9 +193,8 @@
     const fresh = newest.find((a) => a.id !== hero?.id);
     if (fresh) out.push(fromAlbum("Just added", fresh));
     // Something you haven't played lately, different each day.
-    const played = new Set(app.recentlyPlayed);
-    const unplayed = app.albums.filter((a) => !played.has(a.id) && a.id !== hero?.id && a.id !== fresh?.id);
-    if (unplayed.length) out.push(fromAlbum("Rediscover", unplayed[Math.floor(Date.now() / 86_400_000) % unplayed.length]));
+    const again = rediscover(unplayed, Math.floor(Date.now() / 86_400_000), [hero?.id, fresh?.id]);
+    if (again) out.push(fromAlbum("Rediscover", again));
     if (app.mixes[1]) out.push(fromTracks("Mix by sound", app.mixes[1].name, app.mixes[1].description, app.mixTracks(app.mixes[1])));
     return out;
   });
@@ -323,7 +337,7 @@
 
   {#if picks.length}
     <Carousel title="Top picks for you" gap={16}>
-      {#each picks as p, i (p.label + p.title + i)}
+      {#each picks as p, i (p.label + i)}
         <div class="pick" style="--tint: {p.tint ?? '#24273d'}">
           <button class="pick-art" onclick={p.open} aria-label="{p.openLabel} {p.title}">
             {#if p.art}<img src={artUrl(p.art)} alt="" loading="lazy" />{:else}<Icon name="album" size={48} />{/if}

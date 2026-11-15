@@ -10,7 +10,10 @@
   const name = $derived(app.artistEditing!);
   const artist = $derived(app.artistByName(name));
   const covers = $derived((artist?.albums ?? []).filter((a) => a.art));
-  const custom = $derived(!!app.artistImages[name.toLowerCase()]);
+  /** The artist's spellings (米津玄師, Kenshi Yonezu): a picture chosen under any of them is theirs. */
+  const spellings = $derived(artist ? [artist.name, ...(artist.also ?? [])] : [name]);
+  const chosenUnder = $derived(spellings.filter((n) => !!app.artistImages[(n ?? "").toLowerCase()]));
+  const custom = $derived(chosenUnder.length > 0);
   const isAndroid = navigator.userAgent.includes("Android");
 
   let photos = $state<ArtistPhoto[]>([]);
@@ -49,7 +52,8 @@
   async function reset() {
     error = "";
     try {
-      await app.resetArtistImage(name);
+      // Under every spelling it was chosen for: the artist's own covers show again.
+      for (const n of chosenUnder.length ? [...chosenUnder] : [name]) await app.resetArtistImage(n);
       close();
     } catch (e) {
       error = String(e);
@@ -134,7 +138,8 @@
   }
   .busy .pic {
     box-shadow: 0 0 0 3px var(--accent);
-    animation: pulse 1s ease-in-out infinite;
+    /* Saving takes a moment; if it hangs, the pulse stops after ~8 s (it never runs unbounded). */
+    animation: pulse 1s ease-in-out 8;
   }
   .pic {
     width: 88px;
@@ -164,7 +169,8 @@
   }
   .ghost-opt .pic,
   .ghost-opt i {
-    animation: pulse 1.2s ease-in-out infinite;
+    /* Placeholders while photos are looked for: ~10 s at most, then they rest. */
+    animation: pulse 1.2s ease-in-out 8;
   }
   .ghost-opt i {
     display: block;

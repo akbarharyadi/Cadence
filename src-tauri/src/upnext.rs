@@ -250,67 +250,99 @@ fn similar_more(state: &AppState, queue: &[String]) -> Vec<QueueItem> {
     };
     let rule = state.skip_rule();
     let aliases = shuffle::aliases(&state.data_dir);
-    let ids = {
+    let mut exclude: HashSet<&str> = queue.iter().map(String::as_str).collect();
+    exclude.extend(session.iter().map(String::as_str));
+    let skips = |t: &Track| rule.skips(t);
+    // Copied out under the library's lock (only the songs that may be picked, and the seeds),
+    // then the sound features under the analysis' lock (one lock at a time, briefly); scored with
+    // neither held, so the scan, the window and the analysis aren't kept waiting.
+    let (candidates, seeds): (Vec<Track>, Vec<Track>) = {
         let lib = state.library.lock();
-        let sonic = state.sonic.lock();
-        let features: HashMap<&str, &[f32]> = lib.snapshot.tracks.iter().filter_map(|t| sonic.features(t).map(|f| (t.id.as_str(), f))).collect();
-        let seeds: Vec<&Track> = queue[queue.len().saturating_sub(3)..]
+        let candidates = lib
+            .snapshot
+            .tracks
             .iter()
-            .filter_map(|id| lib.by_id.get(id).map(|&i| &lib.snapshot.tracks[i]))
+            .filter(|t| !exclude.contains(t.id.as_str()) && !skips(t) && now.saturating_sub(last_played.get(&t.id).copied().unwrap_or(0)) >= RECENT_SECS)
+            .cloned()
             .collect();
-        let mut exclude: HashSet<&str> = queue.iter().map(String::as_str).collect();
-        exclude.extend(session.iter().map(String::as_str));
-        let skips = |t: &Track| rule.skips(t);
-        autoplay_picks(
-            &Autoplay {
-                tracks: &lib.snapshot.tracks,
-                features: &features,
-                seeds: &seeds,
-                exclude: &exclude,
-                skips: &skips,
-                last_played: &last_played,
-                aliases: &aliases,
-                now,
-                seed: shuffle::clock_seed(),
-            },
-            BATCH,
-        )
+        let seeds = queue[queue.len().saturating_sub(3)..]
+            .iter()
+            .filter_map(|id| lib.by_id.get(id).map(|&i| lib.snapshot.tracks[i].clone()))
+            .collect();
+        (candidates, seeds)
     };
+    let owned: Vec<(String, Vec<f32>)> = {
+        let sonic = state.sonic.lock();
+        candidates.iter().chain(&seeds).filter_map(|t| sonic.features(t).map(|f| (t.id.clone(), f.to_vec()))).collect()
+    };
+    let features: HashMap<&str, &[f32]> = owned.iter().map(|(id, f)| (id.as_str(), f.as_slice())).collect();
+    let seed_refs: Vec<&Track> = seeds.iter().collect();
+    let ids = autoplay_picks(
+        &Autoplay {
+            tracks: &candidates,
+            features: &features,
+            seeds: &seed_refs,
+            exclude: &exclude,
+            skips: &skips,
+            last_played: &last_played,
+            aliases: &aliases,
+            now,
+            seed: shuffle::clock_seed(),
+        },
+        BATCH,
+    );
     log::info!("autoplay: {} songs", ids.len());
     state.queue_items(&ids)
 }
 
 // ---------- asked by the engine ----------
 
-/// The queue (its length and last song) more songs were last looked for: asked once per queue.
-static ASKED: Mutex<Option<(usize, String)>> = Mutex::new(None);
+/// What more songs were last looked for: which queue (`Status::queue_gen`, so the same list played
+/// again is asked for anew), for what, its length and its last song. Asked once per such queue.
+type Asked = (u64, More, usize, String);
+static ASKED: Mutex<Option<Asked>> = Mutex::new(None);
 static BUSY: AtomicBool = AtomicBool::new(false);
 
+/// What `s` would ask for.
+fn ask_key(s: &Status, more: More) -> Asked {
+    (s.queue_gen, more, s.queue.len(), s.queue.last().cloned().unwrap_or_default())
+}
+
+/// Whether `key` wasn't asked for yet (and now it is).
+fn first_ask(asked: &mut Option<Asked>, key: Asked) -> bool {
+    if asked.as_ref() == Some(&key) {
+        return false;
+    }
+    *asked = Some(key);
+    true
+}
+
 /// For every engine status (the status thread): when the queue is about to run out, looks for
-/// what comes next on a thread of its own.
+/// what comes next on a thread of its own (at background priority).
 pub fn on_status(ctx: &Ctx, s: &Status) {
     LazyLock::force(&STARTED);
     let Some(more) = s.more else { return };
-    let key = (s.queue.len(), s.queue.last().cloned().unwrap_or_default());
+    let key = ask_key(s, more);
     if BUSY.swap(true, Ordering::AcqRel) {
         return;
     }
-    {
-        let mut asked = ASKED.lock();
-        if asked.as_ref() == Some(&key) {
-            BUSY.store(false, Ordering::Release);
-            return;
-        }
-        *asked = Some(key);
+    if !first_ask(&mut ASKED.lock(), key) {
+        BUSY.store(false, Ordering::Release);
+        return;
     }
-    let (ctx, queue, repeat) = (ctx.clone(), s.queue.clone(), s.repeat);
+    let (ctx, queue, repeat, queue_gen) = (ctx.clone(), s.queue.clone(), s.repeat, s.queue_gen);
     let spawned = std::thread::Builder::new().name("cadence-upnext".into()).spawn(move || {
+        crate::jobs::background_priority();
         let items = match more {
             More::Albums => next_album(&ctx.state, repeat),
             More::Similar => similar_more(&ctx.state, &queue),
         };
         if !items.is_empty() {
-            ctx.state.engine.send(Cmd::Extend { items, auto: more == More::Similar });
+            ctx.state.engine.send(Cmd::Extend { items, auto: more == More::Similar, queue: Some(queue_gen) });
+        } else if more == More::Albums && repeat != Repeat::All {
+            // Every album of the shuffle has played: it ends, and Autoplay takes over if it's on
+            // (else the last album plays out and playback stops, as at the end of any queue).
+            ctx.state.engine.send(Cmd::AlbumsDone { queue: queue_gen });
         }
         BUSY.store(false, Ordering::Release);
     });
@@ -325,6 +357,20 @@ mod tests {
 
     fn song(id: &str, artist: &str, album: &str, genre: &str) -> Track {
         Track { id: id.into(), title: format!("Title {id}"), artist: artist.into(), album: album.into(), album_id: album.into(), genre: genre.into(), duration: 200.0, ..Default::default() }
+    }
+
+    #[test]
+    fn the_same_list_played_again_is_asked_for_again() {
+        let status = |queue_gen: u64, ids: &[&str]| Status { queue: ids.iter().map(|s| s.to_string()).collect(), queue_gen, ..Default::default() };
+        let mut asked = None;
+        let album = ["a1", "a2", "a3"];
+        assert!(first_ask(&mut asked, ask_key(&status(1, &album), More::Similar)));
+        assert!(!first_ask(&mut asked, ask_key(&status(1, &album), More::Similar)), "once per queue");
+        // The album played again (a new queue, the same songs): its end asks again.
+        assert!(first_ask(&mut asked, ask_key(&status(2, &album), More::Similar)));
+        // The album shuffle ended and Autoplay takes over on the same queue: asked for that too.
+        assert!(first_ask(&mut asked, ask_key(&status(2, &album), More::Albums)));
+        assert!(first_ask(&mut asked, ask_key(&status(2, &album), More::Similar)));
     }
 
     #[test]

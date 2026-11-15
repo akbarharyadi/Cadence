@@ -220,7 +220,8 @@
   }
   .busy .pic {
     box-shadow: 0 0 0 3px var(--accent);
-    animation: pulse 1s ease-in-out infinite;
+    /* Saving: a few seconds of pulse at most (never unbounded if it hangs). */
+    animation: pulse 1s ease-in-out 8;
   }
   .match {
     position: absolute;
@@ -252,7 +253,8 @@
   }
   .ghost-opt .pic,
   .ghost-opt i {
-    animation: pulse 1.2s ease-in-out infinite;
+    /* Placeholders while covers are looked for: ~10 s at most, then they rest. */
+    animation: pulse 1.2s ease-in-out 8;
   }
   .ghost-opt i {
     display: block;

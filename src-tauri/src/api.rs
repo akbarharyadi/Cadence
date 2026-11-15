@@ -21,6 +21,11 @@ pub fn get_library(ctx: &Ctx) -> Snapshot {
     state.library.lock().snapshot.clone()
 }
 
+/// Only some songs and their albums (the mini player asks for the song playing, not the library).
+pub fn get_library_part(ctx: &Ctx, track_ids: Vec<String>) -> Snapshot {
+    ctx.state.library.lock().part(&track_ids)
+}
+
 pub fn get_folders(ctx: &Ctx) -> Vec<String> {
     let state = &ctx.state;
     state.settings.lock().folders.clone()
@@ -772,13 +777,12 @@ pub fn get_sleep_timer(ctx: &Ctx) -> Option<u64> {
 }
 
 /// Heard at once; saved once the slider has stopped for a moment (it sends ~60 changes a second
-/// while dragged), and at exit.
-pub fn set_volume(ctx: &Ctx, volume: f32) {
+/// while dragged), and at exit. `device_gen` (optional): the `Status::device_gen` the window's
+/// slider was showing; a change meant for a device playback has since left is dropped
+/// (`profiles::set_volume`; the engine keeps it as the playing device's own).
+pub fn set_volume(ctx: &Ctx, volume: f32, device_gen: Option<u64>) {
     let state = &ctx.state;
-    state.engine.send(Cmd::SetVolume(volume));
-    state.settings.lock().volume = volume;
-    // (Also the playing device's own volume, with sound settings per device.)
-    crate::profiles::remember(state);
+    crate::profiles::set_volume(state, volume, device_gen);
     state.save_settings_later();
 }
 
@@ -875,12 +879,11 @@ pub fn get_dsp(ctx: &Ctx) -> DspSettings {
     state.settings.lock().dsp.clone()
 }
 
-pub fn set_dsp(ctx: &Ctx, dsp: DspSettings) {
+/// `device_gen` (optional): as for `set_volume`.
+pub fn set_dsp(ctx: &Ctx, dsp: DspSettings, device_gen: Option<u64>) {
     let state = &ctx.state;
-    state.engine.send(Cmd::SetDsp(dsp.clone()));
-    state.settings.lock().dsp = dsp;
-    // (Also the playing device's own settings, with sound settings per device.)
-    crate::profiles::remember(state);
+    // Stamped with the device it's for; the engine keeps it as that device's own.
+    crate::profiles::set_dsp(state, dsp, device_gen);
     // The EQ sends a change every ~40 ms while a band is dragged: heard at once, saved once it
     // settles (and at exit).
     state.save_settings_later();
@@ -903,16 +906,18 @@ pub struct OutputDevices {
 /// (`blocking`: it asks the system for its devices.)
 pub fn list_output_devices(ctx: &Ctx) -> Result<OutputDevices, String> {
     let state = &ctx.state;
-    let (chosen, profiles, remembered) = {
+    let (chosen, profiles, remembered, direct) = {
         let s = state.settings.lock();
         let remembered: Vec<(String, String)> = s.sound_profiles.devices.iter().map(|(id, p)| (id.clone(), p.name.clone())).collect();
-        (s.output_device.clone(), s.device_profiles, remembered)
+        (s.output_device.clone(), s.device_profiles, remembered, s.dsp.exclusive)
     };
     let supported = !cfg!(target_os = "android");
     if !supported {
         return Ok(OutputDevices { supported, devices: Vec::new(), chosen, profiles });
     }
     let present = crate::audio::list_output_devices().map_err(|e| format!("Couldn't list the output devices: {e}"))?;
+    // Linux: a sound card's raw ALSA entries only open with Direct output while a sound server runs.
+    let present = crate::audio::devices::for_picker(present, direct);
     // Where the system doesn't tell Cadence about devices (not Windows), a chosen one that's back
     // is found this way.
     state.engine.send(Cmd::CheckDevices);
@@ -1089,7 +1094,7 @@ pub fn hotkey(ctx: &Ctx, action: &str) {
         "volume up" | "volume down" => {
             let step = if action == "volume up" { 0.05 } else { -0.05 };
             let slider = (state.engine.status().volume.sqrt() + step).clamp(0.0, 1.0);
-            set_volume(ctx, slider * slider);
+            set_volume(ctx, slider * slider, None);
         }
         "favorite" => {
             let status = state.engine.status();
@@ -1209,12 +1214,17 @@ pub fn set_fix_tags_online(ctx: &Ctx, enabled: bool) {
     let state = &ctx.state;
     state.settings.lock().fix_tags_online = enabled;
     state.save_settings_later();
+    if !enabled {
+        // The artist check a scan started by itself stops too.
+        crate::libfix::fix_tags_online_off();
+    }
 }
 
 // ---------- one artist across scripts (identity.rs, musicbrainz.rs, searchkeys.rs) ----------
 
 /// Learning the artists' other names from MusicBrainz, on or off (off stops a running job).
-pub fn set_artist_names_online(ctx: &Ctx, enabled: bool) {
+/// (`blocking`: turning it on walks the library for the names to ask about.)
+pub fn set_artist_names_online(ctx: &Ctx, enabled: bool) -> Result<(), String> {
     let state = &ctx.state;
     state.settings.lock().artist_names_online = enabled;
     state.save_settings_later();
@@ -1223,6 +1233,7 @@ pub fn set_artist_names_online(ctx: &Ctx, enabled: bool) {
     } else {
         crate::musicbrainz::turned_off();
     }
+    Ok(())
 }
 
 /// The artists the library writes in more than one way.
@@ -1236,33 +1247,52 @@ pub fn search_keys(ctx: &Ctx) -> Result<crate::searchkeys::SearchKeys, String> {
     Ok(crate::searchkeys::current(ctx))
 }
 
-/// "Treat as the same artist" (Needs Attention): no file changes.
-pub fn artist_mark_same(ctx: &Ctx, a: String, b: String) {
+/// A decision about artists can't be written while a restore replaces them.
+fn not_while_restoring() -> Result<(), String> {
+    if crate::backup::restoring() {
+        return Err("A backup is being restored. Try again when it has finished.".into());
+    }
+    Ok(())
+}
+
+/// "Treat as the same artist" (Needs Attention): no file changes. (`blocking`: writes the
+/// decisions and works the artists out again.)
+pub fn artist_mark_same(ctx: &Ctx, a: String, b: String) -> Result<(), String> {
+    not_while_restoring()?;
     crate::libfix::artist_mark_same(ctx, a, b);
+    Ok(())
 }
 
 /// "Not the same artist" (an artist page): `name` is split out from `others`. The pairs written.
-pub fn artist_mark_different(ctx: &Ctx, name: String, others: Vec<String>) -> Vec<[String; 2]> {
-    crate::libfix::artist_mark_different(ctx, name, others)
+pub fn artist_mark_different(ctx: &Ctx, name: String, others: Vec<String>) -> Result<Vec<[String; 2]>, String> {
+    not_while_restoring()?;
+    Ok(crate::libfix::artist_mark_different(ctx, name, others))
 }
 
 /// Undoes either of the two above.
-pub fn artist_forget(ctx: &Ctx, pairs: Vec<[String; 2]>) {
+pub fn artist_forget(ctx: &Ctx, pairs: Vec<[String; 2]>) -> Result<(), String> {
+    not_while_restoring()?;
     crate::libfix::artist_forget(ctx, pairs);
+    Ok(())
 }
 
-pub fn artist_names_status(ctx: &Ctx) -> crate::musicbrainz::Status {
-    crate::musicbrainz::status(ctx)
+/// (`blocking`: counts the library's artist names.)
+pub fn artist_names_status(ctx: &Ctx) -> Result<crate::musicbrainz::Status, String> {
+    Ok(crate::musicbrainz::status(ctx))
 }
 
-/// Pause (kept across restarts) or resume the MusicBrainz job.
-pub fn artist_names_pause(ctx: &Ctx, paused: bool) {
+/// Pause (kept across restarts) or resume the MusicBrainz job. (`blocking`: saves its cache and
+/// walks the library to say where it is.)
+pub fn artist_names_pause(ctx: &Ctx, paused: bool) -> Result<(), String> {
     crate::musicbrainz::set_paused(ctx, paused);
+    Ok(())
 }
 
-/// Stops the MusicBrainz job until Cadence starts again.
-pub fn artist_names_stop(ctx: &Ctx) {
+/// Stops the MusicBrainz job until Cadence starts again. (`blocking`: says where it is, which
+/// walks the library.)
+pub fn artist_names_stop(ctx: &Ctx) -> Result<(), String> {
     crate::musicbrainz::stop(ctx);
+    Ok(())
 }
 
 /// Lyrics for a song: from the file or a .lrc next to it, else LRCLIB (if allowed). Placed on the
@@ -1514,6 +1544,11 @@ pub fn disconnect_listenbrainz(ctx: &Ctx) -> Result<(), String> {
 pub fn set_listenbrainz_loved(ctx: &Ctx, enabled: bool) {
     ctx.state.settings.lock().listenbrainz_loved = enabled;
     ctx.state.save_settings_later();
+    // The sender checks it before each turn (hearts already waiting aren't sent while it's off).
+    crate::lbloved::set_sending(enabled);
+    if enabled && let Some(s) = crate::scrobble::running() {
+        s.wake();
+    }
 }
 
 pub fn set_new_releases_online(ctx: &Ctx, enabled: bool) {
@@ -1522,20 +1557,23 @@ pub fn set_new_releases_online(ctx: &Ctx, enabled: bool) {
 }
 
 /// Restoring the listening history from ListenBrainz (`lbimport`).
-pub fn lb_import_status(ctx: &Ctx) -> crate::lbimport::Status {
-    crate::lbimport::status(ctx)
+/// (`blocking`, as the three after it: they read or remove the import's files.)
+pub fn lb_import_status(ctx: &Ctx) -> Result<crate::lbimport::Status, String> {
+    Ok(crate::lbimport::status(ctx))
 }
 
 pub fn lb_import_start(ctx: &Ctx) -> Result<crate::lbimport::Status, String> {
     crate::lbimport::start(ctx)
 }
 
-pub fn lb_import_pause(ctx: &Ctx) {
+pub fn lb_import_pause(ctx: &Ctx) -> Result<(), String> {
     crate::lbimport::pause(ctx);
+    Ok(())
 }
 
-pub fn lb_import_discard(ctx: &Ctx) {
+pub fn lb_import_discard(ctx: &Ctx) -> Result<(), String> {
     crate::lbimport::discard(ctx);
+    Ok(())
 }
 
 pub fn lb_import_apply(ctx: &Ctx) -> Result<crate::lbimport::Applied, String> {
@@ -1565,9 +1603,10 @@ pub fn new_releases(ctx: &Ctx) -> Result<crate::lbreleases::View, String> {
     Ok(crate::lbreleases::for_discover(ctx, true))
 }
 
-/// What was found last time (no network).
-pub fn new_releases_cached(ctx: &Ctx) -> crate::lbreleases::View {
-    crate::lbreleases::for_discover(ctx, false)
+/// What was found last time (no network). (`blocking`: reads the kept list and matches it against
+/// the library's albums.)
+pub fn new_releases_cached(ctx: &Ctx) -> Result<crate::lbreleases::View, String> {
+    Ok(crate::lbreleases::for_discover(ctx, false))
 }
 
 // ---------- tag editing ----------
@@ -2432,6 +2471,7 @@ macro_rules! cadence_commands {
     ($m:ident) => {
         $m! {
             plain get_library() -> $crate::library::Snapshot;
+            plain get_library_part(track_ids: Vec<String>) -> $crate::library::Snapshot;
             plain get_folders() -> Vec<String>;
             plain add_folders(paths: Vec<String>) -> Vec<String>;
             fallible open_file(path: String) -> $crate::api::Opened;
@@ -2471,7 +2511,7 @@ macro_rules! cadence_commands {
             plain insert_in_queue(at: usize, ids: Vec<String>) -> ();
             plain set_sleep_timer(kind: String, amount: Option<u32>) -> ();
             plain get_sleep_timer() -> Option<u64>;
-            plain set_volume(volume: f32) -> ();
+            plain set_volume(volume: f32, device_gen: Option<u64>) -> ();
             plain set_repeat(repeat: $crate::audio::Repeat) -> ();
             plain set_shuffle(on: bool) -> ();
             plain play_shuffled(ids: Vec<String>) -> ();
@@ -2483,7 +2523,7 @@ macro_rules! cadence_commands {
             plain set_queue_options(options: $crate::api::QueueOptions) -> ();
             plain get_status() -> $crate::audio::Status;
             plain get_dsp() -> $crate::audio::DspSettings;
-            plain set_dsp(dsp: $crate::audio::DspSettings) -> ();
+            plain set_dsp(dsp: $crate::audio::DspSettings, device_gen: Option<u64>) -> ();
             blocking list_output_devices() -> $crate::api::OutputDevices;
             plain set_output_device(device: Option<$crate::audio::DeviceRef>) -> ();
             plain output_use_default() -> ();
@@ -2536,17 +2576,17 @@ macro_rules! cadence_commands {
             fallible disconnect_listenbrainz() -> ();
             plain set_listenbrainz_loved(enabled: bool) -> ();
             plain set_new_releases_online(enabled: bool) -> ();
-            plain lb_import_status() -> $crate::lbimport::Status;
-            fallible lb_import_start() -> $crate::lbimport::Status;
-            plain lb_import_pause() -> ();
-            plain lb_import_discard() -> ();
+            blocking lb_import_status() -> $crate::lbimport::Status;
+            blocking lb_import_start() -> $crate::lbimport::Status;
+            blocking lb_import_pause() -> ();
+            blocking lb_import_discard() -> ();
             blocking lb_import_apply() -> $crate::lbimport::Applied;
             blocking lb_import_save_unmatched(path: Option<String>) -> $crate::playlist_io::SavedFile;
             blocking lb_loved_preview() -> $crate::lbloved::SyncPreview;
             blocking lb_loved_apply() -> $crate::lbloved::SyncDone;
             plain lb_loved_waiting() -> usize;
             blocking new_releases() -> $crate::lbreleases::View;
-            plain new_releases_cached() -> $crate::lbreleases::View;
+            blocking new_releases_cached() -> $crate::lbreleases::View;
             blocking write_tags(ids: Vec<String>, changes: $crate::tagedit::TagChanges) -> $crate::api::TagsSaved;
             blocking find_song_info(id: String, query: Option<String>) -> $crate::api::SongInfoResults;
             blocking save_song_info(id: String, info: $crate::autotag::Candidate, keep_title: bool, whole_album: bool) -> $crate::autotag::Saved;
@@ -2560,15 +2600,15 @@ macro_rules! cadence_commands {
             plain artist_pairs() -> $crate::libfix::ArtistPairs;
             plain artist_pair_dismiss(native: String, latin: String) -> ();
             blocking merge_artist(from: String, to: String) -> $crate::libfix::Renamed;
-            plain set_artist_names_online(enabled: bool) -> ();
+            blocking set_artist_names_online(enabled: bool) -> ();
             plain artist_identity() -> $crate::identity::IdentityView;
             blocking search_keys() -> $crate::searchkeys::SearchKeys;
-            plain artist_mark_same(a: String, b: String) -> ();
-            plain artist_mark_different(name: String, others: Vec<String>) -> Vec<[String; 2]>;
-            plain artist_forget(pairs: Vec<[String; 2]>) -> ();
-            plain artist_names_status() -> $crate::musicbrainz::Status;
-            plain artist_names_pause(paused: bool) -> ();
-            plain artist_names_stop() -> ();
+            blocking artist_mark_same(a: String, b: String) -> ();
+            blocking artist_mark_different(name: String, others: Vec<String>) -> Vec<[String; 2]>;
+            blocking artist_forget(pairs: Vec<[String; 2]>) -> ();
+            blocking artist_names_status() -> $crate::musicbrainz::Status;
+            blocking artist_names_pause(paused: bool) -> ();
+            blocking artist_names_stop() -> ();
             plain fix_all_found() -> Vec<$crate::libfix::FoundInfo>;
             blocking fix_all_save(ids: Vec<String>) -> $crate::libfix::FixAllSaved;
             plain fix_all_discard() -> ();

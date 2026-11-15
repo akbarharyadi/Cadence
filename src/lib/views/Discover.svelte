@@ -30,12 +30,14 @@
   const failed = $derived(basis === "month" ? (app.dailyState === "error" ? app.dailyError : "") : app.discoverState === "error" ? app.discoverError : "");
   const p = $derived(app.profile);
 
-  /** This month's names first, then all-time ones, without repeats. */
-  function merged(a: PlayCount[], b: PlayCount[]): string[] {
+  /** This month's names first, then all-time ones, without repeats (an artist written two ways,
+   *  米津玄師 and Kenshi Yonezu, is one chip). */
+  function merged(a: PlayCount[], b: PlayCount[], artists = false): string[] {
     const seen = new Set<string>();
     const out: string[] = [];
     for (const c of [...a, ...b]) {
-      const k = c.name.toLowerCase();
+      const name = c?.name ?? "";
+      const k = (artists ? (app.artistByName(name)?.name ?? name) : name).toLowerCase();
       if (!seen.has(k)) {
         seen.add(k);
         out.push(c.name);
@@ -45,7 +47,7 @@
   }
 
   const chips = $derived(
-    !p ? [] : basis === "artist" ? merged(p.monthArtists, p.artists) : basis === "genre" ? merged(p.monthGenres, p.genres) : [],
+    !p ? [] : basis === "artist" ? merged(p.monthArtists, p.artists, true) : basis === "genre" ? merged(p.monthGenres, p.genres) : [],
   );
 
   const monthWords = $derived.by(() => {
@@ -257,7 +259,8 @@
     border-radius: 50%;
     border: 2px solid var(--line-strong);
     border-top-color: var(--accent);
-    animation: spin 0.9s linear infinite;
+    /* The DJ can take a minute (or hang): ~9 s of spinning, then it rests; the words say it's working. */
+    animation: spin 0.9s linear 10;
   }
   @keyframes spin {
     to {

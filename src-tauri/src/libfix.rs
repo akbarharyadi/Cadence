@@ -386,8 +386,10 @@ pub fn fix_all_start(ctx: Ctx) -> bool {
             let found = found().lock().unwrap().len();
             ctx.emit("fix-all-progress", FixAllProgress { done, total, found, running })
         };
-        let pool = crate::jobs::background_pool();
-        pool.install(|| {
+        // Network work, not heavy: on this thread at background priority (the shared heavy
+        // pool stays for the CPU-bound jobs).
+        crate::jobs::background_priority();
+        {
             autotag::paced(|| {
                 for (i, t) in todo.iter().enumerate() {
                     if FIX_ALL_STOP.load(Ordering::SeqCst) {
@@ -400,7 +402,7 @@ pub fn fix_all_start(ctx: Ctx) -> bool {
                     }
                 }
             })
-        });
+        }
         FIX_ALL_RUNNING.store(false, Ordering::SeqCst);
         progress(total, false);
     });
@@ -526,8 +528,10 @@ pub fn covers_start(ctx: Ctx, album_ids: Vec<String>) -> bool {
             let found = covers_found().lock().unwrap().found.len();
             ctx.emit("cover-job-progress", FixAllProgress { done, total, found, running })
         };
-        let pool = crate::jobs::background_pool();
-        pool.install(|| {
+        // Network work, not heavy: on this thread at background priority (the shared heavy
+        // pool stays for the CPU-bound jobs).
+        crate::jobs::background_priority();
+        {
             for (i, (id, title, artist)) in todo.iter().enumerate() {
                 if COVERS_STOP.load(Ordering::SeqCst) {
                     break;
@@ -571,7 +575,7 @@ pub fn covers_start(ctx: Ctx, album_ids: Vec<String>) -> bool {
                     None => {}
                 }
             }
-        });
+        }
         COVERS_RUNNING.store(false, Ordering::SeqCst);
         progress(total, false);
     });
@@ -676,46 +680,44 @@ fn same_pair(p: &[String; 2], a: &str, b: &str) -> bool {
 /// The user says these two names are one artist (the files keep their names). Undone with
 /// `artist_forget`.
 pub fn artist_mark_same(ctx: &Ctx, a: String, b: String) {
-    let dir = &ctx.state.data_dir;
-    let mut names = load_names(dir);
-    names.different.retain(|p| !same_pair(p, &a, &b));
-    if !names.same.iter().any(|p| same_pair(p, &a, &b)) {
-        names.same.push([a, b]);
-    }
-    save_names(dir, &names);
+    change_names(&ctx.state.data_dir, |names| {
+        names.different.retain(|p| !same_pair(p, &a, &b));
+        if !names.same.iter().any(|p| same_pair(p, &a, &b)) {
+            names.same.push([a, b]);
+        }
+    });
     crate::identity::rebuild_now(ctx);
 }
 
 /// The user says `name` isn't the same artist as any of `others` (an artist page's "Not the same
 /// artist"). The pairs written, to undo with `artist_forget`.
 pub fn artist_mark_different(ctx: &Ctx, name: String, others: Vec<String>) -> Vec<[String; 2]> {
-    let dir = &ctx.state.data_dir;
-    let mut names = load_names(dir);
-    let mut added = Vec::new();
-    for o in others {
-        if crate::identity::fold(&o) == crate::identity::fold(&name) {
-            continue;
+    let added = change_names(&ctx.state.data_dir, |names| {
+        let mut added = Vec::new();
+        for o in others {
+            if crate::identity::fold(&o) == crate::identity::fold(&name) {
+                continue;
+            }
+            names.same.retain(|p| !same_pair(p, &name, &o));
+            if !names.different.iter().any(|p| same_pair(p, &name, &o)) {
+                names.different.push([name.clone(), o.clone()]);
+                added.push([name.clone(), o]);
+            }
         }
-        names.same.retain(|p| !same_pair(p, &name, &o));
-        if !names.different.iter().any(|p| same_pair(p, &name, &o)) {
-            names.different.push([name.clone(), o.clone()]);
-            added.push([name.clone(), o]);
-        }
-    }
-    save_names(dir, &names);
+        added
+    });
     crate::identity::rebuild_now(ctx);
     added
 }
 
 /// Forgets the user's decisions about these pairs (same or different), to undo one.
 pub fn artist_forget(ctx: &Ctx, pairs: Vec<[String; 2]>) {
-    let dir = &ctx.state.data_dir;
-    let mut names = load_names(dir);
-    for [a, b] in &pairs {
-        names.same.retain(|p| !same_pair(p, a, b));
-        names.different.retain(|p| !same_pair(p, a, b));
-    }
-    save_names(dir, &names);
+    change_names(&ctx.state.data_dir, |names| {
+        for [a, b] in &pairs {
+            names.same.retain(|p| !same_pair(p, a, b));
+            names.different.retain(|p| !same_pair(p, a, b));
+        }
+    });
     crate::identity::rebuild_now(ctx);
 }
 
@@ -725,8 +727,25 @@ fn names_file(dir: &Path) -> PathBuf {
 fn load_names(dir: &Path) -> ArtistNames {
     crate::state::read_json(&names_file(dir))
 }
-fn save_names(dir: &Path, names: &ArtistNames) {
-    crate::state::write_json(&names_file(dir), names);
+
+/// One change of artist-names.json at a time (the artist check, the listener's decisions and a
+/// restore each read, change and write it: two at once would lose one's change).
+pub(crate) static NAMES: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Reads artist-names.json, changes it and writes it, with no other change in between.
+fn change_names<R>(dir: &Path, f: impl FnOnce(&mut ArtistNames) -> R) -> R {
+    let _one = NAMES.lock();
+    let mut names = load_names(dir);
+    let r = f(&mut names);
+    crate::state::write_json(&names_file(dir), &names);
+    r
+}
+
+/// The artist check turned on by itself stops when the online lookups are turned off.
+pub fn fix_tags_online_off() {
+    if ARTISTS_AUTO.load(Ordering::SeqCst) && ARTISTS_RUNNING.load(Ordering::SeqCst) {
+        ARTISTS_STOP.store(true, Ordering::SeqCst);
+    }
 }
 
 /// Every artist name in the library (each name of a credit like "A & B"), as written, with its songs.
@@ -752,6 +771,9 @@ fn library_artists(ctx: &Ctx) -> HashMap<String, (String, usize)> {
 }
 
 static ARTISTS_RUNNING: AtomicBool = AtomicBool::new(false);
+/// The running artist check was started by itself after a scan (not by the listener): it stops
+/// when "fix tags online" is turned off.
+static ARTISTS_AUTO: AtomicBool = AtomicBool::new(false);
 static ARTISTS_STOP: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Serialize)]
@@ -767,6 +789,7 @@ pub fn artist_check_start(ctx: Ctx) -> bool {
     if ARTISTS_RUNNING.swap(true, Ordering::SeqCst) {
         return false;
     }
+    ARTISTS_AUTO.store(false, Ordering::SeqCst);
     ARTISTS_STOP.store(false, Ordering::SeqCst);
     let dir = ctx.state.data_dir.clone();
     let known = load_names(&dir);
@@ -775,20 +798,21 @@ pub fn artist_check_start(ctx: Ctx) -> bool {
         let total = todo.len();
         let progress = |done: usize, running: bool| ctx.emit("artist-check-progress", ArtistCheckProgress { done, total, running });
         if let Ok(client) = client() {
-            let pool = crate::jobs::background_pool();
-            pool.install(|| {
-                autotag::paced(|| {
-                    for (i, name) in todo.iter().enumerate() {
-                        if ARTISTS_STOP.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        progress(i, true);
-                        let Some(answer) = latin_name(&client, name) else { continue };
-                        let mut names = load_names(&dir);
-                        names.latin.insert(name.clone(), answer);
-                        save_names(&dir, &names);
+            // Network work, not heavy: on this thread at background priority (the shared heavy
+            // pool stays for the CPU-bound jobs).
+            crate::jobs::background_priority();
+            autotag::paced(|| {
+                for (i, name) in todo.iter().enumerate() {
+                    // Stopped, or started by itself and the online lookups turned off meanwhile.
+                    if ARTISTS_STOP.load(Ordering::SeqCst) || (ARTISTS_AUTO.load(Ordering::SeqCst) && !ctx.state.settings.lock().fix_tags_online) {
+                        break;
                     }
-                })
+                    progress(i, true);
+                    let Some(answer) = latin_name(&client, name) else { continue };
+                    change_names(&dir, |names| {
+                        names.latin.insert(name.clone(), answer);
+                    });
+                }
             });
         }
         ARTISTS_RUNNING.store(false, Ordering::SeqCst);
@@ -806,8 +830,8 @@ pub fn artist_check_auto(ctx: &Ctx) {
         return;
     }
     let known = load_names(&ctx.state.data_dir);
-    if library_artists(ctx).values().any(|(n, _)| cjk(n) && !known.latin.contains_key(n)) {
-        artist_check_start(ctx.clone());
+    if library_artists(ctx).values().any(|(n, _)| cjk(n) && !known.latin.contains_key(n)) && artist_check_start(ctx.clone()) {
+        ARTISTS_AUTO.store(true, Ordering::SeqCst);
     }
 }
 
@@ -904,11 +928,10 @@ pub(crate) fn artist_aliases(dir: &Path) -> crate::state::Aliases {
 
 /// The user says these two names are different artists: not suggested again.
 pub fn artist_pair_dismiss(ctx: &Ctx, native: String, latin: String) {
-    let dir = &ctx.state.data_dir;
-    let mut names = load_names(dir);
-    names.same.retain(|p| !same_pair(p, &native, &latin));
-    names.different.push([native, latin]);
-    save_names(dir, &names);
+    change_names(&ctx.state.data_dir, |names| {
+        names.same.retain(|p| !same_pair(p, &native, &latin));
+        names.different.push([native, latin]);
+    });
     crate::identity::invalidate();
 }
 
@@ -1010,9 +1033,7 @@ mod tests {
         assert_eq!(d.learned, [("米津玄師".to_string(), "Kenshi Yonezu".to_string())]);
         assert_eq!(d.different.len(), 1);
         assert!(d.same.is_empty());
-        let mut names = load_names(&dir);
-        names.same.push(["X".into(), "Y".into()]);
-        save_names(&dir, &names);
+        change_names(&dir, |names| names.same.push(["X".into(), "Y".into()]));
         assert_eq!(decisions(&dir).same.len(), 1);
         assert!(same_pair(&["x".into(), "Y".into()], "y", "X"));
         let _ = std::fs::remove_dir_all(&dir);

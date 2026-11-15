@@ -141,4 +141,30 @@ describe("Command palette by other names", () => {
     expect(await screen.findByRole("option", { name: /^Dynamite/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /^방탄소년단/ })).toBeInTheDocument();
   });
+
+  test("the keys are asked for when it first opens, and the typed text is searched again when they arrive", async () => {
+    let give: (k: SearchKeys) => void = () => {};
+    const backend = mockBackend({ search_keys: () => new Promise<SearchKeys>((r) => (give = r)) });
+    const user = userEvent.setup();
+    const lib = library();
+    resetApp(lib);
+    render(AppKeys);
+    await user.keyboard("{Control>}k{/Control}");
+    expect(backend.to("search_keys")).toHaveLength(1);
+    await user.type(screen.getByRole("combobox", { name: /Search pages, actions/ }), "bangtan");
+    await new Promise((r) => setTimeout(r, 150));
+    expect(screen.queryByRole("option", { name: /^Dynamite/ })).toBeNull();
+    // The keys come in while the palette is open: no keystroke needed.
+    give(withKeys(lib));
+    expect(await screen.findByRole("option", { name: /^Dynamite/ })).toBeInTheDocument();
+  });
+
+  test("Search asks for the keys when it opens (never before)", async () => {
+    const backend = mockBackend({ search_keys: () => withKeys(library()) });
+    resetApp(library());
+    expect(backend.to("search_keys")).toHaveLength(0);
+    render(Search, { query: "" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(backend.to("search_keys")).toHaveLength(1);
+  });
 });

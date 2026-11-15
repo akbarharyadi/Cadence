@@ -10,7 +10,9 @@ import { overlays } from "#lib/palette.svelte.js";
 import { ALL_SHORTCUTS, SHORTCUT_GROUPS } from "#lib/shortcuts.js";
 import { app } from "#lib/store.svelte.js";
 import { applyZoom, savedZoom, uiZoom, ZOOM_KEY } from "#lib/uiZoom.svelte.js";
-import { makeLibrary, mockBackend, resetApp } from "./helpers";
+import TrackList from "#lib/components/TrackList.svelte";
+import ModalHarness from "./ModalHarness.svelte";
+import { makeLibrary, mockBackend, resetApp, settle } from "./helpers";
 
 let user: ReturnType<typeof userEvent.setup>;
 
@@ -84,7 +86,89 @@ describe("search shortcuts", () => {
   });
 });
 
+describe("Ctrl+F and '/' behind a dialog", () => {
+  test("with a dialog open they leave the page under it alone", async () => {
+    resetApp(makeLibrary(3));
+    render(Sidebar);
+    render(AppKeys);
+    render(ModalHarness, { onOuterClose: () => {}, onInnerClose: () => {} });
+    const box = screen.getByPlaceholderText("Search your music");
+    await user.keyboard("{Control>}f{/Control}");
+    expect(box).not.toHaveFocus();
+    screen.getByRole("dialog").querySelector("button")?.focus();
+    await user.keyboard("/");
+    expect(box).not.toHaveFocus();
+    expect(app.view.name).toBe("home");
+  });
+
+  test("with Now Playing or a menu open they do nothing", async () => {
+    resetApp(makeLibrary(3));
+    render(Sidebar);
+    render(AppKeys);
+    const box = screen.getByPlaceholderText("Search your music");
+    app.nowPlayingOpen = true;
+    await user.keyboard("{Control>}f{/Control}");
+    expect(box).not.toHaveFocus();
+    app.nowPlayingOpen = false;
+    app.menu = { x: 0, y: 0, items: [] };
+    await user.keyboard("/");
+    expect(box).not.toHaveFocus();
+    app.menu = null;
+  });
+
+  test("in the command palette Ctrl+F goes to the palette's own box", async () => {
+    resetApp(makeLibrary(3));
+    render(Sidebar);
+    render(AppKeys);
+    await user.keyboard("{Control>}k{/Control}");
+    const own = screen.getByRole("combobox", { name: /Search pages, actions/ });
+    (document.activeElement as HTMLElement | null)?.blur();
+    await user.keyboard("{Control>}f{/Control}");
+    expect(own).toHaveFocus();
+    expect(screen.getByPlaceholderText("Search your music")).not.toHaveFocus();
+  });
+});
+
+describe("Escape and a selection of songs", () => {
+  test("clears a multi-selection when focus has left the list; not while something above takes the key", async () => {
+    const lib = makeLibrary(4);
+    resetApp(lib);
+    render(AppKeys);
+    render(TrackList, { tracks: lib.tracks });
+    const rows = screen.getAllByRole("option");
+    await user.click(rows[0]);
+    await user.keyboard("{Control>}");
+    await user.click(rows[1]);
+    await user.keyboard("{/Control}");
+    expect(screen.getByRole("toolbar", { name: "Selected songs" })).toBeInTheDocument();
+
+    // Focus elsewhere (the page): Now Playing open takes Escape first.
+    (document.activeElement as HTMLElement | null)?.blur();
+    app.nowPlayingOpen = true;
+    await user.keyboard("{Escape}");
+    app.nowPlayingOpen = false;
+    await settle();
+    expect(screen.getByRole("toolbar", { name: "Selected songs" })).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await settle();
+    expect(screen.queryByRole("toolbar", { name: "Selected songs" })).not.toBeInTheDocument();
+    expect(app.view.name).toBe("home");
+  });
+});
+
 describe("keyboard shortcut help", () => {
+  test("lists the song-list keys and the finding keys", () => {
+    const actions = ALL_SHORTCUTS.map((s) => s.action).join("\n");
+    for (const want of [/Select all songs/, /Select more songs/, /Play the song/, /Remove the selected songs/, /Clear the selection/, /jump to it/, /song's menu/, /Long-press|Phones/, /Command palette/, /Search your music/, /Go back/, /Go forward/, /Larger interface/, /Smaller interface/, /Normal interface size/, /Keyboard shortcuts/]) {
+      expect(actions).toMatch(want);
+    }
+    expect(SHORTCUT_GROUPS.map((g) => g.title)).toContain("In song lists");
+    // Ids are unique (the palette finds an action's keys by its id).
+    const ids = ALL_SHORTCUTS.map((s) => s.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   test("'?' opens the list, which has every shortcut of the one list; Escape closes it", async () => {
     resetApp(makeLibrary(3));
     render(AppKeys);

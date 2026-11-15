@@ -2,7 +2,7 @@
   // Discover › New from artists you own: releases of the last weeks (and the next) by artists in the
   // library, from ListenBrainz's fresh releases, asked once a day when this page opens. Covers load
   // only for rows on screen. It needs no ListenBrainz account.
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { api, STORES, type NewRelease, type NewReleases } from "#lib/api.js";
 
@@ -16,9 +16,18 @@
 
   onMount(() => {
     let alive = true;
+    let fresh = false;
     // What was found last time at once, then today's ask (it only goes to the network when it's due).
-    api.newReleasesCached().then((d) => alive && d && (data = d)).catch(() => {});
-    api.newReleases().then((d) => alive && d && (data = d)).catch(() => {});
+    // A cached answer that comes after today's is older: left out.
+    api.newReleasesCached().then((d) => alive && !fresh && d && (data = d)).catch(() => {});
+    api
+      .newReleases()
+      .then((d) => {
+        if (!alive || !d) return;
+        fresh = true;
+        data = d;
+      })
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -27,31 +36,38 @@
   const items = $derived(data?.items ?? []);
   const shown = $derived(all ? items : items.slice(0, FIRST));
 
-  // One observer for the list: a row's cover is asked for once the row first comes into view.
+  // One observer for the component's whole life: a row's cover is asked for once the row first
+  // comes into view. Rows that appear later ("Show all", newer data) are added to it.
+  let watch: IntersectionObserver | null = null;
+  onMount(() => () => {
+    watch?.disconnect();
+    watch = null;
+  });
   $effect(() => {
     const root = list;
-    // (Rows come and go with "Show all".)
-    void shown.length;
+    void shown;
     if (!root) return;
-    const rows = Array.from(root.querySelectorAll<HTMLElement>("[data-key]"));
-    if (typeof IntersectionObserver === "undefined") {
-      for (const r of rows) seen[r.dataset.key ?? ""] = true;
-      return;
-    }
-    const watch = new IntersectionObserver(
-      (entries) => {
-        for (const e of entries) {
-          const key = (e.target as HTMLElement).dataset.key ?? "";
-          if (e.isIntersecting && key) {
-            seen[key] = true;
-            watch.unobserve(e.target);
+    untrack(() => {
+      const rows = Array.from(root.querySelectorAll<HTMLElement>("[data-key]"));
+      if (typeof IntersectionObserver === "undefined") {
+        for (const r of rows) if (!seen[r.dataset.key ?? ""]) seen[r.dataset.key ?? ""] = true;
+        return;
+      }
+      watch ??= new IntersectionObserver(
+        (entries) => {
+          for (const e of entries) {
+            const key = (e.target as HTMLElement).dataset.key ?? "";
+            if (e.isIntersecting && key) {
+              if (!seen[key]) seen[key] = true;
+              watch?.unobserve(e.target);
+            }
           }
-        }
-      },
-      { rootMargin: "120px" },
-    );
-    for (const r of rows) if (!seen[r.dataset.key ?? ""]) watch.observe(r);
-    return () => watch.disconnect();
+        },
+        { rootMargin: "120px" },
+      );
+      // Observing a row already watched does nothing.
+      for (const r of rows) if (!seen[r.dataset.key ?? ""]) watch.observe(r);
+    });
   });
 
   const day = (d: string) => {
@@ -117,7 +133,8 @@
     margin: 0;
     padding: 0;
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    /* Never wider than the page: a 360 px phone gets one column, no sideways scrolling. */
+    grid-template-columns: repeat(auto-fill, minmax(min(380px, 100%), 1fr));
     gap: 10px;
   }
   .row {

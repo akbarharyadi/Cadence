@@ -107,24 +107,30 @@
   let translateState = $state<"off" | "translating" | "shown" | "needs-ai" | "same" | "error">("off");
   let translateError = $state("");
   const hasText = $derived(!!lyrics && !lyrics.instrumental && (lyrics.synced.length > 0 || !!lyrics.plain?.trim()));
-  // Asked only while the toggle is on, for the song on screen; another song cancels it.
+  /**
+   * What a translation is for: the song, the language and the lines' text. The lyrics object is
+   * replaced when only timings or singers change (a voice job finishing, "Find singers"): the
+   * same text then keeps the translation shown, with no new request (and no tokens spent again).
+   */
+  const translateFor = $derived(translateOn && lyrics && hasText ? `${songId}\u0000${translateLang}\u0000${shownLines.length}\u0000${shownLines.join("\n")}` : "");
+  // Asked only while the toggle is on, for the song on screen; another song (or other lines) cancels it.
   $effect(() => {
-    const l = lyrics;
-    const id = songId;
-    const lang = translateLang;
+    const key = translateFor;
     translation = null;
     translateError = "";
-    if (!translateOn || !l || !hasText) {
+    if (!key) {
       translateState = "off";
       return;
     }
+    const id = untrack(() => songId);
+    const lang = untrack(() => translateLang);
     translateState = "translating";
     const count = untrack(() => shownLines.length);
     let current = true;
     api
       .translateLyrics(id, lang)
       .then((t) => {
-        if (!current || lyrics !== l) return;
+        if (!current) return;
         if (!t || !Array.isArray(t.lines)) throw new Error("No translation came back.");
         if (t.from === "needs-ai") translateState = "needs-ai";
         else if (t.from === "same" || t.from === "none") translateState = "same";
@@ -135,7 +141,7 @@
         }
       })
       .catch((e) => {
-        if (!current || lyrics !== l) return;
+        if (!current) return;
         translateState = "error";
         translateError = e instanceof Error ? e.message : String(e);
       });
@@ -1136,15 +1142,13 @@
     min-width: 3ch;
     text-align: right;
   }
+  /* Working (translating, following the singer, waiting): said in words (and a percentage), and
+     dimmed; no pulsing, which ran at the display's rate for as long as a job took (unbounded if
+     a request hung). */
   .chip.busy {
     cursor: default;
     font-variant-numeric: tabular-nums;
-    animation: listening 1.6s ease-in-out infinite;
-  }
-  @keyframes listening {
-    50% {
-      opacity: 0.55;
-    }
+    opacity: 0.72;
   }
   /* How much of the singer is left, while singing along. */
   .level {

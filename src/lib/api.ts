@@ -202,6 +202,10 @@ export interface Status {
   deviceMissing?: { name: string; fallback: string | null; resume: boolean } | null;
   /** Goes up when the system's output devices changed (the device list is out of date). */
   devices?: number;
+  /** Goes up each time playback moves to another device or output mode: what the volume and sound settings shown are for. */
+  deviceGen?: number;
+  /** Goes up each time a new queue is loaded. */
+  queueGen?: number;
 }
 
 /** An output device as remembered in the settings. */
@@ -620,6 +624,20 @@ export interface BackupInfo {
   dir: string;
   /** The day's automatic snapshot is being made right now. */
   running?: boolean;
+  /** A restore was cut short (closed or crashed midway) and dealt with at startup; null once a restore goes through. */
+  interrupted?: BackupInterrupted | null;
+}
+
+export interface BackupInterrupted {
+  /** When it was found and dealt with (unix seconds). */
+  at: number;
+  backup: string;
+  /** True: data put back as before the restore. False: the backup was put back whole instead. */
+  rolledBack: boolean;
+  /** Why neither could be done ("" when one was). */
+  error: string;
+  /** One sentence for the Backup section. */
+  message: string;
 }
 
 export interface BackupMade {
@@ -648,6 +666,10 @@ export interface BackupRestored {
   lyricOffsets: string | null;
   app: string;
   created: number;
+  /** Files that couldn't be replaced this session (another program held them): restore again after starting Cadence. */
+  heldBack?: string[];
+  /** Folder where listening-history years the backup doesn't have were moved (not deleted); "" for none. */
+  historyAside?: string;
 }
 
 /** A Discover search and what it found. */
@@ -689,6 +711,8 @@ export const EQ_BANDS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 
 export const api = {
   library: () => invoke<Snapshot>("get_library"),
+  /** Only these songs (those still in the library, at most 50) and their albums. */
+  libraryPart: (trackIds: string[]) => invoke<Snapshot>("get_library_part", { trackIds }),
   folders: () => invoke<string[]>("get_folders"),
   addFolders: (paths: string[]) => invoke<string[]>("add_folders", { paths }),
   removeFolder: (path: string) => invoke<string[]>("remove_folder", { path }),
@@ -710,7 +734,9 @@ export const api = {
   insertInQueue: (at: number, ids: string[]) => invoke<void>("insert_in_queue", { at, ids }),
   setSleepTimer: (kind: "off" | "minutes" | "songs" | "album", amount?: number) => invoke<void>("set_sleep_timer", { kind, amount: amount ?? null }),
   sleepTimer: () => invoke<number | null>("get_sleep_timer"),
-  setVolume: (volume: number) => invoke<void>("set_volume", { volume }),
+  /** `deviceGen`: the `Status.deviceGen` the window was showing; the engine drops a stale one. */
+  setVolume: (volume: number, deviceGen?: number) =>
+    invoke<void>("set_volume", deviceGen == null ? { volume } : { volume, deviceGen }),
   setRepeat: (repeat: Repeat) => invoke<void>("set_repeat", { repeat }),
   /** Shuffle the songs coming up (and every list played from now on); off puts them back in order. */
   setShuffle: (on: boolean) => invoke<void>("set_shuffle", { on }),
@@ -727,7 +753,9 @@ export const api = {
   setQueueOptions: (options: QueueOptions) => invoke<void>("set_queue_options", { options }),
   status: () => invoke<Status>("get_status"),
   dsp: () => invoke<DspSettings>("get_dsp"),
-  setDsp: (dsp: DspSettings) => invoke<void>("set_dsp", { dsp }),
+  /** `deviceGen`: as for `setVolume`. */
+  setDsp: (dsp: DspSettings, deviceGen?: number) =>
+    invoke<void>("set_dsp", deviceGen == null ? { dsp } : { dsp, deviceGen }),
   outputDevices: () => invoke<OutputDevices>("list_output_devices"),
   setOutputDevice: (device: DeviceRef | null) => invoke<void>("set_output_device", { device }),
   outputUseDefault: () => invoke<void>("output_use_default"),

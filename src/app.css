@@ -425,6 +425,14 @@ html.phone .page-in[data-kind="tab"] {
   }
 }
 
+/* The page can't be seen (hidden in the tray, minimized, another app in front on a phone; see
+   showing.svelte.ts): nothing animates. Every animation in the app is short or bounded anyway. */
+html.page-hidden *,
+html.page-hidden *::before,
+html.page-hidden *::after {
+  animation-play-state: paused !important;
+}
+
 /* Touch feedback: things you tap give a little. */
 .card:active .art,
 .artist-chip:active .avatar,

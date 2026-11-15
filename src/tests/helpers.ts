@@ -91,6 +91,8 @@ export function makeStatus(over: Partial<Status> = {}): Status {
     },
     error: null,
     stopAfter: null,
+    deviceGen: 0,
+    queueGen: 0,
     ...over,
   };
 }
@@ -142,7 +144,29 @@ export function mockBackend(handlers: Record<string, Handler> = {}) {
 
 /** Puts the `app` singleton back to a clean slate and gives it a library. */
 export function resetApp(init: { tracks?: Track[]; albums?: Album[]; playlists?: Playlist[]; status?: Status | null } = {}) {
-  const priv = app as unknown as { backMeta: unknown[]; forwardMeta: unknown[]; lastCurrent: unknown; lastAlbum: unknown };
+  const priv = app as unknown as {
+    backMeta: unknown[];
+    forwardMeta: unknown[];
+    lastCurrent: unknown;
+    lastAlbum: unknown;
+    startSeek: unknown;
+    keysWanted: boolean;
+    keysStale: boolean;
+    dspStale: boolean;
+    deferredDsp: unknown;
+    pointerHeld: boolean;
+    lastProfile: unknown;
+    miniKey: unknown;
+  };
+  priv.miniKey = null;
+  priv.startSeek = null;
+  priv.keysWanted = false;
+  priv.keysStale = true;
+  priv.dspStale = false;
+  priv.deferredDsp = null;
+  priv.pointerHeld = false;
+  priv.lastProfile = undefined;
+  app.dsp = null;
   app.tracks = init.tracks ?? [];
   app.albums = init.albums ?? [];
   app.playlists = init.playlists ?? [];

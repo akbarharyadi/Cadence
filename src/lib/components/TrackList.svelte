@@ -7,6 +7,7 @@
   import Rating from "./Rating.svelte";
   import SelectionBar from "./SelectionBar.svelte";
   import { eqBars } from "#lib/eq.js";
+  import { nextRange } from "#lib/virtualWindow.js";
 
   let {
     tracks,
@@ -330,6 +331,8 @@
   // ---------- keyboard ----------
   let typed = "";
   let typedTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Single keys that are window shortcuts (see AppKeys.svelte): never typed into the type-ahead. */
+  const TYPEAHEAD_NEVER = new Set(["/", "?"]);
   $effect(() => () => clearTimeout(typedTimer));
 
   /** Type-ahead: the next song whose title starts with what was typed (the same letter again: the one after). */
@@ -431,8 +434,9 @@
       const row = listEl?.querySelector<HTMLElement>(`[data-row-i="${cur}"]`);
       const r = row?.getBoundingClientRect();
       menu(new MouseEvent("contextmenu", { clientX: (r?.left ?? 0) + 60, clientY: (r?.top ?? 0) + ROW / 2 }), cur);
-    } else if (!mod && (/^[\p{L}\p{N}]$/u.test(k) || (typed && k.length === 1))) {
+    } else if (!mod && !TYPEAHEAD_NEVER.has(k) && (/^[\p{L}\p{N}]$/u.test(k) || (typed && k.length === 1))) {
       // Letters and digits start it (other keys stay shortcuts; Space with nothing typed stays play / pause).
+      // The window's own one-key shortcuts ("/" search, "?" help) are never part of it.
       e.preventDefault();
       typeAhead(k);
     }
@@ -447,29 +451,30 @@
   // songs stays quick and page animations don't stall. Rows are all ROW px tall; the space of
   // the rows that aren't built is kept as padding, so the page scrolls and sizes as before.
   const ROW = 54;
-  const MARGIN = 12;
   const virtual = $derived(tracks.length > 80 && !multiDisc);
   let listEl = $state<HTMLDivElement>();
   let first = $state(0);
   let last = $state(60);
+  // The window moves in steps (`nextRange`): most scroll events change nothing here (the browser
+  // sends at most one per frame).
   $effect(() => {
     const el = listEl;
     if (!virtual || !el) return;
     const scroller = scrollerOf(el);
     const count = tracks.length;
-    const update = () => {
+    const update = (fresh = false) => {
       const top = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-      const from = Math.max(0, Math.floor(-top / ROW) - MARGIN);
-      const to = Math.min(count, Math.ceil((scroller.clientHeight - top) / ROW) + MARGIN);
-      if (from !== first) first = from;
-      if (to !== last) last = Math.max(from, to);
+      const r = nextRange(fresh ? { first: 0, last: 0 } : { first, last }, { top, height: scroller.clientHeight, count, row: ROW });
+      if (r.first !== first) first = r.first;
+      if (r.last !== last) last = r.last;
     };
-    untrack(update); // reading first/last here mustn't make this effect re-run on every scroll
-    scroller.addEventListener("scroll", update, { passive: true });
-    const resize = new ResizeObserver(update);
+    untrack(() => update(true)); // reading first/last here mustn't make this effect re-run on every scroll
+    const onScroll = () => update();
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    const resize = new ResizeObserver(onScroll);
     resize.observe(scroller);
     return () => {
-      scroller.removeEventListener("scroll", update);
+      scroller.removeEventListener("scroll", onScroll);
       resize.disconnect();
     };
   });
@@ -486,6 +491,9 @@
     if (outside && from! >= last) out.push({ t: tracks[from!], i: from!, pinned: true });
     return out;
   });
+  /** The row under the pointer (its stars are built), from one listener on the list. */
+  let hoverRow = $state(-1);
+  const rowAt = (target: EventTarget | null) => Number((target as Element | null)?.closest?.("[data-row-i]")?.getAttribute("data-row-i") ?? -1);
   /** The active row, when it is built (a row scrolled out of the window has no element to point at). */
   const activeId = $derived(active >= 0 && active < tracks.length && (!virtual || (active >= first && active < last)) ? `${uid}-r${active}` : undefined);
 </script>
@@ -497,6 +505,7 @@
   class:numbered
   class:multi
   class:keyed
+  class:virtual
   role="listbox"
   aria-label={label}
   aria-multiselectable="true"
@@ -508,6 +517,8 @@
     pointer = e.pointerType || "mouse";
     swallowClick = false;
   }}
+  onpointerover={(e) => (hoverRow = rowAt(e.target))}
+  onpointerleave={() => (hoverRow = -1)}
   style={virtual ? `padding-top: ${first * ROW}px; padding-bottom: ${Math.max(0, tracks.length - last) * ROW}px` : undefined}
 >
   {#each items as { t, i, pinned } (t.id + i)}
@@ -583,7 +594,11 @@
         <button class="album" tabindex="-1" onclick={(e) => { e.stopPropagation(); app.go({ name: "album", id: t.albumId }); }}>{t.album}</button>
       {/if}
       <div class="marks" class:rated={app.ratingOf(t) > 0}>
-        <span class="stars"><Rating value={app.ratingOf(t)} size={13} onrate={(n) => app.setRating([t], n)} label="Rating for {t.title}" /></span>
+        <!-- Built only where they show (rated, pointed at, the keyboard's row): five buttons per
+             row were a third of a long list's elements. The empty span keeps their room. -->
+        <span class="stars">
+          {#if app.ratingOf(t) > 0 || hoverRow === i || active === i}<Rating value={app.ratingOf(t)} size={13} onrate={(n) => app.setRating([t], n)} label="Rating for {t.title}" />{/if}
+        </span>
         <button
           class="heart"
           class:loved={app.isLoved(t)}
@@ -603,7 +618,8 @@
   {/each}
 </div>
 
-{#if multi}
+<!-- Not over Now Playing or an open Up Next (the selection stays: the bar is back when they close). -->
+{#if multi && !app.nowPlayingOpen && !app.queueOpen}
   <SelectionBar
     {count}
     onplay={() => app.playTracks(selectedTracks(), 0, true)}
@@ -644,9 +660,13 @@
     height: 54px;
     padding: 0 12px;
     border-radius: var(--r-sm);
+    outline: none;
+  }
+  /* A short list builds every row: those off screen skip their rendering. (A long one builds only
+     the rows on screen, where this would only add work to every frame of a scroll.) */
+  .list:not(.virtual) .row {
     content-visibility: auto;
     contain-intrinsic-size: auto 54px;
-    outline: none;
   }
   /* Hairline between rows, hidden next to a highlighted row. */
   .row + .row::before {
@@ -791,8 +811,11 @@
     gap: 6px;
     flex: none;
   }
+  /* Room for five 13 px stars (each with 2 px padding, 1 px apart), built or not. */
   .stars {
     opacity: 0;
+    display: inline-block;
+    min-width: 89px;
   }
   .row:hover .stars,
   .row.selected .stars,

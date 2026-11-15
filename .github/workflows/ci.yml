@@ -51,6 +51,9 @@ jobs:
       # Vitest in jsdom: no webview, no Rust (the backend is mocked with Tauri's mockIPC).
       - run: pnpm test
 
+      # File and function size caps (AGENTS.md section 2).
+      - run: pnpm check:size
+
   rust:
     name: Rust unit tests
     # The same image as the Linux release build, so the system packages match.

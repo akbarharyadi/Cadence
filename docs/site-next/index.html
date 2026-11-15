@@ -1,0 +1,397 @@
+<!doctype html>
+<!-- NEXT RELEASE PAGE. Not deployed from here: see README.md in this folder. Search for @@ and fill in the three release placeholders in What's new. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cadence: a lossless music player for your own files</title>
+    <meta
+      name="description"
+      content="Cadence plays your FLAC and other music files exactly as they were recorded: bit-perfect output, gapless albums, Sound Check, lyrics that follow the singer and can be translated, one artist across spellings, mixes by sound, backups and an optional AI DJ. Free and open source for Windows, macOS, Linux and Android."
+    />
+    <link rel="canonical" href="https://cadence.akbarharyadi.com/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Cadence" />
+    <meta property="og:title" content="Cadence: a lossless music player for your own files" />
+    <meta property="og:description" content="Bit-perfect, gapless, synced lyrics and mixes by sound. Free and open source." />
+    <meta property="og:image" content="https://cadence.akbarharyadi.com/assets/social.png?v=1d5d035c" />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="640" />
+    <meta property="og:image:alt" content="Cadence, a lossless music player for your own files" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Cadence: a lossless music player for your own files" />
+    <meta name="twitter:description" content="Bit-perfect, gapless, synced lyrics and mixes by sound. Free and open source." />
+    <meta name="twitter:image" content="https://cadence.akbarharyadi.com/assets/social.png?v=1d5d035c" />
+    <meta property="og:url" content="https://cadence.akbarharyadi.com/" />
+    <meta name="theme-color" content="#0d0e17" />
+    <link rel="icon" href="icon.svg?v=a9925b16" type="image/svg+xml" />
+    <link rel="icon" href="favicon.png?v=4edd6e11" sizes="64x64" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png?v=3274e167" />
+    <link rel="preload" href="fonts/bricolage.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="style.css?v=9972fc06" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="nav">
+      <a class="brand" href="./" aria-label="Cadence home">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15c2.5-7 4.5-7 6 0s3.5 7 6 0 3.5-7 6 0" /></svg>
+        Cadence
+      </a>
+      <nav aria-label="Main">
+        <a href="#sound">Sound</a>
+        <a href="#lyrics">Lyrics</a>
+        <a href="#mixes">Mixes</a>
+        <a href="#library">Library</a>
+        <a href="#android">Android</a>
+        <a href="#download">Download</a>
+        <a href="https://github.com/akbarharyadi/cadence">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero">
+        <svg class="wave" viewBox="0 0 1200 220" preserveAspectRatio="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="g" x1="0" x2="1">
+              <stop offset="0" stop-color="#8b7cff" />
+              <stop offset="1" stop-color="#ef8fd6" />
+            </linearGradient>
+          </defs>
+          <path id="wave-path" d="" fill="none" stroke="url(#g)" stroke-width="10" stroke-linecap="round" />
+        </svg>
+        <div class="hero-text">
+          <h1>Your music, the way it was recorded.</h1>
+          <p class="lede">
+            Cadence is a music player for the files you own. It plays FLAC and other lossless formats bit-perfect, keeps albums gapless,
+            follows every word of the lyrics, and turns your library into mixes by how the songs sound.
+          </p>
+          <div class="cta">
+            <a class="button" id="download-main" href="#download">Download Cadence</a>
+            <a class="ghost" href="https://github.com/akbarharyadi/cadence">Source code on GitHub</a>
+          </div>
+          <p class="fine" id="download-note">Free and open source. Windows, macOS, Linux and Android.</p>
+        </div>
+        <figure class="shot hero-shot">
+          <img src="assets/home.jpg?v=a5bd03ea" width="1650" height="1075" alt="Cadence's Listen Now page: recent albums, top picks and the player" />
+        </figure>
+      </section>
+
+      <section class="path" aria-labelledby="path-title">
+        <h2 id="path-title" class="sr-only">What happens to the sound</h2>
+        <ol class="stages">
+          <li><span class="stage-name">Your file</span><span class="stage-value">FLAC 24-bit / 96 kHz</span></li>
+          <li><span class="stage-name">Sound Check</span><span class="stage-value">Off</span></li>
+          <li><span class="stage-name">Equalizer</span><span class="stage-value">Off</span></li>
+          <li><span class="stage-name">Direct output</span><span class="stage-value">96 kHz, 24-bit</span></li>
+          <li class="final"><span class="stage-name">Your DAC</span><span class="stage-value gold">Bit-perfect</span></li>
+        </ol>
+        <p>Cadence shows what happens to every song on its way to your speakers. When nothing changes it, it says so.</p>
+      </section>
+
+      <section class="feature" id="sound">
+        <div class="copy">
+          <h2>Hear the file, not the player</h2>
+          <p>
+            Direct output sends each song to your device at its own sample rate, past the system mixer, so 24-bit masters arrive
+            sample for sample. Turn on Sound Check and every song plays at the same loudness, measured with ReplayGain 2.0, and a
+            gentle per-song tone keeps quieter songs full without pushing the voice back.
+          </p>
+          <ul class="ticks">
+            <li>Gapless playback, and crossfade between albums if you like</li>
+            <li>Ten-band and parametric equalizer, with headphone profiles from AutoEq</li>
+            <li>Crossfeed for headphones, high-quality resampling when it's needed</li>
+            <li>On Windows, macOS and Linux, choose your output device. Each one remembers its own equalizer, crossfeed, Direct output and volume, and a device you chose stays chosen: if it's unplugged, playback pauses instead of moving to other speakers</li>
+            <li>A device never opens louder than it last played, and Direct output on a device Cadence hasn't used before starts at a safe volume and tells you</li>
+            <li>A waveform seek bar in Now Playing, drawn once in the background (you can turn it off)</li>
+          </ul>
+        </div>
+        <figure class="shot"><img src="assets/sound.jpg?v=3a29582d" width="1270" height="627" loading="lazy" alt="The signal path: every step from the file to the speakers, and the Direct output switch" /></figure>
+      </section>
+
+      <section class="feature flip" id="lyrics">
+        <div class="copy">
+          <h2>Sing along, word by word</h2>
+          <p>
+            Synced lyrics light up as they're sung, like karaoke. Turn the vocals down with one slider and sing the song yourself.
+            Cadence reads lyrics from your files, finds timed ones online, or lets the AI DJ look them up, and remembers them for
+            next time.
+          </p>
+          <p>
+            On your computer, Cadence can also follow the singer. It listens to a song once, separates the vocals from the
+            music, and places every word on the singing, so the highlight moves syllable by syllable in Japanese, Chinese,
+            Korean, English, Indonesian and more. Do it for one song, or your whole library at once. The first time needs a
+            one-time download of about 440 MB.
+          </p>
+          <p>
+            Can't read the words? Show a translation under each line, in English, Indonesian, Japanese, Korean or Chinese.
+            Translations that come with the lyrics are used as they are; otherwise Cadence asks the AI DJ you set up, once per
+            song, and keeps the answer. Remember a line but not the song? Type it in Search and Cadence finds the song, as it's
+            written or in Latin letters.
+          </p>
+          <ul class="ticks">
+            <li>Japanese, Chinese and Korean lyrics can show romaji, pinyin or romanization under each line, filling in as it's sung, or furigana above the kanji and pinyin above Chinese characters</li>
+            <li>Word-by-word timings from LRCLIB are used when it has them</li>
+            <li>In duets, each singer's lines get their own colour and a small name where the singer changes</li>
+            <li>Lyrics that run early or late? Follow singer sets them right, or nudge the timing yourself</li>
+          </ul>
+        </div>
+        <figure class="shot"><img src="assets/lyrics.jpg?v=b87d46fa" width="1510" height="950" loading="lazy" alt="Now Playing with lyrics filling in word by word" /></figure>
+      </section>
+
+      <section class="feature" id="mixes">
+        <div class="copy">
+          <h2>Mixes by how your music sounds</h2>
+          <p>
+            Cadence listens to each song once, on your computer, for its tempo, timbre, loudness and harmony. That powers sound
+            radio from any song, lists of songs that sound alike, and mixes it builds and names for you.
+          </p>
+          <p>
+            Want more? Connect an AI DJ (Z.ai GLM, Claude or any compatible service, with your own key) and ask for "calm songs for
+            late-night coding". It only picks songs you have: the AI makes a plan from your words, Cadence finds the songs on your
+            computer, and the AI puts them in order. It also makes your daily mixes, "Made for you today": each one comes from a different part of
+            your library, like what you play at this time of day, old favourites you haven't played in two months, or the
+            corner you haven't visited lately. A song is in one mix only, and every day brings fresh ones.
+          </p>
+          <p>
+            <strong>Discover</strong> finds songs you don't have yet, searched for on the web by the AI DJ, with where to buy
+            them. Songs you already have are never suggested. <strong>Your Stats</strong> shows what you play most, when you listen
+            and your streaks, over your whole listening history, for the last week, month, year or all time.
+          </p>
+        </div>
+        <figure class="shot"><img src="assets/mixes.jpg?v=9a7892d8" width="1250" height="419" loading="lazy" alt="Mixes by sound: Warm and quiet, Bright and full, Warm and slow, Warm and upbeat" /></figure>
+      </section>
+
+      <section class="feature" id="library">
+        <div class="copy">
+          <h2>A library that stays in order</h2>
+          <p>
+            Needs Attention finds what's wrong in your folders, worst first: damaged files, extra copies, albums split in two,
+            artists under two names, and songs without info. Every suggestion says how sure Cadence is, and you look before
+            anything changes.
+          </p>
+          <p>
+            Changes Cadence makes to your files can be undone. Removed copies go to the Recycle Bin (the Trash on a Mac), and Undo
+            puts files back as they were, cover included. On a phone, removed copies are deleted for good, so Cadence asks first.
+          </p>
+          <ul class="ticks">
+            <li>Library Health checks for songs you have twice, lossless files that aren't, and damaged files</li>
+            <li>Fix song info searches iTunes and Deezer, and can write Japanese, Chinese and Korean titles in Latin letters</li>
+            <li>Covers for albums that have none are found for you, and shown in a grid to check before anything is saved</li>
+            <li>Albums ripped as one big file with a .cue sheet show up as their songs, each starting exactly where it should</li>
+            <li>Playlists, your queue, favorites and ratings follow a song when its file is moved, renamed or replaced by a better copy</li>
+            <li>Import M3U8, XSPF and CSV playlists (Spotify exports from Exportify too), and export M3U8 or CSV. Songs are matched, never guessed</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="feature" id="find">
+        <div class="copy">
+          <h2>Find it, however it's written</h2>
+          <p>
+            Press Ctrl+K (⌘K on a Mac) for a command palette that reaches every page, action and song in your library, with the
+            keyboard shortcut beside each action. Select several songs at once and play, queue or add them together.
+          </p>
+          <p>
+            <strong>米津玄師</strong> and <strong>Kenshi Yonezu</strong> are one artist. Cadence learns an artist's other names from
+            MusicBrainz in the background (it sends only artist names, and you can turn it off), so one page and one count cover
+            every spelling, and search finds an artist or song by any of them, or by its reading in Latin letters. Nothing in your
+            files is changed.
+          </p>
+          <ul class="ticks">
+            <li>Select songs with Shift or Ctrl and click, or the arrow keys; long-press on a phone</li>
+            <li>Back and Forward return you to where you were scrolled</li>
+            <li>Settings has its own search box, and the question mark lists every keyboard shortcut</li>
+            <li>Make the interface larger or smaller on a computer</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="android" id="android">
+        <div class="copy">
+          <h2>Take it with you</h2>
+          <p>
+            The same Cadence runs on Android phones, with the same library features, Sound Check and lossless decoding. It keeps
+            playing with the screen off, and you can control it from the lock screen, the notification shade, Bluetooth buttons,
+            or a widget on your home screen.
+          </p>
+          <ul class="ticks">
+            <li>Made for one hand: tabs at the bottom, including a Library tab for everything else, and the player always within reach</li>
+            <li>A home screen widget with the cover, the song's quality and play controls</li>
+            <li>Works with your phone's media controls and the Now Playing island</li>
+            <li>Plug in a USB DAC and each song reaches it at its own sample rate, 44.1 kHz included (USB Audio 2.0 DACs)</li>
+            <li>Pauses when your headphones or car disconnect, and can play when they connect</li>
+          </ul>
+        </div>
+        <div class="phones">
+          <figure class="phone"><img src="assets/phone-home.jpg?v=29358838" width="640" height="1236" loading="lazy" alt="Listen Now on an Android phone" /></figure>
+          <figure class="phone raised"><img src="assets/phone-now.jpg?v=c7293cfc" width="640" height="1236" loading="lazy" alt="Now Playing on an Android phone, showing Lossless 24-bit/48 kHz" /></figure>
+          <figure class="widget"><img src="assets/widget.jpg?v=72383906" width="900" height="240" loading="lazy" alt="The Cadence widget on an Android home screen" /></figure>
+        </div>
+      </section>
+
+      <section class="systems" aria-labelledby="systems-title">
+        <h2 id="systems-title">The cleanest path on every system</h2>
+        <p class="intro">
+          Each system mixes sound its own way, so Cadence uses the most direct route each one offers. Turn on Direct output in
+          Sound and the signal path shows exactly what your device receives.
+        </p>
+        <dl class="routes">
+          <div>
+            <dt>Windows</dt>
+            <dd class="how">WASAPI exclusive mode</dd>
+            <dd>Each song goes straight to the device at its own sample rate and bit depth, past the Windows mixer.</dd>
+          </div>
+          <div>
+            <dt>macOS</dt>
+            <dd class="how">Device follows the song</dd>
+            <dd>Cadence switches your output to each song's sample rate, as you would in Audio MIDI Setup, so Core Audio never resamples.</dd>
+          </div>
+          <div>
+            <dt>Linux</dt>
+            <dd class="how">ALSA hardware device</dd>
+            <dd>Plays to your sound card directly, around PulseAudio and PipeWire. USB DACs are picked first.</dd>
+          </div>
+          <div>
+            <dt>Android</dt>
+            <dd class="how">USB DAC, or 32-bit float to AAudio</dd>
+            <dd>With a USB Audio 2.0 DAC, Cadence's own USB driver plays each song at its own rate. Without one, songs are decoded without loss and handed to Android in full precision.</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="grid" aria-labelledby="more-title">
+        <h2 id="more-title">Everything else you'd expect</h2>
+        <ul>
+          <li><h3>Your library, your folders</h3><p>Add folders or drop them on the window. Cadence watches them and picks up new music by itself, and carries on where you left off with the same song, queue and position.</p></li>
+          <li><h3>Favorites and ratings</h3><p>Heart a song and give it 1 to 5 stars. They follow the song if its file moves, and smart playlists can use them.</p></li>
+          <li><h3>Playlists and smart playlists</h3><p>Build them by hand, or with rules like "played often, not this month". Save Up Next as a playlist, and drag songs to reorder it.</p></li>
+          <li><h3>Shuffle that feels random</h3><p>Balanced shuffle spreads each artist out and plays songs you heard recently later, or choose fully random. Shuffle albums plays whole albums in order. Keep playing similar songs when the queue ends is there if you want it, and you can stop after any song.</p></li>
+          <li><h3>Backup and restore</h3><p>One file with your playlists, favorites, ratings, history, queue, settings and the lyrics you picked, never your music or keys. Cadence keeps a snapshot of its own, at most once a day, and can copy it to a second folder. Restoring first saves what you have now.</p></li>
+          <li><h3>Light on your computer</h3><p>Cadence uses much less processor while it plays and almost none while it's paused or hidden, and the moving backgrounds stop when it's paused or hidden.</p></li>
+          <li><h3>Sleep timer</h3><p>Stop after some minutes, with a fade-out, or at the end of the song or the album.</p></li>
+          <li><h3>Hotkeys and mini player</h3><p>On computers, Ctrl+Alt+Space plays or pauses in any app, with keys to skip, change the volume and heart the song. Or use a small always-on-top player. On Android: lock screen controls and a home screen widget.</p></li>
+          <li><h3>Your player, your way</h3><p>Put the player at the top of the window or along the bottom, and make the interface larger or smaller. Choose the album's colours, a dark theme, or true black for OLED screens.</p></li>
+          <li><h3>Song info, covers and pictures</h3><p>Songs without tags (files named "Artist - Title") get their real title, album and cover from the iTunes catalogue. Change any album's cover in a click, and give artists a real photo.</p></li>
+          <li><h3>Skip songs</h3><p>Leave out songs you don't want in rotation, or every instrumental and karaoke version, when albums, playlists and shuffles play.</p></li>
+          <li><h3>Updates itself</h3><p>New versions download in the background and install when you restart. Only signed releases are accepted.</p></li>
+          <li><h3>ListenBrainz</h3><p>Keep a record of what you listen to, send your hearts as loved songs, restore your listening history from it, and see new releases by artists you own in Discover. Restoring shows what it would change and does nothing until you say yes.</p></li>
+          <li><h3>Formats</h3><p>FLAC, ALAC, WAV, AIFF, MP3, AAC and Ogg Vorbis, up to 32-bit and 384 kHz.</p></li>
+        </ul>
+      </section>
+
+      <section class="privacy">
+        <h2>Your music stays yours</h2>
+        <p>
+          The app has no account and no tracking. Sound analysis and following the singer run on your computer, and no audio ever
+          leaves it. Lyrics and song info lookups send only the artist, title or the words you search for, and learning an
+          artist's other names sends only artist names. Each of these has a switch in Settings. The AI DJ is off until you add your
+          own key, and Settings shows exactly what it would send. Finding a song by a lyric line happens on your computer. The
+          README lists every service Cadence can contact and what it sends. This website counts visits with Cloudflare Web
+          Analytics, which uses no cookies.
+        </p>
+      </section>
+
+      <section class="faq" aria-labelledby="faq-title">
+        <h2 id="faq-title">Questions</h2>
+        <details>
+          <summary>Does Cadence stream music?</summary>
+          <p>No. Cadence plays files you already have: albums you bought as downloads, ripped from CDs, or recorded yourself. The AI DJ can suggest new music and where to buy it.</p>
+        </details>
+        <details>
+          <summary>What does bit-perfect mean here?</summary>
+          <p>Every sample in the file reaches your device unchanged. That needs Direct output on, with Sound Check, the equalizer and crossfeed off and the volume at 100%. Cadence shows a gold Bit-perfect label when all of that is true.</p>
+        </details>
+        <details>
+          <summary>Is the AI DJ required?</summary>
+          <p>No. Playing, lyrics, Sound Check, mixes by sound, finding a song by a lyric line and one-artist search all work without it. Ask the DJ, daily mixes, Discover and translations of lyrics that don't come with one need it, and it only runs after you add your own key for Z.ai GLM, Claude or another OpenAI-compatible service.</p>
+        </details>
+        <details>
+          <summary>What does Cadence send over the internet?</summary>
+          <p>No audio, ever. Looking up lyrics sends the artist, title, album and length to LRCLIB; filling in song info and covers sends names to iTunes and Deezer; learning an artist's other names sends artist names to MusicBrainz; Discover asks ListenBrainz for the week's new releases and loads their covers; updates ask GitHub. Most of these have a switch in Settings. ListenBrainz scrobbling and the AI DJ do nothing until you add your token or key. The README has the full table.</p>
+        </details>
+        <details>
+          <summary>Is my data backed up?</summary>
+          <p>Cadence keeps a snapshot of your playlists, favorites, ratings, history, queue and settings, at most once a day, in its data folder, and Settings › Backup can copy it to a second folder, make a backup file whenever you like, and restore one. Your music files are not part of it, so keep those backed up yourself.</p>
+        </details>
+        <details>
+          <summary>How much does it cost?</summary>
+          <p>Nothing. Cadence is free and open source under the GNU GPL v3. There are no accounts, ads or subscriptions.</p>
+        </details>
+        <details>
+          <summary>Why is Windows cautious about the installer?</summary>
+          <p>The Windows build isn't code-signed yet, so Windows or your antivirus may be wary of a new, unsigned app. Updates inside Cadence are signed, and every Windows build is scanned with Microsoft Defender before it's published.</p>
+        </details>
+        <details>
+          <summary>Why does macOS say the app can't be opened?</summary>
+          <p>The macOS build isn't signed by Apple yet. The first time, right-click Cadence in Applications and choose Open; after that it opens normally.</p>
+        </details>
+      </section>
+
+      <section class="news" id="news" aria-labelledby="news-title">
+        <h2 id="news-title">What's new</h2>
+        <ol class="releases">
+          <!-- @@RELEASE: fill in the three placeholders below from CHANGELOG.md, then delete this comment. -->
+          <li>
+            <h3>@@VERSION@@ <time datetime="@@ISO_DATE@@">@@DATE@@</time></h3>
+            <p>Much lighter on your computer. Lyrics can be translated, shown with furigana, and searched by a line you remember. A command palette, selecting several songs, and one artist across spellings and scripts. Backup and restore, a choice of output device with sound settings for each, a shuffle that feels random, a waveform seek bar, playlist import and export, and more from ListenBrainz, plus a long list of fixes.</p>
+          </li>
+          <li>
+            <h3>0.2.40 <time datetime="2026-11-10">10 Nov 2026</time></h3>
+            <p>"Made for you today" is more varied: four daily mixes, each from a different part of your library, and no more look-alike mixes. Songs from last week's mixes wait their turn.</p>
+          </li>
+          <li>
+            <h3>0.2.39 <time datetime="2026-11-09">9 Nov 2026</time></h3>
+            <p>Better romaji: Japanese lyrics are read word by word, with a dictionary built into Cadence. Follow singer reads kanji the same way. The app is about 7 MB bigger.</p>
+          </li>
+          <li>
+            <h3>0.2.38 <time datetime="2026-11-09">9 Nov 2026</time></h3>
+            <p>Needs Attention was rebuilt: one card per kind of problem, and every suggestion marked Sure or Check. Removed copies go to the Recycle Bin, and Undo brings them back.</p>
+          </li>
+        </ol>
+        <p class="fine"><a href="https://github.com/akbarharyadi/cadence/blob/main/CHANGELOG.md">Read the full changelog on GitHub</a></p>
+      </section>
+
+      <section class="download" id="download">
+        <h2>Download Cadence</h2>
+        <p class="fine" id="release-name">Latest release on GitHub</p>
+        <div class="platforms">
+          <a class="platform" data-os="windows" href="https://github.com/akbarharyadi/cadence/releases/latest">
+            <span class="os">Windows</span><span class="what">10 and 11, 64-bit installer</span>
+          </a>
+          <a class="platform" data-os="mac" href="https://github.com/akbarharyadi/cadence/releases/latest">
+            <span class="os">macOS</span><span class="what">Apple Silicon and Intel</span>
+          </a>
+          <a class="platform" data-os="linux" href="https://github.com/akbarharyadi/cadence/releases/latest">
+            <span class="os">Linux</span><span class="what">AppImage, .deb or .rpm, 64-bit</span>
+          </a>
+          <a class="platform" data-os="android" href="https://github.com/akbarharyadi/cadence/releases/latest">
+            <span class="os">Android</span><span class="what">Android 8 or newer, 64-bit ARM, .apk</span>
+          </a>
+        </div>
+        <p class="fine">
+          On Android, allow installs from your browser when asked. On macOS, which isn't signed by Apple yet, right-click Cadence
+          and choose Open the first time. The Windows installer isn't code-signed yet either, so Windows may be cautious about it.
+          Every release, with notes and checksums, is on <a href="https://github.com/akbarharyadi/cadence/releases">GitHub</a>.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        Cadence is free software under the
+        <a href="https://github.com/akbarharyadi/cadence/blob/main/LICENSE">GNU GPL v3</a>. Made by Akbar Priyono Haryadi,
+        with the help of Claude (an AI assistant).
+      </p>
+      <p>
+        Built on open-source projects, among them Tauri, Svelte, Symphonia, lofty, cpal and bliss, with lyrics from LRCLIB.
+        <a href="https://github.com/akbarharyadi/cadence#credits">Credits</a>
+        <a href="https://github.com/akbarharyadi/cadence/blob/main/static/third-party-notices.txt">Open-source licenses</a>
+      </p>
+      <p><a href="https://github.com/akbarharyadi/cadence">Source code</a> <a href="https://github.com/akbarharyadi/cadence/issues">Report a problem</a></p>
+    </footer>
+
+    <script src="main.js?v=c9b022a7" defer></script>
+    <!-- Cloudflare Web Analytics: counts visits without cookies -->
+    <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "633e6965ff114fd3a4a0416dc2a742cc"}'></script>
+  </body>
+</html>

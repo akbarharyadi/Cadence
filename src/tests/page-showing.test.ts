@@ -64,6 +64,8 @@ describe("the page is showing", () => {
     let status = makeStatus({ queue: tracks.map((t) => t.id), index: 0, playing: true, position: 10, duration: 200 });
     mockBackend({
       get_library: () => ({ tracks, albums }),
+      // The mini player asks for the songs it shows, not the library.
+      get_library_part: (a) => ({ tracks: tracks.filter((t) => (a.trackIds as string[]).includes(t.id)), albums }),
       get_status: () => status,
     });
     await app.initMini();
@@ -173,5 +175,38 @@ describe("timers stop while the page is hidden", () => {
     expect(target.textContent).toBe("54 s");
     unmount(c);
     target.remove();
+  });
+});
+
+describe("CSS animations while the page can't be seen", () => {
+  it("are paused (html.page-hidden) while hidden, and run again when shown", () => {
+    setWindowVisible(false);
+    expect(document.documentElement).toHaveClass("page-hidden");
+    setWindowVisible(true);
+    expect(document.documentElement).not.toHaveClass("page-hidden");
+    setDocument("hidden");
+    expect(document.documentElement).toHaveClass("page-hidden");
+    setDocument("visible");
+    expect(document.documentElement).not.toHaveClass("page-hidden");
+  });
+});
+
+describe("No endless animations", () => {
+  it("no style in the app animates forever (a 160 Hz display draws every frame of one)", async () => {
+    const { readdirSync, readFileSync, statSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) {
+          if (name !== "tests") walk(p);
+        } else if (/\.(svelte|css)$/.test(name)) files.push(p);
+      }
+    };
+    walk(join(process.cwd(), "src"));
+    expect(files.length).toBeGreaterThan(20);
+    const endless = files.filter((f) => /animation(-iteration-count)?\s*:[^;]*\binfinite\b/.test(readFileSync(f, "utf8")));
+    expect(endless).toEqual([]);
   });
 });

@@ -1,14 +1,18 @@
 <script lang="ts" module>
-  import type { Album, Track } from "#lib/api.js";
-  import type { Artist } from "#lib/store.svelte.js";
-  import { fold, matching } from "#lib/searchIndex.js";
+  import { untrack } from "svelte";
+  import { albumFields, artistFields, fold, matchingNames, matchingOthers, trackFields, type Extra } from "#lib/searchIndex.js";
   import { extraMatch } from "#lib/searchKeys.js";
 
   // Case- and accent-insensitive matching ("pokemon" finds "Pokémon") and its cached index live in
-  // searchIndex.ts: the command palette uses them too.
-  const albumFields = (a: Album) => [a.title, a.artist];
-  const trackFields = (t: Track) => [t.title, t.subtitle ?? "", t.artist, t.album];
-  const artistFields = (a: Artist) => [a.name];
+  // searchIndex.ts: the command palette uses them too. The scans read the store's lists without
+  // subscribing to every song in them (the list itself, replaced whole on a change, is what counts).
+  const find = <T,>(list: T[], fields: (x: T) => string[], q: string, max: number) => untrack(() => matchingNames(list, fields, q, max));
+  const others = <T,>(list: T[], fields: (x: T) => string[], q: string, max: number, extra: Extra<T>) =>
+    untrack(() => matchingOthers(list, fields, q, max, extra));
+  /** The names' matches, then those found by other names; the same array when there are none of
+   *  those (the search keys arriving then changes nothing on screen). */
+  const joined = <T,>(named: T[], more: T[]) => (more.length ? [...named, ...more] : named);
+  const NONE: never[] = [];
 </script>
 
 <script lang="ts">
@@ -16,39 +20,67 @@
   import TrackList from "#lib/components/TrackList.svelte";
   import { api, formatTime, type LyricHit } from "#lib/api.js";
   import { app } from "#lib/store.svelte.js";
+  import { isFolded } from "#lib/searchIndex.js";
+  import { warmSearch } from "#lib/searchWarm.js";
+  import { onMount } from "svelte";
 
   let { query }: { query: string } = $props();
 
+  /** How many of each are found: the songs list shows the rows on screen (it's virtual). */
+  const SONGS = 200;
+  const ALBUMS = 24;
+  const ARTISTS = 12;
+  /** The albums shown before "Show all": about two rows of cards. */
+  const FIRST_ALBUMS = 12;
+
   // What's searched for: the typed text a moment (120 ms) after the last key, so a fast typist
   // doesn't search the library for every letter. Coming back to the page shows its results at once.
+  // (Opened by the first key with the index not made yet: that key waits the same pause, while
+  // the index is made, instead of making it on the way to the page.)
   const typed = () => fold(query.trim());
-  let q = $state(typed());
+  let q = $state(isFolded(app.tracks) ? typed() : "");
+  /** All the albums found shown (at first, the rows that fit on screen). */
+  let allAlbums = $state(false);
+  const setQ = (next: string) => {
+    q = next;
+    allAlbums = false;
+  };
   $effect(() => {
     const next = typed();
     if (next === q) return;
     // Emptied: straight away.
     if (!next) {
-      q = "";
+      setQ("");
       return;
     }
-    const timer = setTimeout(() => (q = next), 120);
+    const timer = setTimeout(() => setQ(next), 120);
     return () => clearTimeout(timer);
   });
   // Nothing is listed until something is typed (an empty search would match the whole library).
   // After what the names match: what the artists' other names and the titles' readings find
   // ("yonezu" finds 米津玄師, "tokyo" finds とうきょう).
   const extra = $derived(q ? extraMatch(app.searchKeys, q) : null);
-  const albums = $derived(!q ? [] : matching(app.albums, albumFields, q, 24, extra?.album));
-  const songs = $derived(!q ? [] : matching(app.tracks, trackFields, q, 200, extra?.track));
-  const artists = $derived(!q ? [] : matching(app.artists, artistFields, q, 12, extra?.artist));
+  const albumsNamed = $derived(q ? find(app.albums, albumFields, q, ALBUMS) : NONE);
+  const songsNamed = $derived(q ? find(app.tracks, trackFields, q, SONGS) : NONE);
+  const artistsNamed = $derived(q ? find(app.artists, artistFields, q, ARTISTS) : NONE);
+  const albums = $derived(joined(albumsNamed, extra ? others(app.albums, albumFields, q, ALBUMS - albumsNamed.length, extra.album) : NONE));
+  const songs = $derived(joined(songsNamed, extra ? others(app.tracks, trackFields, q, SONGS - songsNamed.length, extra.track) : NONE));
+  const artists = $derived(joined(artistsNamed, extra ? others(app.artists, artistFields, q, ARTISTS - artistsNamed.length, extra.artist) : NONE));
+  const shownAlbums = $derived(allAlbums ? albums : albums.slice(0, FIRST_ALBUMS));
 
   // Lyrics: songs with a line matching what's typed (asked of the app once per query, after the
   // same pause; the first time, it makes its index in the background and says when it's ready).
   let lyricHits = $state<LyricHit[]>([]);
   let lyricPending = $state(false);
+  /** The text the hits shown were found for: another query's hits never stay under a new one. */
+  let hitsFor = "";
   $effect(() => {
     const text = q;
     void app.lyricIndexAt; // the index is ready, or changed: ask again
+    if (text !== hitsFor) {
+      hitsFor = text;
+      lyricHits = [];
+    }
     if (text.replace(/\s/g, "").length < 2) {
       lyricHits = [];
       lyricPending = false;
@@ -79,7 +111,7 @@
     const list = album ? app.albumTracks(album) : [];
     const at = list.findIndex((x) => x.id === t.id);
     const tracks = at >= 0 ? list : [t];
-    await api.play(tracks.map((x) => x.id), Math.max(at, 0), true);
+    let from = 0;
     if (h.time != null && h.time > 0) {
       let nudge = 0;
       try {
@@ -88,9 +120,21 @@
       } catch {
         /* no nudges kept */
       }
-      app.seek(Math.max(0, h.time + nudge));
+      from = Math.max(0, h.time + nudge);
+    }
+    // The seek waits for the song to start (sent at once it could land on the song before).
+    try {
+      await app.playFrom(tracks.map((x) => x.id), Math.max(at, 0), from);
+    } catch (e) {
+      app.showToast(`Couldn't play it: ${e}`);
     }
   }
+
+  // The other names and readings ("yonezu" finds 米津玄師): asked for when Search first opens.
+  onMount(() => {
+    app.wantSearchKeys();
+    warmSearch();
+  });
 
   function onInput(value: string) {
     app.search = value;
@@ -131,10 +175,13 @@
   {#if albums.length}
     <h2 class="section-title">Albums</h2>
     <div class="grid">
-      {#each albums as album (album.id)}
+      {#each shownAlbums as album (album.id)}
         <AlbumCard {album} />
       {/each}
     </div>
+    {#if shownAlbums.length < albums.length}
+      <button class="pill ghost more" onclick={() => (allAlbums = true)}>Show more albums</button>
+    {/if}
   {/if}
 
   {#if songs.length}
@@ -144,7 +191,7 @@
 
   {#if lyricHits.length}
     <h2 class="section-title">Lyrics</h2>
-    <ul class="lyric-hits">
+    <ul class="lyric-hits" class:stale={typed() !== q}>
       {#each lyricHits as h (h.trackId)}
         {@const t = app.trackById.get(h.trackId)}
         {#if t}
@@ -165,6 +212,9 @@
 </div>
 
 <style>
+  .more {
+    margin-top: 12px;
+  }
   .empty {
     margin-top: 14px;
   }
@@ -214,6 +264,10 @@
     list-style: none;
     margin: 0;
     padding: 0;
+  }
+  /* The query changed and these are the last one's (for the moment before the new search). */
+  .lyric-hits.stale {
+    opacity: 0.45;
   }
   .lyric-hit {
     width: 100%;

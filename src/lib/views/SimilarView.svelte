@@ -14,7 +14,8 @@
   $effect(() => {
     const current = id;
     // Look again when analysis finishes, in case this song wasn't analysed yet.
-    void app.sonic?.analyzed;
+    // (Not on each of its progress updates: those come twice a second while it runs.)
+    void app.sonic?.running;
     void app.loaded; // the library arriving (once) starts it when the page opened first
     // Untracked: the library reloads often (downloads landing); only a new seed song asks again.
     if (!untrack(() => app.trackById.has(current))) return;

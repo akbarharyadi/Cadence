@@ -4,7 +4,7 @@
   import { onMount } from "svelte";
   import { api, type DeviceRef, type OutputDevices } from "#lib/api.js";
   import { deviceName } from "#lib/devices.js";
-  import { app } from "#lib/store.svelte.js";
+  import { app, coalesced } from "#lib/store.svelte.js";
   import Select from "./Select.svelte";
   import Toggle from "./Toggle.svelte";
 
@@ -13,28 +13,32 @@
 
   let list = $state<OutputDevices | null>(null);
   let error = $state("");
-  let loading = false;
-
-  async function load() {
-    if (loading) return;
-    loading = true;
+  let gone = false;
+  /** One request at a time; asked again while one runs: one more after it (never dropped). */
+  const load = coalesced(async () => {
     try {
-      list = (await api.outputDevices()) ?? null;
+      const l = (await api.outputDevices()) ?? null;
+      if (gone) return;
+      list = l;
       error = "";
     } catch (e) {
-      error = String(e);
-    } finally {
-      loading = false;
+      if (!gone) error = String(e);
     }
-  }
-  onMount(load);
+  });
+  onMount(() => {
+    void load();
+    return () => (gone = true);
+  });
 
-  // The system's devices changed: listed again. Only when that count moves (no timer).
-  const changes = $derived(app.status?.devices ?? 0);
-  const seen = { count: null as number | null };
+  // The system's devices changed: listed again. Only when that count moves (no timer). The
+  // count is first taken from the first status there is (no status yet isn't a count of 0), so
+  // the first status after the page opened doesn't list them a second time.
+  const changes = $derived(app.status?.devices);
+  const seen = { count: undefined as number | undefined };
   $effect(() => {
     const n = changes;
-    if (seen.count !== null && n !== seen.count) load();
+    if (n === undefined) return;
+    if (seen.count !== undefined && n !== seen.count) void load();
     seen.count = n;
   });
 
@@ -97,7 +101,7 @@
     <p class="hint">If it isn’t connected, playback pauses rather than moving to another device, and carries on when it’s back within two minutes.</p>
   {/if}
   {#if !windows}
-    <p class="hint"><button class="link" onclick={load}>Refresh the list</button></p>
+    <p class="hint"><button class="link" onclick={() => void load()}>Refresh the list</button></p>
   {/if}
   {#if error}<p class="error">{error}</p>{/if}
 

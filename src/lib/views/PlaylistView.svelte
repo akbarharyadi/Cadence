@@ -1,3 +1,13 @@
+<script lang="ts" module>
+  /** Undo of a removal: the removed ids put back into `current` (the list as it is now) at their
+   *  old places, first place first (so together they land where they were), clamped to its end. */
+  export function reinsert(current: string[], removed: { pos: number; id: string }[]): string[] {
+    const out = [...current];
+    for (const r of [...removed].sort((a, b) => a.pos - b.pos)) out.splice(Math.max(0, Math.min(r.pos, out.length)), 0, r.id);
+    return out;
+  }
+</script>
+
 <script lang="ts">
   import { artUrl, formatDuration, type Album, type Playlist, type Track } from "#lib/api.js";
   import Icon from "#lib/components/Icon.svelte";
@@ -83,14 +93,16 @@
     const before = [...p.trackIds];
     const one = gone.size === 1 ? app.trackById.get(before[[...gone][0]]) : undefined;
     const ids = before.filter((_, k) => !gone.has(k));
+    const removed = [...gone].sort((x, y) => x - y).map((pos) => ({ pos, id: before[pos] }));
     try {
       const saved = await app.savePlaylist({ ...p, trackIds: ids });
       app.showToast(one ? `Removed “${one.title}” from “${saved.name}”` : `Removed ${gone.size} songs from “${saved.name}”`, {
         label: "Undo",
         run: () => {
           app.toast = app.toastAction = null;
+          // Into the list as it is now (songs added or moved since stay), each at its old place.
           const now = app.playlists.find((x) => x.id === saved.id);
-          if (now) void app.savePlaylist({ ...now, trackIds: before }).catch((e) => app.showToast(`Couldn’t put them back: ${e}`));
+          if (now) void app.savePlaylist({ ...now, trackIds: reinsert(now.trackIds, removed) }).catch((e) => app.showToast(`Couldn’t put them back: ${e}`));
         },
       });
     } catch (e) {

@@ -91,6 +91,11 @@ pub fn lang_of(lines: &[String]) -> Option<&'static str> {
 struct Cache {
     #[serde(default)]
     langs: HashMap<String, Entry>,
+    /// Chunks of a translation not finished yet ("<lang>:<the chunk's version>" → its lines): a
+    /// song whose later chunk failed keeps what was already answered (and paid for), and asks
+    /// only for the rest next time.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    parts: HashMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -116,14 +121,44 @@ fn cached(dir: &Path, track_id: &str, lang: &str, lines: &[String]) -> Option<Ve
     (e.hash == version(lines) && e.lines.len() == lines.len()).then(|| e.lines.clone())
 }
 
-fn keep(dir: &Path, track_id: &str, lang: &str, lines: &[String], out: &[String]) {
+/// One change of a song's translations file at a time (two translations of a song finishing
+/// together would otherwise lose one), written through the atomic save.
+static FILE_LOCK: Mutex<()> = Mutex::new(());
+
+fn change_cache(dir: &Path, track_id: &str, f: impl FnOnce(&mut Cache)) {
+    let _one = FILE_LOCK.lock();
     let path = cache_file(dir, track_id);
     let mut c: Cache = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    c.langs.insert(lang.to_string(), Entry { hash: version(lines), lines: out.to_vec() });
-    let _ = std::fs::create_dir_all(dir);
+    f(&mut c);
     if let Ok(b) = serde_json::to_vec(&c) {
-        let _ = std::fs::write(path, b);
+        // A cache: no .bak.
+        let _ = crate::state::write_file(&path, &b, false);
     }
+}
+
+fn part_key(lang: &str, chunk: &[String]) -> String {
+    format!("{lang}:{}", version(chunk))
+}
+
+/// A chunk answered before (of a translation that didn't finish).
+fn cached_part(dir: &Path, track_id: &str, lang: &str, chunk: &[String]) -> Option<Vec<String>> {
+    let c: Cache = serde_json::from_slice(&std::fs::read(cache_file(dir, track_id)).ok()?).ok()?;
+    c.parts.get(&part_key(lang, chunk)).filter(|l| l.len() == chunk.len()).cloned()
+}
+
+fn keep_part(dir: &Path, track_id: &str, lang: &str, chunk: &[String], out: &[String]) {
+    change_cache(dir, track_id, |c| {
+        c.parts.insert(part_key(lang, chunk), out.to_vec());
+    });
+}
+
+fn keep(dir: &Path, track_id: &str, lang: &str, lines: &[String], out: &[String]) {
+    change_cache(dir, track_id, |c| {
+        c.langs.insert(lang.to_string(), Entry { hash: version(lines), lines: out.to_vec() });
+        // The whole translation is kept: its chunks are no longer needed.
+        let prefix = format!("{lang}:");
+        c.parts.retain(|k, _| !k.starts_with(&prefix));
+    });
 }
 
 /// Lines worth translating: with letters in them (not "♪", "...", empty).
@@ -230,10 +265,17 @@ pub fn translate(cache_dir: &Path, track_id: &str, song: &Song, lang: &str, mode
     }
     let mut out_distinct = Vec::with_capacity(distinct.len());
     for chunk in distinct.chunks(CHUNK) {
+        if let Some(done) = cached_part(cache_dir, track_id, lang, chunk) {
+            out_distinct.extend(done);
+            continue;
+        }
         if cancelled() {
             return Err("cancelled".into());
         }
-        out_distinct.extend(ask(model, song, name, chunk, cancelled)?);
+        let answered = ask(model, song, name, chunk, cancelled)?;
+        // Kept at once: a later chunk failing doesn't throw this one away.
+        keep_part(cache_dir, track_id, lang, chunk, &answered);
+        out_distinct.extend(answered);
     }
     let lines: Vec<String> = song.lines.iter().map(|l| at.get(l.trim()).map(|&i| out_distinct[i].clone()).unwrap_or_default()).collect();
     keep(cache_dir, track_id, lang, song.lines, &lines);
@@ -373,6 +415,40 @@ mod tests {
         let m4 = Fixture::new(vec![json!({ "lines": ["Aku membuka jendela"] })]);
         assert_eq!(translate(dir.path(), "s1", &song(&other), "id", Some(&m4), &never).unwrap().lines, ["Aku membuka jendela"]);
         assert_eq!(translate(dir.path(), "s1", &song(&other), "en", None, &never).unwrap().lines, ["I opened the window"]);
+    }
+
+    #[test]
+    fn chunks_already_answered_are_kept_when_a_later_one_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        // More distinct lines than one request takes: two chunks.
+        let lines: Vec<String> = (0..CHUNK + 5).map(|i| format!("架空の行 {i}")).collect();
+        let first: Vec<String> = (0..CHUNK).map(|i| format!("made-up line {i}")).collect();
+        let second: Vec<String> = (CHUNK..CHUNK + 5).map(|i| format!("made-up line {i}")).collect();
+        // The first chunk is answered; the second fails twice.
+        let m = Fixture::new(vec![json!({ "lines": first.clone() }), json!({ "lines": ["x"] }), json!({ "lines": ["y"] })]);
+        assert!(translate(dir.path(), "s1", &song(&lines), "en", Some(&m), &never).is_err());
+        assert_eq!(m.asked(), 3);
+        // Next time only the second chunk is asked for.
+        let m2 = Fixture::new(vec![json!({ "lines": second.clone() })]);
+        let t = translate(dir.path(), "s1", &song(&lines), "en", Some(&m2), &never).unwrap();
+        assert_eq!(m2.asked(), 1);
+        assert!(m2.prompts.borrow()[0].contains("exactly 5 entries"));
+        assert_eq!(t.lines[0], "made-up line 0");
+        assert_eq!(t.lines[CHUNK + 4], format!("made-up line {}", CHUNK + 4));
+        // Finished: kept whole, the chunks let go of.
+        let c: Cache = serde_json::from_slice(&std::fs::read(cache_file(dir.path(), "s1")).unwrap()).unwrap();
+        assert!(c.parts.is_empty() && c.langs.contains_key("en"));
+        // Two translations of one song kept at the same time: neither is lost.
+        let one: Vec<String> = vec!["窓を開けた".into()];
+        std::thread::scope(|s| {
+            for lang in ["id", "ko"] {
+                let dir = dir.path();
+                let one = &one;
+                s.spawn(move || keep(dir, "s1", lang, one, &[format!("{lang} line")]));
+            }
+        });
+        let c: Cache = serde_json::from_slice(&std::fs::read(cache_file(dir.path(), "s1")).unwrap()).unwrap();
+        assert!(["en", "id", "ko"].iter().all(|l| c.langs.contains_key(*l)), "{:?}", c.langs.keys().collect::<Vec<_>>());
     }
 
     #[test]

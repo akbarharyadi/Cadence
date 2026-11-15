@@ -199,32 +199,68 @@ fn year_of(secs: u64) -> i64 {
 /// computer and ListenBrainz each noted its time).
 pub const SAME_PLAY_SECS: u64 = 10;
 
-/// The plays already there, per song: their start times.
+/// Which song a play's id is now: the id itself, or where the song moved to (`Some`), or None when
+/// the id is no song of the library any more and no move says where it went (an "orphan": a file
+/// that moved or was replaced before Cadence could follow it).
+pub type Resolve<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// Every id is its own song (no library to ask): plays are told apart by id alone.
+pub fn as_is(id: &str) -> Option<String> {
+    Some(id.to_string())
+}
+
+/// The plays already there, per song: their start times; and the start times of plays of songs
+/// that are gone (`Resolve` says None).
 #[derive(Clone, Default)]
-pub struct Known(HashMap<String, std::collections::BTreeSet<u64>>);
+pub struct Known {
+    by_song: HashMap<String, std::collections::BTreeSet<u64>>,
+    orphans: std::collections::BTreeSet<u64>,
+}
+
+fn near(set: &std::collections::BTreeSet<u64>, at: u64) -> bool {
+    set.range(at.saturating_sub(SAME_PLAY_SECS)..=at.saturating_add(SAME_PLAY_SECS)).next().is_some()
+}
 
 impl Known {
-    pub fn add(&mut self, track: &str, at: u64) {
-        self.0.entry(track.to_string()).or_default().insert(at);
+    pub fn add(&mut self, track: &str, at: u64, resolve: Resolve) {
+        match resolve(track) {
+            Some(song) => {
+                self.by_song.entry(song).or_default().insert(at);
+            }
+            None => {
+                self.orphans.insert(at);
+            }
+        }
     }
-    pub fn has(&self, track: &str, at: u64) -> bool {
-        self.0.get(track).is_some_and(|s| s.range(at.saturating_sub(SAME_PLAY_SECS)..=at + SAME_PLAY_SECS).next().is_some())
+    /// A play already there. A skipped play of a gone song isn't kept as an orphan: it was never
+    /// sent to ListenBrainz, and the next song may start a few seconds after it.
+    pub fn add_play(&mut self, e: &PlayEvent, resolve: Resolve) {
+        match resolve(&e.track_id) {
+            None if e.skipped => {}
+            _ => self.add(&e.track_id, e.at, resolve),
+        }
+    }
+    /// A play of this song within `SAME_PLAY_SECS`, or of a song that's gone: nobody hears two
+    /// songs starting within seconds of each other, so a play of a gone song (its file moved and
+    /// its old id stayed in the history) at that moment is this very listen.
+    pub fn has(&self, track: &str, at: u64, resolve: Resolve) -> bool {
+        resolve(track).is_some_and(|song| self.by_song.get(&song).is_some_and(|s| near(s, at))) || near(&self.orphans, at)
     }
 }
 
 /// The archive's plays in the years `events` start in (and the years next to them: a play near the
 /// turn of the year).
-pub fn known_in_archive(data_dir: &Path, events: &[PlayEvent]) -> Known {
+pub fn known_in_archive(data_dir: &Path, events: &[PlayEvent], resolve: Resolve) -> Known {
     let mut years = std::collections::BTreeSet::new();
     for e in events {
         years.insert(year_of(e.at.saturating_sub(SAME_PLAY_SECS)));
-        years.insert(year_of(e.at + SAME_PLAY_SECS));
+        years.insert(year_of(e.at.saturating_add(SAME_PLAY_SECS)));
     }
     let mut known = Known::default();
     for y in years {
         let file = archive_dir(data_dir).join(format!("{y}.jsonl"));
         if file.exists() {
-            let _ = read_archive_from(&file, 0, |e| known.add(&e.track_id, e.at));
+            let _ = read_archive_from(&file, 0, |e| known.add_play(&e, resolve));
         }
     }
     known
@@ -232,15 +268,15 @@ pub fn known_in_archive(data_dir: &Path, events: &[PlayEvent]) -> Known {
 
 /// The plays of `incoming` that are new (oldest first), and how many were already there: in
 /// `known`, or offered twice. Nothing is left in `known` of this call's plays but what it adds.
-pub fn new_plays(mut incoming: Vec<PlayEvent>, known: &mut Known) -> (Vec<PlayEvent>, usize) {
+pub fn new_plays(mut incoming: Vec<PlayEvent>, known: &mut Known, resolve: Resolve) -> (Vec<PlayEvent>, usize) {
     incoming.sort_by_key(|e| e.at);
     let mut add = Vec::with_capacity(incoming.len());
     let mut already = 0;
     for e in incoming {
-        if known.has(&e.track_id, e.at) {
+        if known.has(&e.track_id, e.at, resolve) {
             already += 1;
         } else {
-            known.add(&e.track_id, e.at);
+            known.add(&e.track_id, e.at, resolve);
             add.push(e);
         }
     }
@@ -258,10 +294,10 @@ pub struct Merged {
     pub already: usize,
 }
 
-fn known_with_live(archive: &Known, live: &[PlayEvent]) -> Known {
+fn known_with_live(archive: &Known, live: &[PlayEvent], resolve: Resolve) -> Known {
     let mut k = archive.clone();
     for e in live {
-        k.add(&e.track_id, e.at);
+        k.add_play(e, resolve);
     }
     k
 }
@@ -269,9 +305,14 @@ fn known_with_live(archive: &Known, live: &[PlayEvent]) -> Known {
 /// How many of `incoming` would be added, and how many are already there (the dry run: nothing is
 /// written; the archive is read before the history's lock is taken).
 pub fn count_new(data_dir: &Path, history: &parking_lot::Mutex<History>, incoming: Vec<PlayEvent>) -> (usize, usize) {
-    let archive = known_in_archive(data_dir, &incoming);
-    let mut known = known_with_live(&archive, &history.lock().events);
-    let (add, already) = new_plays(incoming, &mut known);
+    count_new_resolved(data_dir, history, incoming, &as_is)
+}
+
+/// `count_new`, with plays of a song under an old id (`Resolve`) counted as that song's.
+pub fn count_new_resolved(data_dir: &Path, history: &parking_lot::Mutex<History>, incoming: Vec<PlayEvent>, resolve: Resolve) -> (usize, usize) {
+    let archive = known_in_archive(data_dir, &incoming, resolve);
+    let mut known = known_with_live(&archive, &history.lock().events, resolve);
+    let (add, already) = new_plays(incoming, &mut known, resolve);
     (add.len(), already)
 }
 
@@ -298,18 +339,29 @@ pub fn merge(
     incoming: Vec<PlayEvent>,
     before_write: impl FnOnce() -> Result<(), String>,
 ) -> Result<Merged, String> {
-    let archive_known = known_in_archive(data_dir, &incoming);
+    merge_resolved(history, data_dir, incoming, &as_is, before_write)
+}
+
+/// `merge`, with plays of a song under an old id (`Resolve`) counted as that song's.
+pub fn merge_resolved(
+    history: &parking_lot::Mutex<History>,
+    data_dir: &Path,
+    incoming: Vec<PlayEvent>,
+    resolve: Resolve,
+    before_write: impl FnOnce() -> Result<(), String>,
+) -> Result<Merged, String> {
+    let archive_known = known_in_archive(data_dir, &incoming, resolve);
     // Is there anything to add? (Without the lock held for the archive's snapshot.)
     {
         let live = history.lock();
-        let (add, _) = new_plays(incoming.clone(), &mut known_with_live(&archive_known, &live.events));
+        let (add, _) = new_plays(incoming.clone(), &mut known_with_live(&archive_known, &live.events, resolve), resolve);
         if add.is_empty() {
             return Ok(Merged { already: incoming.len(), ..Default::default() });
         }
     }
     before_write()?;
     let mut h = history.lock();
-    let (add, already) = new_plays(incoming, &mut known_with_live(&archive_known, &h.events));
+    let (add, already) = new_plays(incoming, &mut known_with_live(&archive_known, &h.events, resolve), resolve);
     if add.is_empty() {
         return Ok(Merged { already, ..Default::default() });
     }
@@ -577,6 +629,40 @@ mod tests {
         // Again: nothing to add, so no snapshot and no writing.
         let again = merge(&live, &dir, incoming, || panic!("nothing to write: no snapshot")).unwrap();
         assert_eq!((again.added, again.already), (0, 6));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plays_under_an_old_id_are_the_same_play() {
+        let dir = temp("moved");
+        let t0 = 1_735_689_000;
+        std::fs::create_dir_all(archive_dir(&dir)).unwrap();
+        // Heard here before the files moved: "gone" (no song now, no move known), "moved-old"
+        // (a move Cadence knows: now "song-2"), and a skipped play of a gone song.
+        let mut skipped = play("gone-skipped", t0 + 3000);
+        skipped.skipped = true;
+        std::fs::write(archive_dir(&dir).join("2024.jsonl"), format!("{}\n", serde_json::to_string(&play("gone", t0)).unwrap())).unwrap();
+        let live = parking_lot::Mutex::new(History { events: vec![play("moved-old", t0 + 1000), play("song-3", t0 + 2000), skipped] });
+        let library = ["song-1", "song-2", "song-3", "song-4"];
+        let resolve = |id: &str| -> Option<String> {
+            if library.contains(&id) {
+                return Some(id.to_string());
+            }
+            (id == "moved-old").then(|| "song-2".to_string())
+        };
+        let incoming = vec![
+            play("song-1", t0 + 4),     // the gone song's play: nobody starts two songs 4 s apart
+            play("song-2", t0 + 1000),  // under its old id here
+            play("song-4", t0 + 2005),  // another song 5 s after song-3's play: a real other play
+            play("song-1", t0 + 3004),  // the skipped play of a gone song doesn't hide it
+            play("song-1", u64::MAX - 1), // an absurd time: no overflow
+        ];
+        let (n, already) = count_new_resolved(&dir, &live, incoming.clone(), &resolve);
+        assert_eq!((n, already), (3, 2));
+        // Without the library to ask, each id is its own song (as before).
+        assert_eq!(count_new(&dir, &live, incoming.clone()), (5, 0));
+        let m = merge_resolved(&live, &dir, incoming, &resolve, || Ok(())).unwrap();
+        assert_eq!((m.added, m.already), (3, 2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -115,3 +115,5 @@ strip = true
 # Decoding and resampling are slow unoptimized; keep dev builds glitch-free.
 [profile.dev.package."*"]
 opt-level = 3
+# No debug info for dependencies: Cadence's own code keeps it, and the build folder stays small.
+debug = false

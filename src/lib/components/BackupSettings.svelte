@@ -131,15 +131,9 @@
           // A full or unavailable storage: the nudges stay in the data folder.
         }
       }
-      // What the window keeps of its own (the rest reloads on the backend's events).
-      api.skips().then((s) => {
-        if (!s) return;
-        app.skipped = s.ids;
-        app.skipInstrumentals = s.instrumentals;
-      }).catch(() => {});
-      api.folders().then((f) => f && (app.folders = f)).catch(() => {});
-      api.artistImages().then((m) => m && (app.artistImages = m)).catch(() => {});
-      await load();
+      // Everything the window holds that the restore changed (sound settings, settings, AI,
+      // playlists, favorites, history, the queue…), and the pages' own copies after it.
+      await Promise.all([app.reloadAfterRestore().catch(() => {}), load()]);
     } catch (e) {
       error = String(e);
     } finally {
@@ -193,6 +187,11 @@
   </div>
 </div>
 
+{#if info?.interrupted}
+  <p class="error" role="alert" data-testid="restore-interrupted">
+    {info.interrupted.message}{#if info.interrupted.error} ({info.interrupted.error}){/if}
+  </p>
+{/if}
 {#if message}<p class="note" role="status">{message}</p>{/if}
 {#if error}<p class="error" role="alert">{error}</p>{/if}
 {#if result}
@@ -205,6 +204,15 @@
       {#if result.unresolvedHistory}{plural(result.unresolvedHistory, "song")} only in your history aren't in your library.{/if}
       Your data from just before is in the list below (“Before a restore”).
     </span>
+    {#if result.heldBack?.length}
+      <span class="warn">
+        {plural(result.heldBack.length, "file")} couldn't be replaced because another program was using {result.heldBack.length === 1 ? "it" : "them"}:
+        {result.heldBack.join(", ")}. Cadence shows the restored data now, but to make it stick, close Cadence, start it again and restore this backup once more.
+      </span>
+    {/if}
+    {#if result.historyAside}
+      <span>Listening history from years that aren't in this backup was set aside, not deleted: {result.historyAside}</span>
+    {/if}
   </div>
 {/if}
 
@@ -302,6 +310,10 @@
     box-shadow: inset 0 0 0 1px var(--line);
     font-size: 13px;
     color: var(--text-2);
+  }
+  .result .warn {
+    color: var(--warn);
+    user-select: text;
   }
   .result strong {
     color: var(--text);

@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import ListenBrainzTools from "#lib/components/ListenBrainzTools.svelte";
 import NewReleasesSection from "#lib/components/NewReleases.svelte";
 import type { LbImportStatus, LbSyncPreview, NewRelease, NewReleases } from "#lib/api.js";
-import { mockBackend, settle } from "./helpers";
+import { app } from "#lib/store.svelte.js";
+import { mockBackend, resetApp, settle } from "./helpers";
 
 afterEach(() => cleanup());
 
@@ -158,13 +159,45 @@ describe("Settings › ListenBrainz: loved songs", () => {
     await user.click(toggle);
     expect(backend.last("set_listenbrainz_loved")).toEqual({ enabled: false });
   });
+
+  test("a change the app couldn't save puts the toggle back and says so", async () => {
+    resetApp();
+    const { user } = openTools({
+      set_listenbrainz_loved: () => {
+        throw "The settings file couldn't be written.";
+      },
+    });
+    await settle();
+    const toggle = screen.getByRole("switch", { name: /Send favorites to ListenBrainz/ });
+    await user.click(toggle);
+    await settle();
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(app.toast).toMatch(/couldn't be written/);
+  });
+
+  test("after a backup restore the toggle shows the restored setting", async () => {
+    resetApp();
+    let loved = true;
+    openTools({ get_app_settings: () => ({ closeToTray: true, globalHotkeys: true, lyricsOnline: true, fixTagsOnline: true, listenbrainzUser: "me", listenbrainzLoved: loved }) });
+    await settle();
+    const toggle = screen.getByRole("switch", { name: /Send favorites to ListenBrainz/ });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    loved = false;
+    app.restored++;
+    await settle();
+    await settle();
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+  });
 });
 
 describe("Discover › New from artists you own", () => {
   // jsdom has no IntersectionObserver: a stand-in the test drives, one row at a time.
   let live: { callback: IntersectionObserverCallback; targets: Set<Element> }[];
+  /** Observers made, ever (one for the section's whole life). */
+  let made = 0;
   beforeEach(() => {
     live = [];
+    made = 0;
     vi.stubGlobal(
       "IntersectionObserver",
       class {
@@ -172,6 +205,7 @@ describe("Discover › New from artists you own", () => {
         constructor(callback: IntersectionObserverCallback) {
           this.entry.callback = callback;
           live.push(this.entry);
+          made++;
         }
         observe(el: Element) {
           this.entry.targets.add(el);
@@ -233,6 +267,36 @@ describe("Discover › New from artists you own", () => {
     // The rows still off screen have none.
     expect(rows[0].querySelector("img")).toBeNull();
     expect(rows[2].querySelector("img")).toBeNull();
+  });
+
+  test("one observer for the section's life, however many rows come into view or are added", async () => {
+    const many = Array.from({ length: 12 }, (_, i) => release(i + 1));
+    mockBackend({ new_releases: () => answer(many), new_releases_cached: () => answer([]) });
+    const { container } = render(NewReleasesSection);
+    await settle();
+    const rows = () => Array.from(container.querySelectorAll<HTMLElement>("[data-key]"));
+    scrollTo(rows()[0]);
+    await settle();
+    scrollTo(rows()[1]);
+    await settle();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Show all 12" }));
+    await settle();
+    scrollTo(rows()[11]);
+    await settle();
+    expect(made).toBe(1);
+    expect(container.querySelectorAll("img")).toHaveLength(3);
+  });
+
+  test("last time's list arriving after today's is left out", async () => {
+    let cached!: (v: NewReleases) => void;
+    mockBackend({ new_releases: () => answer([release(7, { title: "Fresh" })]), new_releases_cached: () => new Promise<NewReleases>((r) => (cached = r)) });
+    render(NewReleasesSection);
+    await settle();
+    expect(screen.getByText("Fresh")).toBeInTheDocument();
+    cached(answer([release(1, { title: "Stale" })]));
+    await settle();
+    expect(screen.queryByText("Stale")).toBeNull();
+    expect(screen.getByText("Fresh")).toBeInTheDocument();
   });
 
   test("rows past the first few aren't drawn at all until asked for", async () => {

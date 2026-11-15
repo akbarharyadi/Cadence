@@ -205,30 +205,57 @@ fn artist_of(a: &Value) -> Option<MbArtist> {
     })
 }
 
-/// The one MusicBrainz artist that is safely `name`: score of 90 or more, one of its names (not a
-/// search hint) written like `name`, and no other artist matching as well (several artists of a
-/// common name: none). None also when the answer can't be read.
+/// A name this short (in letters; a Chinese, Japanese or Korean name in characters, which say
+/// more each) is shared by too many artists to be taken on the search alone.
+fn too_short(folded: &str) -> bool {
+    let n = folded.chars().count();
+    if crate::identity::cjk(folded) { n <= 1 } else { n <= 3 }
+}
+
+/// The one MusicBrainz artist that is safely `name` (`pick_with` without anything local to go on).
+#[cfg(test)]
 pub fn pick(name: &str, body: &str) -> Option<MbArtist> {
+    pick_with(name, body, &HashSet::new())
+}
+
+/// The one MusicBrainz artist that is safely `name`: one of its names (not a search hint) written
+/// like `name`, a score of 90 or more, and clearly ahead of every other artist with such a name
+/// (whatever their score: two artists called the same, at 100 and 85, are still two). A name that
+/// is very short, or that several MusicBrainz artists have, is taken only when something local
+/// agrees: another of the artist's names is also in the library (`library`: the library's names,
+/// folded). None also when the answer can't be read.
+pub fn pick_with(name: &str, body: &str, library: &HashSet<String>) -> Option<MbArtist> {
     let v: Value = serde_json::from_str(body).ok()?;
     let want = fold(name);
     if want.is_empty() {
         return None;
     }
+    // Every artist written like the name, whatever its score; each artist once (its best score).
     let mut matching: Vec<(u64, MbArtist)> = v["artists"]
         .as_array()?
         .iter()
         .filter_map(|a| Some((score(&a["score"]), artist_of(a)?)))
-        .filter(|(s, a)| *s >= MIN_SCORE && a.names(false).iter().any(|n| fold(n) == want))
+        .filter(|(_, a)| a.names(false).iter().any(|n| fold(n) == want))
         .collect();
     matching.sort_by(|a, b| b.0.cmp(&a.0));
     let mut ids = HashSet::new();
     matching.retain(|(_, a)| ids.insert(a.mbid.clone()));
-    match matching.as_slice() {
-        [(_, one)] => Some(one.clone()),
-        // Another artist matching nearly as well: can't tell which.
-        [(top, one), (next, _), ..] if *top >= next + 10 => Some(one.clone()),
-        _ => None,
+    let corroborated = |a: &MbArtist| a.names(false).iter().map(|n| fold(n)).any(|f| !f.is_empty() && f != want && library.contains(&f));
+    let (top, one) = matching.first()?;
+    if *top < MIN_SCORE {
+        return None;
     }
+    if let Some((next, _)) = matching.get(1)
+        && *top < next + 10
+    {
+        // Another artist of that name nearly as good: can't tell which.
+        return None;
+    }
+    let shared = matching.len() > 1;
+    if (shared || too_short(&want)) && !(corroborated(one) && !matching.iter().skip(1).any(|(_, a)| corroborated(a))) {
+        return None;
+    }
+    Some(one.clone())
 }
 
 // ---------- the job, with its network and clock as parameters (tests use fakes) ----------
@@ -286,8 +313,9 @@ pub enum Outcome {
 }
 
 /// Asks about each of `names` in turn, filing the answers in `cache`. `go(i)` before each name
-/// (false: stop); `saved(cache, done)` every `SAVE_EVERY` names and at the end.
-pub fn run(names: &[String], net: &mut dyn Net, clock: &mut dyn Clock, cache: &mut Cache, mut go: impl FnMut(usize) -> bool, mut saved: impl FnMut(&Cache, usize)) -> Outcome {
+/// (false: stop); `saved(cache, done)` every `SAVE_EVERY` names and at the end. `library`: every
+/// library artist name, folded (what corroborates a short or shared name, `pick_with`).
+pub fn run(names: &[String], library: &HashSet<String>, net: &mut dyn Net, clock: &mut dyn Clock, cache: &mut Cache, mut go: impl FnMut(usize) -> bool, mut saved: impl FnMut(&Cache, usize)) -> Outcome {
     let mut pacer = Pacer::default();
     let mut busy = 0u32;
     let mut outcome = Outcome::Done;
@@ -303,7 +331,7 @@ pub fn run(names: &[String], net: &mut dyn Net, clock: &mut dyn Clock, cache: &m
             let entry = match net.get(&url(name)) {
                 Reply::Body(body) => {
                     busy = 0;
-                    let found = pick(name, &body);
+                    let found = pick_with(name, &body, library);
                     let now = clock.unix();
                     Entry { asked: now, retry: found.is_none().then_some(now + RETRY_UNMATCHED), found }
                 }
@@ -372,7 +400,11 @@ impl Net for Http {
                 if !r.status().is_success() {
                     return Reply::Failed(status);
                 }
-                r.text().map(Reply::Body).unwrap_or(Reply::Offline)
+                // (Capped: an artist search answer is a few KB.)
+                match crate::net::text(r) {
+                    Ok(body) => Reply::Body(body),
+                    Err(_) => Reply::Failed(status),
+                }
             }
             Err(_) => Reply::Offline,
         }
@@ -464,6 +496,7 @@ pub fn start(ctx: Ctx) -> bool {
     let names = crate::identity::gather(&ctx.state).names;
     let dir = ctx.state.data_dir.clone();
     let list = with_cache(&dir, |c| todo(&names, c, crate::history::now()));
+    let library: HashSet<String> = names.iter().map(|(n, _)| fold(n)).filter(|f| !f.is_empty()).collect();
     if list.is_empty() || RUNNING.swap(true, Ordering::SeqCst) {
         return false;
     }
@@ -481,6 +514,7 @@ pub fn start(ctx: Ctx) -> bool {
                 let total = list.len();
                 let outcome = run(
                     &list,
+                    &library,
                     &mut net,
                     &mut clock,
                     &mut cache,
@@ -599,13 +633,43 @@ mod tests {
         assert_eq!(pick("Yonezu", YONEZU), None);
         // A low score isn't enough even with the same name.
         assert_eq!(pick("Kenshi Yonezu Tribute Band", YONEZU), None);
-        let b = pick("BTS", BTS).expect("BTS");
+        // Three letters: only with something local agreeing (the library has the Hangul name too).
+        assert_eq!(pick("BTS", BTS), None);
+        let library: HashSet<String> = ["BTS", "방탄소년단"].iter().map(|n| fold(n)).collect();
+        let b = pick_with("BTS", BTS, &library).expect("BTS");
         assert_eq!(b.name, "방탄소년단");
         assert_eq!(b.native_and_latin(), (Some("방탄소년단".into()), Some("BTS".into())));
         // Not by a search hint.
         assert_eq!(pick("bangtan", BTS), None);
         assert_eq!(pick("Aimer", AMBIGUOUS), None);
         assert_eq!(pick("x", "not json"), None);
+    }
+
+    #[test]
+    fn a_same_named_rival_below_90_still_counts() {
+        // Two different artists called "Invented Name": the second scores under 90 but is still
+        // a second artist of that name, so neither is taken from the search alone.
+        let two = r#"{"artists":[
+          {"id":"inv-1","score":100,"name":"Invented Name","sort-name":"Name, Invented","country":"US",
+           "aliases":[{"name":"架空の名前","type":"Artist name"}]},
+          {"id":"inv-2","score":85,"name":"Invented Name","sort-name":"Invented Name","country":"GB"}]}"#;
+        assert_eq!(pick("Invented Name", two), None);
+        // With the library also having the first one's other name, it is that one.
+        let library: HashSet<String> = ["Invented Name", "架空の名前"].iter().map(|n| fold(n)).collect();
+        assert_eq!(pick_with("Invented Name", two, &library).map(|a| a.mbid), Some("inv-1".into()));
+        // Under 90 alone: nothing, however unambiguous.
+        let low = r#"{"artists":[{"id":"inv-3","score":80,"name":"Another Invention","sort-name":"Another Invention"}]}"#;
+        assert_eq!(pick("Another Invention", low), None);
+        // Two at nearly the same score: nothing even when both are corroborated.
+        let near = r#"{"artists":[
+          {"id":"a","score":100,"name":"Twin Name","aliases":[{"name":"ふたご","type":"Artist name"}]},
+          {"id":"b","score":95,"name":"Twin Name","aliases":[{"name":"ふたご","type":"Artist name"}]}]}"#;
+        let library: HashSet<String> = ["Twin Name", "ふたご"].iter().map(|n| fold(n)).collect();
+        assert_eq!(pick_with("Twin Name", near, &library), None);
+        // A one-character CJK name: corroboration needed; a longer one isn't short.
+        let one = r#"{"artists":[{"id":"c","score":100,"name":"嵐","aliases":[{"name":"Arashi","type":"Artist name"}]}]}"#;
+        assert_eq!(pick("嵐", one), None);
+        assert!(pick_with("嵐", one, &["嵐", "Arashi"].iter().map(|n| fold(n)).collect()).is_some());
     }
 
     #[test]
@@ -654,7 +718,8 @@ mod tests {
         let (mut net, mut clock) = fakes(vec![Reply::Body(YONEZU.into()), Reply::Body(BTS.into()), Reply::Body(AMBIGUOUS.into())]);
         let mut cache = Cache::default();
         let mut saves = 0;
-        let out = run(&names, &mut net, &mut clock, &mut cache, |_| true, |_, _| saves += 1);
+        let library: HashSet<String> = ["米津玄師", "BTS", "방탄소년단", "Aimer"].iter().map(|n| fold(n)).collect();
+        let out = run(&names, &library, &mut net, &mut clock, &mut cache, |_| true, |_, _| saves += 1);
         assert_eq!(out, Outcome::Done);
         let times: Vec<u64> = net.asked.iter().map(|(_, t)| *t).collect();
         assert!(times.windows(2).all(|w| w[1] - w[0] >= GAP_MS), "{times:?}");
@@ -672,14 +737,14 @@ mod tests {
         let names = vec!["BTS".to_string()];
         let (mut net, mut clock) = fakes(vec![Reply::Busy(Some(7)), Reply::Busy(None), Reply::Body(BTS.into())]);
         let mut cache = Cache::default();
-        assert_eq!(run(&names, &mut net, &mut clock, &mut cache, |_| true, |_, _| {}), Outcome::Done);
+        assert_eq!(run(&names, &HashSet::new(), &mut net, &mut clock, &mut cache, |_| true, |_, _| {}), Outcome::Done);
         assert!(clock.1.contains(&7_000), "Retry-After honoured: {:?}", clock.1);
         assert!(clock.1.contains(&4_000), "then doubling: {:?}", clock.1);
         assert_eq!(net.asked.len(), 3, "the same name asked again");
         // Busy every time: stops (nothing filed for the name, so it's asked next time).
         let (mut net, mut clock) = fakes(vec![Reply::Busy(None); 10]);
         let mut cache = Cache::default();
-        assert_eq!(run(&names, &mut net, &mut clock, &mut cache, |_| true, |_, _| {}), Outcome::Busy);
+        assert_eq!(run(&names, &HashSet::new(), &mut net, &mut clock, &mut cache, |_| true, |_, _| {}), Outcome::Busy);
         assert!(cache.names.is_empty());
     }
 
@@ -688,7 +753,7 @@ mod tests {
         let names: Vec<String> = ["米津玄師", "BTS"].iter().map(|s| s.to_string()).collect();
         let (mut net, mut clock) = fakes(vec![Reply::Body(YONEZU.into()), Reply::Offline]);
         let mut cache = Cache::default();
-        assert_eq!(run(&names, &mut net, &mut clock, &mut cache, |_| true, |_, _| {}), Outcome::Offline);
+        assert_eq!(run(&names, &HashSet::new(), &mut net, &mut clock, &mut cache, |_| true, |_, _| {}), Outcome::Offline);
         assert_eq!(cache.names.len(), 1);
         // Next time (after a restart, say): only what's left.
         let lib: Vec<(String, u32)> = names.iter().map(|n| (n.clone(), 1)).collect();
@@ -696,7 +761,7 @@ mod tests {
         assert_eq!(left, ["BTS"]);
         // Stopped by the user before the second name.
         let (mut net, mut clock) = fakes(vec![Reply::Body(BTS.into())]);
-        assert_eq!(run(&left, &mut net, &mut clock, &mut Cache::default(), |_| false, |_, _| {}), Outcome::Stopped);
+        assert_eq!(run(&left, &HashSet::new(), &mut net, &mut clock, &mut Cache::default(), |_| false, |_, _| {}), Outcome::Stopped);
         assert!(net.asked.is_empty());
     }
 

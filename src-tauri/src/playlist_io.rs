@@ -175,6 +175,15 @@ fn export_path(track_path: &str, base: Option<&str>, o: &ExportOptions) -> Strin
     }
 }
 
+/// A file name that says nothing of its song: a track number ("01.flac", "1-03.flac",
+/// "Track 07.mp3") or a few characters.
+fn generic_name(name: &str) -> bool {
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+    let lower = stem.to_lowercase();
+    let words: String = lower.replace("track", "").chars().filter(|c| c.is_alphanumeric() && !c.is_ascii_digit()).collect();
+    words.is_empty() || stem.chars().filter(|c| c.is_alphanumeric()).count() < 4
+}
+
 fn file_stem(path: &str) -> String {
     let p = path.replace('\\', "/");
     let name = p.rsplit('/').next().unwrap_or("");
@@ -937,14 +946,48 @@ impl<'a> Index<'a> {
                 return resolve(c);
             }
         }
+        // Only the end of the path in common ("…/CD1/01.flac"): the songs whose title and length
+        // agree with what the entry says; with nothing said and a file name that says nothing
+        // either (a track number), no match at all.
         let n = parts.len();
-        if n >= 3 && let Some(c) = self.by_suffix3.get(&parts[n - 3..].join("/")) {
-            return resolve(c);
-        }
-        if n >= 2 && let Some(c) = self.by_suffix2.get(&parts[n - 2..].join("/")) {
-            return resolve(c);
+        let says_nothing = e.title.trim().is_empty() && e.text.trim().is_empty() && e.duration.is_none();
+        let generic = says_nothing && generic_name(&parts[n - 1]);
+        let agreeing = |c: &Vec<&'a Track>| -> Vec<&'a Track> { c.iter().copied().filter(|t| Self::agrees(e, t)).collect() };
+        for k in [3, 2] {
+            let Some(c) = (n >= k).then(|| parts[n - k..].join("/")).and_then(|s| if k == 3 { self.by_suffix3.get(&s) } else { self.by_suffix2.get(&s) }) else { continue };
+            if generic {
+                // Several songs end so: said to be ambiguous; one: still not enough to take it.
+                return if c.len() > 1 { Err(c.clone()) } else { Ok(None) };
+            }
+            let fit = agreeing(c);
+            return match (fit.is_empty(), c.len()) {
+                // Several songs end so and none is the one the entry describes: ambiguous.
+                (true, 2..) => Err(c.clone()),
+                // The same end of a path, another song: the tags (if any) look further.
+                (true, _) => Ok(None),
+                _ => resolve(&fit),
+            };
         }
         Ok(None)
+    }
+
+    /// Whether what an entry says of its song (its title, its length) fits a song found by the end
+    /// of its path. An entry that says neither fits.
+    fn agrees(e: &Entry, t: &Track) -> bool {
+        let titles: Vec<String> = if !e.title.trim().is_empty() {
+            vec![e.title.clone()]
+        } else if !e.text.trim().is_empty() {
+            splits(&e.text).into_iter().map(|(_, t)| t).collect()
+        } else {
+            Vec::new()
+        };
+        let title_ok = titles.is_empty()
+            || titles.iter().any(|x| {
+                let (k, c) = (match_key(x), core(x));
+                (!k.is_empty() && k == match_key(&t.title)) || (!c.is_empty() && c == core(&t.title)) || (!k.is_empty() && k == match_key(&t.subtitle))
+            });
+        let length_ok = e.duration.is_none_or(|d| (t.duration - d).abs() <= SAME_LENGTH);
+        title_ok && length_ok
     }
 
     pub fn find(&self, e: &Entry, base: Option<&str>, who: &Identity) -> Outcome<'a> {
@@ -1358,6 +1401,33 @@ mod tests {
 
     fn render_text(name: &str, tracks: &[Track], base: Option<&str>, o: &ExportOptions) -> String {
         String::from_utf8(render(name, tracks, base, o).unwrap().bytes).unwrap()
+    }
+
+    // ----- matching by the end of a path -----
+
+    #[test]
+    fn the_end_of_a_path_alone_is_not_enough() {
+        let lib = vec![
+            song("d1", r"D:\Music\Invented Band\Box Set\CD1\01.flac", "Invented Band", "Morning Made Up", "Box Set", 200.0),
+            song("x", r"D:\Music\Other Act\Long Title Song.flac", "Other Act", "Long Title Song", "Other", 210.0),
+        ];
+        // Another machine's box set: only "CD1/01.flac" in common, and another title: not this song.
+        let other = run("/p/x.m3u8", "#EXTM3U\n#EXTINF:180,Someone Else - Evening Invented\n/home/u/Music/Box/CD1/01.flac\n", &lib);
+        assert!(other.matched.is_empty(), "{:?}", other.matched);
+        // The same title and length: it is.
+        let same = run("/p/x.m3u8", "#EXTM3U\n#EXTINF:200,Invented Band - Morning Made Up\n/home/u/Music/Box/CD1/01.flac\n", &lib);
+        assert_eq!(ids(&same), ["d1"]);
+        // The title agrees but not the length: not this song.
+        let long = run("/p/x.m3u8", "#EXTM3U\n#EXTINF:320,Invented Band - Morning Made Up\n/home/u/Music/Box/CD1/01.flac\n", &lib);
+        assert!(long.matched.is_empty());
+        // Nothing said, and a file name that's only a track number: no match.
+        let bare = run("/p/x.m3u8", "/home/u/Music/Box/CD1/01.flac\n", &lib);
+        assert!(bare.matched.is_empty());
+        // A file name that names the song, nothing else said: the end of the path is enough.
+        let named = run("/p/x.m3u8", "/elsewhere/Other Act/Long Title Song.flac\n", &lib);
+        assert_eq!(ids(&named), ["x"]);
+        assert!(generic_name("01.flac") && generic_name("1-03.flac") && generic_name("Track 07.mp3") && generic_name("ab.flac"));
+        assert!(!generic_name("Long Title Song.flac") && !generic_name("夜に駆ける.flac"));
     }
 
     // ----- export -----

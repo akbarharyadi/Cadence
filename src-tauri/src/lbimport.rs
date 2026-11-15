@@ -250,8 +250,9 @@ pub fn scan(
             return End::Failed(format!("Couldn’t keep the listens read so far ({e})."));
         }
         // A page of listens that ListenBrainz keeps older than the last one's start; nothing
-        // older (or a page that doesn't get older) is the end.
-        let more = page > 0 && oldest.is_some_and(|o| saved.cursor.is_none_or(|c| o < c));
+        // older (or a page that doesn't get older) is the end. Told by the page's raw listens
+        // (`oldest_of`), not those kept: a page whose listens all lack a title isn't the end.
+        let more = oldest.is_some_and(|o| saved.cursor.is_none_or(|c| o < c));
         if more {
             saved.cursor = oldest;
         } else {
@@ -266,11 +267,13 @@ pub fn scan(
     }
 }
 
-/// What adding the matched plays would do (nothing is written).
-pub fn summarize(data_dir: &Path, history: &parking_lot::Mutex<crate::history::History>, stage: &Stage, saved: &Saved) -> Summary {
+/// What adding the matched plays would do (nothing is written). `resolve`: which song a play's id
+/// is now (`library_songs`), so a play recorded here before the song's file moved counts as the
+/// same play as the listen.
+pub fn summarize(data_dir: &Path, history: &parking_lot::Mutex<crate::history::History>, stage: &Stage, saved: &Saved, resolve: crate::history::Resolve) -> Summary {
     let events = stage.events();
     let matched = events.len() as u64;
-    let (will_add, already) = crate::history::count_new(data_dir, history, events);
+    let (will_add, already) = crate::history::count_new_resolved(data_dir, history, events, resolve);
     Summary { on_listenbrainz: saved.seen, matched, already_here: already as u64, will_add: will_add as u64, unmatched: saved.unmatched, ambiguous: saved.ambiguous }
 }
 
@@ -279,9 +282,22 @@ pub fn commit(
     data_dir: &Path,
     history: &parking_lot::Mutex<crate::history::History>,
     stage: &Stage,
+    resolve: crate::history::Resolve,
     before_write: impl FnOnce() -> Result<(), String>,
 ) -> Result<crate::history::Merged, String> {
-    crate::history::merge(history, data_dir, stage.events(), before_write)
+    crate::history::merge_resolved(history, data_dir, stage.events(), resolve, before_write)
+}
+
+/// The library's song ids now: an id that is one of them is that song; another one that moved
+/// (`state::moved_to`) to one of them is that one; anything else is a song that's gone.
+pub fn library_songs(state: &crate::state::AppState) -> impl Fn(&str) -> Option<String> + use<> {
+    let ids: std::collections::HashSet<String> = state.library.lock().by_id.keys().cloned().collect();
+    move |id: &str| {
+        if ids.contains(id) {
+            return Some(id.to_string());
+        }
+        crate::state::moved_to(id).filter(|n| ids.contains(n))
+    }
 }
 
 // ---------- the job in the app ----------
@@ -414,7 +430,8 @@ fn run(ctx: &Ctx, stage: &Stage, mut saved: Saved) {
     log::info!("ListenBrainz history import: {end:?} ({} listens read, {} matched)", saved.seen, saved.matched);
     match end {
         End::Finished => {
-            let summary = summarize(&ctx.state.data_dir, &ctx.state.history, stage, &saved);
+            let resolve = library_songs(&ctx.state);
+            let summary = summarize(&ctx.state.data_dir, &ctx.state.history, stage, &saved, &resolve);
             saved.summary = Some(summary);
             stage.save(&saved);
         }
@@ -441,9 +458,17 @@ pub fn discard(ctx: &Ctx) {
     emit(ctx);
 }
 
+/// The matched plays are being added to the history now.
+pub fn applying() -> bool {
+    APPLYING.load(Ordering::SeqCst)
+}
+
 /// Adds the matched plays to the history, after a snapshot of the data (Settings › Backup keeps it).
 pub fn apply(ctx: &Ctx) -> Result<Applied, String> {
     let state = &ctx.state;
+    if crate::backup::restoring() {
+        return Err("A backup is being restored. Try again when it has finished.".into());
+    }
     let stage = Stage::new(&state.data_dir);
     let mut saved = stage.load();
     if saved.user != state.settings.lock().listenbrainz_user || !saved.finished || saved.applied.is_some() {
@@ -452,9 +477,15 @@ pub fn apply(ctx: &Ctx) -> Result<Applied, String> {
     if RUNNING.load(Ordering::SeqCst) || APPLYING.swap(true, Ordering::SeqCst) {
         return Err("Wait for the reading to finish first.".into());
     }
+    // (A restore that started just now: it waits for this one, or this one for it.)
+    if crate::backup::restoring() {
+        APPLYING.store(false, Ordering::SeqCst);
+        return Err("A backup is being restored. Try again when it has finished.".into());
+    }
     emit(ctx);
     let mut safety = String::new();
-    let merged = commit(&state.data_dir, &state.history, &stage, || {
+    let resolve = library_songs(state);
+    let merged = commit(&state.data_dir, &state.history, &stage, &resolve, || {
         let path = crate::backup::snapshot(state, "safety")?;
         crate::backup::rotate_safety(&crate::backup::backups_dir(&state.data_dir));
         safety = path.to_string_lossy().into_owned();
@@ -625,6 +656,24 @@ mod tests {
     }
 
     #[test]
+    fn a_page_whose_listens_are_all_left_out_is_not_the_end() {
+        let dir = temp("raw-paging");
+        let stage = Stage::new(&dir);
+        let lib = library();
+        // A whole page of listens without a title (left out), then a real one, then nothing.
+        let untitled: Vec<String> = (0..3).map(|i| format!(r#"{{"listened_at":{},"track_metadata":{{"artist_name":"Lumen","track_name":""}}}}"#, 1_790_000_300 - i)).collect();
+        let p2 = page(&[listen_json(1_790_000_100, "Lumen", "Glass", 180_000)]);
+        let mut saved = Saved { user: "me".into(), started: true, ..Default::default() };
+        let (mut net, mut clock) = fakes(vec![ok(&page(&untitled)), ok(&p2), ok(&page(&[]))]);
+        let mut m = Matcher::new(&lib, Identity::default(), |_| None);
+        assert_eq!(scan(&stage, &mut saved, &mut net, &mut clock, &mut |l| m.judge(l), &|| false, |_| {}), End::Finished);
+        assert_eq!(net.asked.len(), 3, "{:?}", net.asked);
+        assert_eq!(net.asked[1].0, "/user/me/listens?count=1000&max_ts=1790000298");
+        assert_eq!(saved.matched, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_dry_run_says_what_the_real_run_does_and_the_snapshot_comes_first() {
         let dir = temp("apply");
         let stage = Stage::new(&dir);
@@ -651,14 +700,14 @@ mod tests {
         let (mut net, mut clock) = fakes(vec![ok(&p), ok(&page(&[]))]);
         let mut m = Matcher::new(&lib, Identity::default(), |_| None);
         assert_eq!(scan(&stage, &mut saved, &mut net, &mut clock, &mut |l| m.judge(l), &|| false, |_| {}), End::Finished);
-        let summary = summarize(&dir, &history, &stage, &saved);
+        let summary = summarize(&dir, &history, &stage, &saved, &crate::history::as_is);
         assert_eq!(summary, Summary { on_listenbrainz: 7, matched: 6, already_here: 3, will_add: 3, unmatched: 1, ambiguous: 0 });
         // Nothing has been written yet.
         assert!(!crate::history::archive_dir(&dir).exists());
         assert_eq!(history.lock().events.len(), 20_000);
 
         let mut taken = false;
-        let merged = commit(&dir, &history, &stage, || {
+        let merged = commit(&dir, &history, &stage, &crate::history::as_is, || {
             assert!(!crate::history::archive_dir(&dir).exists(), "the snapshot is taken before anything is written");
             taken = true;
             Ok(())
@@ -679,7 +728,7 @@ mod tests {
             assert_eq!(got, n, "{year}");
         }
         // Running it again adds nothing.
-        let again = summarize(&dir, &history, &stage, &saved);
+        let again = summarize(&dir, &history, &stage, &saved, &crate::history::as_is);
         assert_eq!(again.will_add, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -302,10 +302,74 @@ fn file(dir: &Path) -> std::path::PathBuf {
     dir.join("lyric-index.txt")
 }
 
+/// The index is let go of after this long without a lyric search (it is read back from
+/// `lyric-index.txt` on the next one): tens of MB for a big library aren't kept for nothing.
+const IDLE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// What changed since the index was last written is kept on disk once this many songs changed, or
+/// this long after the last write (and always before the index is let go of), not after every
+/// change: the file is rewritten whole.
+const SAVE_AFTER_SONGS: usize = 200;
+const SAVE_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+struct Use {
+    /// The last search.
+    searched: Option<std::time::Instant>,
+    /// Songs changed in memory and not written yet, and when it was last written.
+    unsaved: usize,
+    saved: Option<std::time::Instant>,
+}
+
+static USE: Mutex<Use> = Mutex::new(Use { searched: None, unsaved: 0, saved: None });
+
+/// Whether a loaded index should be let go of now.
+fn idle_too_long(loaded: bool, building: bool, since_search: Option<std::time::Duration>) -> bool {
+    loaded && !building && since_search.is_none_or(|d| d >= IDLE)
+}
+
+/// Whether the changes kept in memory should be written now.
+fn save_due(unsaved: usize, since_save: Option<std::time::Duration>, letting_go: bool) -> bool {
+    unsaved > 0 && (letting_go || unsaved >= SAVE_AFTER_SONGS || since_save.is_none_or(|d| d >= SAVE_AFTER))
+}
+
+/// Checked when lyrics change (no timer): an index not searched for a while is let go of (written
+/// first if it has changes), on the background pool.
+fn let_go_if_idle(ctx: &Ctx) {
+    let since = USE.lock().searched.map(|t| t.elapsed());
+    if !idle_too_long(INDEX.lock().is_some(), BUILDING.load(Ordering::SeqCst), since) || BUILDING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let ctx = ctx.clone();
+    let asked = USE.lock().searched;
+    crate::jobs::background_pool().spawn(move || {
+        let dir = ctx.state.data_dir.clone();
+        let taken = INDEX.lock().take();
+        if let Some(idx) = taken {
+            let unsaved = std::mem::take(&mut USE.lock().unsaved);
+            if save_due(unsaved, None, true)
+                && let Err(e) = idx.save(&file(&dir))
+            {
+                log::warn!("couldn't keep the lyrics index: {e}");
+            }
+            log::info!("lyrics index let go of after {} min without a search", IDLE.as_secs() / 60);
+        }
+        BUILDING.store(false, Ordering::SeqCst);
+        // A search came meanwhile (it found nothing loaded and is waiting): made again for it.
+        if USE.lock().searched != asked {
+            start(ctx);
+        }
+    });
+}
+
 /// A song's saved lyrics changed (picked, pasted, hidden, looked up): its lines are read again.
 pub fn touched(track_id: &str) {
     CHANGED.lock().get_or_insert_with(HashMap::new).insert(track_id.to_string(), None);
+    if let Some(ctx) = APP.lock().clone() {
+        let_go_if_idle(&ctx);
+    }
 }
+
+/// The app the index belongs to (set by its first search).
+static APP: Mutex<Option<Ctx>> = Mutex::new(None);
 
 /// The lyrics view showed a song's lyrics: those from its own file (embedded or a .lrc beside it)
 /// are indexed too, the first time and when they change.
@@ -319,6 +383,9 @@ pub fn seen(track_id: &str, l: &crate::lyrics::Lyrics) {
         return;
     }
     CHANGED.lock().get_or_insert_with(HashMap::new).insert(track_id.to_string(), Some((stamp, lines)));
+    if let Some(ctx) = APP.lock().clone() {
+        let_go_if_idle(&ctx);
+    }
 }
 
 /// The lines of a song's saved lyrics, as the lyrics view would show them: none when they're
@@ -358,6 +425,8 @@ pub struct Progress {
 
 /// Searches the lyrics; the first call starts making the index (in the background).
 pub fn search(ctx: &Ctx, query: &str, limit: usize) -> Found {
+    USE.lock().searched = Some(std::time::Instant::now());
+    *APP.lock() = Some(ctx.clone());
     let changed: HashSet<String> = CHANGED.lock().as_ref().map(|m| m.keys().cloned().collect()).unwrap_or_default();
     let ready = INDEX.lock().is_some();
     if !ready || (!changed.is_empty() && !BUILDING.load(Ordering::SeqCst)) {
@@ -386,8 +455,8 @@ fn start(ctx: Ctx) {
     if BUILDING.swap(true, Ordering::SeqCst) {
         return;
     }
-    let spawned = std::thread::Builder::new().name("cadence-lyric-index".into()).spawn(move || {
-        crate::jobs::background_priority();
+    // On the shared background pool (at most two heavy threads in all, low priority).
+    crate::jobs::background_pool().spawn(move || {
         let started = std::time::Instant::now();
         let dir = ctx.state.data_dir.clone();
         let cache = dir.join("lyrics");
@@ -465,9 +534,17 @@ fn start(ctx: Ctx) {
                 for id in &gone {
                     idx.remove(id);
                 }
-                if total > 0 || !gone.is_empty() {
-                    if let Err(e) = idx.save(&file(&dir)) {
-                        log::warn!("couldn't keep the lyrics index: {e}");
+                // The first load of a session is written at once (what was read again since the
+                // file was made); later changes are written in batches (`save_due`).
+                let mut u = USE.lock();
+                u.unsaved += total + gone.len();
+                if (first && u.unsaved > 0) || save_due(u.unsaved, u.saved.map(|t| t.elapsed()), false) {
+                    match idx.save(&file(&dir)) {
+                        Ok(()) => {
+                            u.unsaved = 0;
+                            u.saved = Some(std::time::Instant::now());
+                        }
+                        Err(e) => log::warn!("couldn't keep the lyrics index: {e}"),
                     }
                 }
                 log::info!("lyrics index: {} songs, {} lines, {} KB; {total} read again in {:?}", idx.len(), idx.lines(), idx.bytes() / 1024, started.elapsed());
@@ -477,10 +554,6 @@ fn start(ctx: Ctx) {
         ctx.emit("lyric-index-progress", Progress { done: total, total, running: false });
         ctx.emit("lyric-index-ready", ());
     });
-    if let Err(e) = spawned {
-        BUILDING.store(false, Ordering::SeqCst);
-        log::warn!("couldn't start the lyrics index: {e}");
-    }
 }
 
 /// The lyrics cache's song files (`<id>.json`, not `<id>.voice.json` and the like) and their stamps.
@@ -582,6 +655,21 @@ mod tests {
         assert!(cached_lines(dir.path(), "s1", "Test Song").is_none());
         // Lyrics from the song's own file come in through `seen`; hidden ones have no source.
         assert!(lines_of(&crate::lyrics::Lyrics { lookup: "hidden".into(), ..Default::default() }).is_empty());
+    }
+
+    #[test]
+    fn let_go_of_when_idle_and_written_in_batches() {
+        let min = |m: u64| Some(std::time::Duration::from_secs(m * 60));
+        assert!(!idle_too_long(true, false, min(1)), "searched a minute ago: kept");
+        assert!(idle_too_long(true, false, min(16)));
+        assert!(idle_too_long(true, false, None), "loaded but never searched this session");
+        assert!(!idle_too_long(true, true, min(60)), "never while it's being made");
+        assert!(!idle_too_long(false, false, min(60)));
+        assert!(!save_due(0, min(60), true), "nothing to write");
+        assert!(!save_due(3, min(1), false), "a few changes wait");
+        assert!(save_due(SAVE_AFTER_SONGS, min(1), false));
+        assert!(save_due(3, min(11), false));
+        assert!(save_due(1, min(1), true), "always before it's let go of");
     }
 
     #[test]

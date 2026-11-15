@@ -6,6 +6,7 @@
   import type { Playlist } from "#lib/api.js";
   import { app, type View } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
+  import ProgressBar from "./ui/ProgressBar.svelte";
 
   let searchInput: HTMLInputElement;
 
@@ -230,7 +231,7 @@
   <div class="bottom">
     {#if job}
       <div class="job" title={job.about || undefined}>
-        <div class="bar"><div style="width: {job.share != null ? job.share * 100 : job.total ? (job.done / job.total) * 100 : 6}%"></div></div>
+        <div class="bar"><ProgressBar value={job.share != null ? job.share : job.total ? job.done / job.total : 0.06} /></div>
         <span>
           {job.label}{!job.total
             ? "…"
@@ -430,15 +431,6 @@
     color: var(--text-2);
   }
   .job .bar {
-    height: 3px;
-    border-radius: 3px;
-    background: var(--line-strong);
-    overflow: hidden;
     margin-bottom: 7px;
-  }
-  .job .bar div {
-    height: 100%;
-    background: var(--accent);
-    transition: width 0.3s;
   }
 </style>

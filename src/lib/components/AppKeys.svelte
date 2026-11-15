@@ -1,10 +1,12 @@
 <script lang="ts">
   // The window's finding-and-comfort shortcuts, and the two overlays they open:
-  //   Ctrl+K command palette, Ctrl+F or "/" search, "?" shortcut help, Ctrl+= / Ctrl+- / Ctrl+0 interface size.
+  //   Ctrl+K command palette, Ctrl+F or "/" search, "?" shortcut help, Ctrl+= / Ctrl+- / Ctrl+0 interface size,
+  //   and Escape clearing a song selection when nothing above the page takes it.
   // (Playing and navigation keys stay in routes/+page.svelte.) The keys are listed in shortcuts.ts.
   import { focusSearch } from "#lib/focusSearch.js";
   import { openHelp, openPalette, overlays } from "#lib/palette.svelte.js";
   import { app } from "#lib/store.svelte.js";
+  import { leaveSelection } from "#lib/selection.js";
   import { uiZoom } from "#lib/uiZoom.svelte.js";
   import CommandPalette from "./CommandPalette.svelte";
   import Guard from "./Guard.svelte";
@@ -17,6 +19,31 @@
       target.tagName === "SELECT" ||
       target.isContentEditable
     );
+  }
+
+  /** The top-most open dialog (the palette, help and every Modal are aria-modal), if any. */
+  function topDialog(): HTMLElement | null {
+    const all = document.querySelectorAll<HTMLElement>("[aria-modal='true']");
+    return all.length ? all[all.length - 1] : null;
+  }
+
+  /**
+   * Ctrl+F and "/": the search box, unless something covers the page. A dialog with a search box
+   * of its own (the palette) gets that one; any other dialog, a context menu or Now Playing keeps
+   * the key (the box behind it would turn the page under the dialog into Search).
+   */
+  function findKey(): boolean {
+    const dialog = topDialog();
+    if (dialog) {
+      const own = dialog.querySelector<HTMLInputElement>("input[type='search'], input[role='combobox'], input[role='searchbox']");
+      if (!own) return false;
+      own.focus();
+      own.select?.();
+      return true;
+    }
+    if (app.menu || app.nowPlayingOpen || document.querySelector("[role=menu]")) return false;
+    void focusSearch();
+    return true;
   }
 
   function onKey(e: KeyboardEvent) {
@@ -35,7 +62,7 @@
     }
     if (mod && !e.shiftKey && key.toLowerCase() === "f") {
       e.preventDefault();
-      if (!overlays.paletteOpen && !overlays.helpOpen) focusSearch();
+      findKey();
       return;
     }
     // Interface size: works from a text box too. (Shift+= types "+" on most keyboards.)
@@ -51,12 +78,23 @@
 
     // "/" and "?" are letters in a text box.
     if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || typingIn(target)) return;
+    // Escape, last in line: what's above the page (a menu, a dialog, the palette, Now Playing)
+    // takes it first, and a song list with the keyboard clears its own selection. Otherwise a
+    // multi-selection left behind (focus moved to the bar, "Add to Playlist…") is cleared here.
+    // It never navigates.
+    if (key === "Escape") {
+      if (e.shiftKey || app.menu || app.nowPlayingOpen || overlays.paletteOpen || overlays.helpOpen || document.querySelector("[aria-modal='true'], [role=menu]")) return;
+      if (leaveSelection()) e.preventDefault();
+      return;
+    }
     // An open dialog, menu or the palette has the keyboard.
-    if (overlays.paletteOpen || overlays.helpOpen || app.menu || target.closest("[aria-modal='true'], [role=menu]")) return;
     if (key === "/") {
-      e.preventDefault();
-      focusSearch();
-    } else if (key === "?") {
+      // Never typed into the page under a dialog; a dialog's own search box takes it (see findKey).
+      if (!overlays.helpOpen && findKey()) e.preventDefault();
+      return;
+    }
+    if (overlays.paletteOpen || overlays.helpOpen || app.menu || topDialog() || target.closest("[aria-modal='true'], [role=menu]")) return;
+    if (key === "?") {
       e.preventDefault();
       openHelp();
     }

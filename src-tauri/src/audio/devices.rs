@@ -198,23 +198,65 @@ fn list() -> anyhow::Result<Present> {
     Ok(Present { devices, default })
 }
 
+/// What the system said about devices since Cadence started (Windows: WASAPI's notifications, see
+/// `watch`). Elsewhere nothing fills it in: there, a device that's back is only noticed when the
+/// device list is read again (the Sound page lists it, `Cmd::CheckDevices`; or Play is pressed,
+/// which opens the output and so lists the devices afresh).
+#[derive(Default)]
+pub struct Events {
+    /// Bumped whenever a device came, went or changed state, or the default changed.
+    pub changed: std::sync::atomic::AtomicU64,
+    /// The default output (render, console role) changed since the worker last looked.
+    pub default_changed: std::sync::atomic::AtomicBool,
+}
+
+/// How long to wait before trying to start the device watcher again after its `tries`-th failure
+/// (1, 2, 4, 8, 16 s), and None once it's no use: without it, following the system default and
+/// carrying on when the chosen device is back are lost for the session.
+pub fn watch_retry_delay(tries: u32) -> Option<Duration> {
+    (1..=5).contains(&tries).then(|| Duration::from_secs(1 << (tries - 1)))
+}
+
+/// The part of a device id after the host ("alsa:hw:CARD=K7,DEV=0" → "hw:CARD=K7,DEV=0").
+fn pcm_of(id: &str) -> Option<&str> {
+    id.strip_prefix("alsa:")
+}
+
+/// Linux: a raw ALSA entry for a sound card (`hw:`, `plughw:`, `front:`...), which takes the card
+/// for itself, around PipeWire or PulseAudio. While a sound server holds the card, it can't be
+/// opened that way; Direct output is what it's for. Never true for other systems' ids.
+pub fn raw_hardware(id: &str) -> bool {
+    const RAW: [&str; 8] = ["hw:", "plughw:", "front:", "surround", "iec958:", "hdmi:", "dmix:", "sysdefault:"];
+    pcm_of(id).is_some_and(|pcm| RAW.iter().any(|p| pcm.starts_with(p)))
+}
+
+/// Linux: a sound server (PipeWire, PulseAudio) plays for the system: ALSA lists its own entry.
+pub fn sound_server(present: &Present) -> bool {
+    present.devices.iter().any(|d| matches!(pcm_of(&d.id), Some("pipewire" | "pulse")))
+}
+
+/// The devices to offer in the picker: with a sound server running and Direct output off, the raw
+/// sound card entries are left out (choosing one would fail to open while the server holds the
+/// card). The system default stays, whatever it is.
+pub fn for_picker(mut present: Present, direct: bool) -> Present {
+    if !direct && sound_server(&present) {
+        let default = present.default.as_ref().map(|d| d.id.clone());
+        present.devices.retain(|d| !raw_hardware(&d.id) || Some(&d.id) == default.as_ref());
+    }
+    present
+}
+
 /// Windows: hears from WASAPI when output devices come, go or the default changes. The callbacks
 /// only bump counters (they run on a Windows thread and must return at once); the engine's worker
 /// looks at them on its next round.
 #[cfg(windows)]
 pub mod watch {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::Ordering;
 
     use wasapi::{DeviceEnumerator, DeviceEventCallbacks, Direction, Role};
 
-    #[derive(Default)]
-    pub struct Events {
-        /// Bumped whenever a device came, went or changed state, or the default changed.
-        pub changed: AtomicU64,
-        /// The default output (render, console role) changed since the worker last looked.
-        pub default_changed: AtomicBool,
-    }
+    pub use super::Events;
 
     /// Keeps the notifications coming; dropping it stops them (on the thread that registered them).
     pub struct Watcher {
@@ -222,6 +264,7 @@ pub mod watch {
         _stop: crossbeam_channel::Sender<()>,
     }
 
+    /// Starts listening on a thread of its own; None (logged) when WASAPI wouldn't register it.
     pub fn start() -> Option<Watcher> {
         let events = Arc::new(Events::default());
         let (stop, stopped) = crossbeam_channel::bounded::<()>(0);
@@ -230,7 +273,9 @@ pub mod watch {
         std::thread::Builder::new()
             .name("cadence-devices".into())
             .spawn(move || {
-                let _ = wasapi::initialize_mta();
+                // Balanced below (S_FALSE, "already initialized", counts too; a thread already in
+                // another apartment isn't ours to uninitialize).
+                let com = wasapi::initialize_mta().is_ok();
                 let registration = DeviceEnumerator::new().map_err(|e| e.to_string()).and_then(|enumerator| {
                     let mut callbacks = DeviceEventCallbacks::new();
                     let (a, b, c, d) = (ev.clone(), ev.clone(), ev.clone(), ev.clone());
@@ -263,7 +308,12 @@ pub mod watch {
                         let _ = ready_tx.send(false);
                     }
                 }
+                // Everything COM made on this thread is gone by now.
+                if com {
+                    wasapi::deinitialize();
+                }
             })
+            .map_err(|e| log::warn!("can't start the device watcher thread: {e}"))
             .ok()?;
         ready_rx.recv().ok().filter(|ok| *ok)?;
         Some(Watcher { events, _stop: stop })
@@ -331,6 +381,39 @@ mod tests {
             [("wasapi:hdmi", true, true), ("wasapi:dac", false, false), ("wasapi:hp", false, false)]
         );
         assert_eq!(list[1].name, "FiiO K7");
+    }
+
+    #[test]
+    fn the_watcher_is_tried_again_a_few_times_further_apart() {
+        let delays: Vec<Option<Duration>> = (1..=6).map(watch_retry_delay).collect();
+        assert_eq!(delays[..5], [1, 2, 4, 8, 16].map(|s| Some(Duration::from_secs(s))));
+        assert_eq!(delays[5], None, "then given up (logged)");
+        assert_eq!(watch_retry_delay(0), None);
+    }
+
+    #[test]
+    fn raw_sound_card_entries_are_left_out_while_a_sound_server_runs_without_direct_output() {
+        let linux = |extra: &[&str]| Present {
+            devices: ["alsa:default", "alsa:hw:CARD=K7,DEV=0", "alsa:front:CARD=PCH,DEV=0", "alsa:plughw:CARD=K7,DEV=0"]
+                .iter()
+                .chain(extra)
+                .map(|id| dev(id, id, *id == "alsa:default"))
+                .collect(),
+            default: Some(r("alsa:default", "Default")),
+        };
+        let ids = |p: &Present| p.devices.iter().map(|d| d.id.clone()).collect::<Vec<_>>();
+        assert!(raw_hardware("alsa:hw:CARD=K7,DEV=0") && raw_hardware("alsa:front:CARD=PCH,DEV=0") && raw_hardware("alsa:sysdefault:CARD=K7"));
+        assert!(!raw_hardware("alsa:default") && !raw_hardware("alsa:pipewire") && !raw_hardware("wasapi:{0.0.0.00000000}.{hw:x}") && !raw_hardware("coreaudio:hw:1"));
+        // PipeWire runs: only what goes through it, unless Direct output is on.
+        let with_server = linux(&["alsa:pipewire"]);
+        assert!(sound_server(&with_server));
+        assert_eq!(ids(&for_picker(with_server.clone(), false)), ["alsa:default", "alsa:pipewire"]);
+        assert_eq!(for_picker(with_server, true).devices.len(), 5);
+        // No sound server (plain ALSA): the cards can be opened, all are offered.
+        assert!(!sound_server(&linux(&[])));
+        assert_eq!(for_picker(linux(&[]), false).devices.len(), 4);
+        // Windows and macOS lists are never touched.
+        assert_eq!(for_picker(present(), false), present());
     }
 
     #[test]

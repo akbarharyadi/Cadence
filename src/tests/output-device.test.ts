@@ -95,6 +95,49 @@ describe("Output device picker", () => {
     expect(backend.to("list_output_devices")).toHaveLength(2);
   });
 
+  test("a change while the list is being read is read once more after it (never dropped, never piled up)", async () => {
+    let release!: () => void;
+    let calls = 0;
+    const backend = mockBackend({
+      list_output_devices: () => {
+        calls++;
+        return calls === 1 ? devices() : new Promise<OutputDevices>((r) => (release = () => r(devices({ chosen: { id: "wasapi:dac", name: "Speakers (FiiO K7)" } }))));
+      },
+    });
+    resetApp({ status: onDac({ devices: 1 }) });
+    render(OutputDevice, { windows: true });
+    await settle();
+    app.status = onDac({ devices: 2 });
+    await settle();
+    expect(backend.to("list_output_devices")).toHaveLength(2);
+    // Two more changes while that read is still out: one more read after it, not two.
+    app.status = onDac({ devices: 3 });
+    await settle();
+    app.status = onDac({ devices: 4 });
+    await settle();
+    expect(backend.to("list_output_devices")).toHaveLength(2);
+    release();
+    await settle();
+    release();
+    await settle();
+    expect(backend.to("list_output_devices")).toHaveLength(3);
+    expect(screen.getByRole("button", { name: "Output device" }).textContent).toContain("Speakers (FiiO K7)");
+  });
+
+  test("the first status after the page opened doesn't read the list a second time", async () => {
+    const backend = mockBackend({ list_output_devices: () => devices() });
+    resetApp({ status: null });
+    render(OutputDevice, { windows: true });
+    await settle();
+    expect(backend.to("list_output_devices")).toHaveLength(1);
+    app.status = onDac({ devices: 5 });
+    await settle();
+    expect(backend.to("list_output_devices")).toHaveLength(1);
+    app.status = onDac({ devices: 6 });
+    await settle();
+    expect(backend.to("list_output_devices")).toHaveLength(2);
+  });
+
   test("odd or empty device names don't break the page", async () => {
     await setup(devices({ devices: [{ id: "x", name: "", isDefault: true, present: true }, { id: "y", name: "\u0007 ヘッドホン (USB DAC) ", isDefault: false, present: true }] }), makeStatus({ device: { id: "x", name: "", chosen: false, profile: 0 } }));
     expect(screen.getByText("Now: Unnamed device.")).toBeTruthy();

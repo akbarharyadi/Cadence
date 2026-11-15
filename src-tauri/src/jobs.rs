@@ -36,24 +36,58 @@ pub struct Progress {
     pub total: usize,
 }
 
-/// Threads for the long background jobs (loudness and sound analysis): a quarter of the cores, at
-/// most 2, each in background mode. The music, the UI and other apps come first, and memory stays
-/// modest (every song being analysed holds its decoded audio).
-pub(crate) fn background_pool() -> rayon::ThreadPool {
-    let threads = std::thread::available_parallelism()
-        .map(|n| (n.get() / 4).clamp(1, 2))
-        .unwrap_or(1);
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .thread_name(|i| format!("cadence-background-{i}"))
-        .start_handler(|_| background_priority())
-        .build()
-        .expect("pool")
+/// The threads for the heavy background jobs (loudness, sound analysis, library health, waveforms
+/// for all songs, the lyrics index): ONE pool for all of them, made the first time it's needed —
+/// a quarter of the cores, at most 2, each in background mode — so however many of those jobs run
+/// at once, no more than two heavy threads do. The music, the UI and other apps come first, and
+/// memory stays modest (every song being analysed holds its decoded audio). A job never waits for
+/// another job inside the pool (that would hold a thread the other needs): it waits on its own
+/// thread, then hands the work over.
+pub(crate) fn background_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism()
+            .map(|n| (n.get() / 4).clamp(1, 2))
+            .unwrap_or(1);
+        let built = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("cadence-background-{i}"))
+            .start_handler(|_| background_priority())
+            .build();
+        match built {
+            Ok(p) => p,
+            Err(e) => {
+                // (No thread could be made: one more try with a single one; that failing too is
+                // a system out of threads, nothing Cadence can carry on without.)
+                log::error!("no background threads: {e}");
+                rayon::ThreadPoolBuilder::new().num_threads(1).start_handler(|_| background_priority()).build().expect("a background thread")
+            }
+        }
+    })
 }
 
-/// Lowers the calling thread's CPU, disk and memory priority: Windows' background mode (plus
-/// EcoQoS on Windows 11, which keeps it on efficient cores at low clock speeds), or a nice value
-/// on Linux and Android.
+#[cfg(test)]
+mod pool_tests {
+    #[test]
+    fn one_shared_pool_of_at_most_two_threads() {
+        let a = super::background_pool() as *const rayon::ThreadPool;
+        let b = super::background_pool() as *const rayon::ThreadPool;
+        assert_eq!(a, b, "every job gets the same pool");
+        assert!((1..=2).contains(&super::background_pool().current_num_threads()));
+    }
+}
+
+/// Lowers the calling thread's CPU and memory priority: the lowest thread priority, low memory
+/// priority and EcoQoS on Windows (Windows 11 keeps it on efficient cores at low clock speeds), or
+/// a nice value on Linux and Android.
+///
+/// Not Windows' "background mode" (THREAD_MODE_BACKGROUND_BEGIN): besides the CPU it puts every
+/// disk read and write of the thread at Very Low I/O priority, which Windows serves only when no
+/// other program is using the disk (a build, a download, a virus scan of new files), with a trickle
+/// of a few I/Os a second to stop it starving completely. A job over small files is all I/O: the
+/// loudness measuring of a 20,000-song library of tiny files went at 2 to 7 songs a second at 1 %
+/// of a core for minutes, and at 110 a second in a quiet spell. The CPU priority already keeps the
+/// job out of the way of the music and the UI; its reads are small next to what the disk can do.
 pub(crate) fn background_priority() {
     #[cfg(windows)]
     unsafe {
@@ -64,7 +98,9 @@ pub(crate) fn background_priority() {
             control_mask: u32,
             state_mask: u32,
         }
-        const THREAD_MODE_BACKGROUND_BEGIN: i32 = 0x0001_0000;
+        const THREAD_PRIORITY_LOWEST: i32 = -2;
+        const THREAD_MEMORY_PRIORITY: i32 = 0;
+        const MEMORY_PRIORITY_LOW: u32 = 2;
         const THREAD_POWER_THROTTLING: i32 = 3;
         const EXECUTION_SPEED: u32 = 1;
         unsafe extern "system" {
@@ -72,7 +108,10 @@ pub(crate) fn background_priority() {
             fn SetThreadPriority(thread: *mut c_void, priority: i32) -> i32;
             fn SetThreadInformation(thread: *mut c_void, class: i32, info: *const c_void, size: u32) -> i32;
         }
-        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+        // (Its pages are the first to go when memory is short: a decoded song is dropped anyway.)
+        let memory = MEMORY_PRIORITY_LOW;
+        SetThreadInformation(GetCurrentThread(), THREAD_MEMORY_PRIORITY, &memory as *const u32 as *const c_void, size_of::<u32>() as u32);
         let eco = PowerThrottling {
             version: 1,
             control_mask: EXECUTION_SPEED,
@@ -507,5 +546,83 @@ fn make_watcher(ctx: &Ctx) -> Option<FolderWatcher> {
             log::warn!("folder watching unavailable: {e}");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod analysis_tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use crate::library::{Album, Track};
+
+    struct Quiet;
+    impl crate::ctx::Host for Quiet {
+        fn emit(&self, _: &str, _: serde_json::Value) {}
+    }
+
+    /// Waits up to `limit` for `done`; false if it never came.
+    fn within(limit: Duration, done: impl Fn() -> bool) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        done()
+    }
+
+    /// The whole chain on small files (loudness with waveforms, then sound analysis), with
+    /// "Prepare waveforms" asked for and a scan starting and ending meanwhile: every job finishes,
+    /// none waits for another forever, and none crawls (60 half-second songs decode in well under
+    /// a second of work; the bound is generous for slow CI machines).
+    #[test]
+    fn small_songs_are_all_measured_quickly_with_other_jobs_beside() {
+        let base = tempfile::tempdir().unwrap();
+        let (ctx, _status) = crate::hub::open(base.path().join("data"), &base.path().join("local"), Arc::new(Quiet));
+        let music = base.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let settled = crate::history::now().saturating_sub(3600);
+        let (mut tracks, mut albums) = (Vec::new(), Vec::new());
+        for a in 0..6 {
+            let mut ids = Vec::new();
+            for n in 0..10 {
+                let path = music.join(format!("{a}-{n}.wav"));
+                crate::audio::envelope::test_wav(&path, 22_050);
+                let id = format!("s{a}x{n}");
+                ids.push(id.clone());
+                tracks.push(Track {
+                    id,
+                    path: path.to_string_lossy().into_owned(),
+                    title: format!("Song {n}"),
+                    album_id: format!("al{a}"),
+                    duration: 0.5,
+                    size: std::fs::metadata(&path).unwrap().len(),
+                    modified: settled,
+                    ..Default::default()
+                });
+            }
+            albums.push(Album { id: format!("al{a}"), track_ids: ids, ..Default::default() });
+        }
+        ctx.state.library.lock().set_tracks(tracks, albums);
+
+        super::start_analysis(ctx.clone());
+        assert!(crate::waveform::prepare_all(&ctx), "asked while the loudness job runs");
+        ctx.state.library.lock().scanning = true;
+        std::thread::sleep(Duration::from_millis(100));
+        ctx.state.library.lock().scanning = false;
+
+        let state = ctx.state.clone();
+        let measured = || {
+            let lib = state.library.lock();
+            !lib.analyzing && lib.snapshot.tracks.iter().all(|t| t.gain_measured)
+        };
+        assert!(within(Duration::from_secs(60), measured), "loudness of 60 small songs");
+        let listened = || state.sonic.lock().tracks.len() == 60 && !state.library.lock().listening;
+        assert!(within(Duration::from_secs(120), listened), "sound analysis after it");
+        assert!(within(Duration::from_secs(60), || !crate::waveform::status().running), "Prepare waveforms after them");
+        let drawn = std::fs::read_dir(state.data_dir.join(crate::waveform::DIR)).unwrap().count();
+        assert_eq!(drawn, 60, "every song's waveform, drawn in the loudness pass");
     }
 }

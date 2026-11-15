@@ -51,7 +51,22 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { id: "zoom-in", keys: [MOD, "="], action: "Larger interface" },
       { id: "zoom-out", keys: [MOD, "-"], action: "Smaller interface" },
       { id: "zoom-reset", keys: [MOD, "0"], action: "Normal interface size" },
-      { id: "escape", keys: ["Esc"], action: "Close the dialog, menu or Now Playing on top" },
+      { id: "escape", keys: ["Esc"], action: "Close the dialog, menu or Now Playing on top; else clear a selection of songs" },
+    ],
+  },
+  {
+    title: "In song lists",
+    items: [
+      { id: "list-move", keys: ["↑", "↓"], action: "Move between songs (Home, End, Page Up and Page Down too)" },
+      { id: "list-extend", keys: ["Shift", "↑ ↓"], action: "Select more songs (Shift+click too)" },
+      { id: "list-pick", keys: [MOD, "Space"], action: "Select or unselect the song (Ctrl+click too)" },
+      { id: "list-all", keys: [MOD, "A"], action: "Select all songs" },
+      { id: "list-play", keys: ["Enter"], action: "Play the song (double-click too)" },
+      { id: "list-remove", keys: ["Delete"], action: "Remove the selected songs (in your playlists)" },
+      { id: "list-clear", keys: ["Esc"], action: "Clear the selection" },
+      { id: "list-jump", keys: ["A–Z"], action: "Type a title's first letters to jump to it" },
+      { id: "list-menu", keys: ["Shift", "F10"], action: "The song's menu (the Menu key too)" },
+      { id: "list-touch", keys: ["Long-press"], action: "Phones: select songs (then tap to add more)" },
     ],
   },
   {

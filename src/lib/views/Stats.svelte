@@ -120,7 +120,8 @@
       const a = app.albumById.get(r.id);
       if (a) app.playAlbum(a);
     } else {
-      app.playTracks(app.tracks.filter((t) => t.artist.toLowerCase() === r.name.toLowerCase()));
+      // The row is one artist under all its spellings (Kenshi Yonezu with 米津玄師).
+      app.playTracks(app.songsOfArtist(r.name));
     }
   }
 </script>

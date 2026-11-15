@@ -2,47 +2,14 @@ import { fireEvent, render, screen, within } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { flushSync } from "svelte";
 import { beforeEach, describe, expect, test } from "vitest";
-import ContextMenu from "#lib/components/ContextMenu.svelte";
 import TrackList from "#lib/components/TrackList.svelte";
-import PlaylistView from "#lib/views/PlaylistView.svelte";
-import type { Playlist, Track } from "#lib/api.js";
 import { app } from "#lib/store.svelte.js";
-import { makeAlbum, makePlaylist, makeTrack, mockBackend, resetApp, settle } from "./helpers";
+import { makeAlbum, makeTrack, mockBackend, resetApp, settle } from "./helpers";
+import { fx, key, list, openList, row, rows, selected, setupSongs } from "./selection-helpers";
 
-// Songs A–F, by title; `X` is an id a playlist may list that the library doesn't have.
-let tracks: Track[];
-let id: Record<"A" | "B" | "C" | "D" | "E" | "F", string>;
-
-beforeEach(() => {
-  tracks = ["A", "B", "C", "D", "E", "F"].map((l) => makeTrack({ title: `Song ${l}` }));
-  const [A, B, C, D, E, F] = tracks.map((t) => t.id);
-  id = { A, B, C, D, E, F };
-});
-
-function openList(list: Track[] = tracks, props: Record<string, unknown> = {}) {
-  const backend = mockBackend();
-  resetApp({ tracks, albums: [makeAlbum(tracks)] });
-  render(TrackList, { tracks: list, ...props });
-  render(ContextMenu);
-  return { backend, user: userEvent.setup() };
-}
-function openPlaylist(trackIds: string[]) {
-  const backend = mockBackend();
-  const p = makePlaylist(trackIds);
-  resetApp({ tracks, albums: [makeAlbum(tracks)], playlists: [p] });
-  render(PlaylistView, { id: p.id });
-  render(ContextMenu);
-  return { backend, user: userEvent.setup() };
-}
-
-const rows = () => screen.getAllByRole("option");
-const row = (title: string, nth = 0) => screen.getAllByRole("option", { name: new RegExp(`${title}\\b`) })[nth];
-/** The titles of the selected rows, top to bottom. */
-const selected = () => rows().filter((r) => r.getAttribute("aria-selected") === "true").map((r) => r.querySelector(".title")!.textContent!.trim());
-const list = () => screen.getByRole("listbox");
-const key = (k: string, init: KeyboardEventInit = {}) => fireEvent.keyDown(list(), { key: k, ...init });
-const savedIds = (b: ReturnType<typeof mockBackend>) => (b.last("save_playlist")!.playlist as Playlist).trackIds;
-const menuLabels = () => screen.queryAllByRole("menuitem").map((m) => m.textContent!.trim());
+// Selecting with the mouse and the keyboard, and what happens to a selection when the list changes.
+// The right-click menu, playlists, drag and touch are in track-selection-actions.test.ts.
+beforeEach(setupSongs);
 
 describe("Selecting with the mouse", () => {
   test("click selects one; Ctrl+click adds and removes; Shift+click selects the range from the anchor", async () => {
@@ -104,7 +71,7 @@ describe("Selecting with the keyboard", () => {
     openList();
     list().focus();
     key("a", { ctrlKey: true });
-    expect(selected()).toEqual(tracks.map((t) => t.title));
+    expect(selected()).toEqual(fx.tracks.map((t) => t.title));
   });
 
   test("Up/Down move the active row and select it; with Shift they extend from the anchor", async () => {
@@ -131,7 +98,7 @@ describe("Selecting with the keyboard", () => {
     key("End");
     expect(selected()).toEqual(["Song F"]);
     key("Home", { shiftKey: true });
-    expect(selected()).toEqual(tracks.map((t) => t.title));
+    expect(selected()).toEqual(fx.tracks.map((t) => t.title));
   });
 
   test("Enter plays the active song (like double-click)", async () => {
@@ -139,12 +106,12 @@ describe("Selecting with the keyboard", () => {
     await user.click(row("Song C"));
     key("Enter");
     await settle();
-    expect(backend.last("play_tracks")).toEqual({ ids: tracks.map((t) => t.id), start: 2, picked: true });
+    expect(backend.last("play_tracks")).toEqual({ ids: fx.tracks.map((t) => t.id), start: 2, picked: true });
   });
 
   test("typing jumps to the next song whose title starts with it", () => {
     const list3 = [makeTrack({ title: "Alpha" }), makeTrack({ title: "Bravo" }), makeTrack({ title: "Banana" }), makeTrack({ title: "Charlie" })];
-    tracks = list3;
+    fx.tracks = list3;
     openList(list3);
     list().focus();
     key("b");
@@ -157,7 +124,7 @@ describe("Selecting with the keyboard", () => {
 
   test("type-ahead matches what is typed so far, and starts over after a short pause", async () => {
     const list3 = [makeTrack({ title: "Bravo" }), makeTrack({ title: "Banana" }), makeTrack({ title: "Charlie" })];
-    tracks = list3;
+    fx.tracks = list3;
     openList(list3);
     list().focus();
     key("b");
@@ -166,6 +133,41 @@ describe("Selecting with the keyboard", () => {
     await new Promise((r) => setTimeout(r, 900));
     key("c");
     expect(selected()).toEqual(["Charlie"]);
+  });
+
+  test("'/' and '?' right after a letter are left to the window (search, help), not typed into the jump", () => {
+    const list3 = [makeTrack({ title: "Bravo" }), makeTrack({ title: "B/side" }), makeTrack({ title: "Charlie" })];
+    fx.tracks = list3;
+    openList(list3);
+    list().focus();
+    key("b");
+    expect(selected()).toEqual(["Bravo"]);
+    for (const k of ["/", "?"]) {
+      const ev = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true });
+      list().dispatchEvent(ev);
+      expect(ev.defaultPrevented).toBe(false);
+    }
+    expect(selected()).toEqual(["Bravo"]);
+  });
+
+  test("the selection bar steps aside while Up Next or Now Playing is open, and comes back after", async () => {
+    const { user } = openList();
+    await user.click(row("Song A"));
+    await user.keyboard("{Shift>}");
+    await user.click(row("Song C"));
+    await user.keyboard("{/Shift}");
+    expect(screen.getByRole("toolbar", { name: "Selected songs" })).toBeInTheDocument();
+    app.queueOpen = true;
+    flushSync();
+    expect(screen.queryByRole("toolbar", { name: "Selected songs" })).toBeNull();
+    app.queueOpen = false;
+    app.nowPlayingOpen = true;
+    flushSync();
+    expect(screen.queryByRole("toolbar", { name: "Selected songs" })).toBeNull();
+    app.nowPlayingOpen = false;
+    flushSync();
+    expect(screen.getByRole("toolbar", { name: "Selected songs" })).toBeInTheDocument();
+    expect(selected()).toHaveLength(3);
   });
 
   test("Escape clears the selection and is used up (no Back, nothing behind it sees it)", async () => {
@@ -204,195 +206,12 @@ describe("Selecting with the keyboard", () => {
   });
 });
 
-describe("The right-click menu", () => {
-  const selectBAndD = async (user: ReturnType<typeof userEvent.setup>) => {
-    // D first, then B: the menu's actions still get them in list order.
-    await user.click(row("Song D"));
-    await user.keyboard("{Control>}");
-    await user.click(row("Song B"));
-    await user.keyboard("{/Control}");
-  };
-
-  test("on a row in the selection: the menu is for the whole selection, without single-song entries", async () => {
-    const { user } = openList();
-    await selectBAndD(user);
-    await user.pointer({ keys: "[MouseRight]", target: row("Song D") });
-    expect(selected()).toEqual(["Song B", "Song D"]);
-    expect(menuLabels()).toEqual(["Play 2 Songs", "Play Next", "Add to Queue", "Add to Playlist…", "Add to Favorites", "Edit Info…", "Skip These Songs"]);
-    for (const single of ["Go to Album", "Go to Artist", "Start Sound Radio", "Songs That Sound Like This", "Fix Song Info…", "Change Cover…"]) {
-      expect(menuLabels()).not.toContain(single);
-    }
-    expect(within(screen.getByRole("menu")).getAllByRole("group", { name: "Rating" }).length).toBeGreaterThan(0);
-  });
-
-  test("on a row outside the selection: just that row is selected, and its own menu opens", async () => {
-    const { user } = openList();
-    await selectBAndD(user);
-    await user.pointer({ keys: "[MouseRight]", target: row("Song F") });
-    expect(selected()).toEqual(["Song F"]);
-    expect(menuLabels()).toContain("Go to Album");
-    expect(menuLabels()[0]).toBe("Play");
-  });
-
-  test("Add to Queue and Add to Playlist get every selected song, in list order", async () => {
-    const { backend, user } = openList();
-    await selectBAndD(user);
-    await user.pointer({ keys: "[MouseRight]", target: row("Song B") });
-    await user.click(screen.getByRole("menuitem", { name: "Add to Queue" }));
-    await settle();
-    expect(backend.last("enqueue")).toEqual({ ids: [id.B, id.D], next: false });
-
-    await user.pointer({ keys: "[MouseRight]", target: row("Song D") });
-    await user.click(screen.getByRole("menuitem", { name: "Add to Playlist…" }));
-    expect(app.picker?.map((t) => t.id)).toEqual([id.B, id.D]);
-  });
-
-  test("Edit Info… opens the tag editor for all of them, and is hidden when a CUE-sheet song is selected", async () => {
-    tracks[3] = { ...tracks[3], cue: { start: 0, end: 100 } }; // Song D
-    const { user } = openList();
-    await user.click(row("Song A"));
-    await user.keyboard("{Shift>}");
-    await user.click(row("Song C"));
-    await user.keyboard("{/Shift}");
-    await user.pointer({ keys: "[MouseRight]", target: row("Song B") });
-    await user.click(screen.getByRole("menuitem", { name: "Edit Info…" }));
-    expect(app.tagEditing?.map((t) => t.id)).toEqual([id.A, id.B, id.C]);
-
-    await user.keyboard("{Shift>}");
-    await user.click(row("Song D"));
-    await user.keyboard("{/Shift}");
-    await user.pointer({ keys: "[MouseRight]", target: row("Song D") });
-    expect(menuLabels()).not.toContain("Edit Info…");
-  });
-});
-
-describe("In a playlist", () => {
-  test("a song listed twice: only the selected one of its two rows is removed", async () => {
-    const { backend, user } = openPlaylist([id.A, id.B, id.A, id.C]);
-    await user.click(row("Song A", 1)); // the second A
-    key("Delete");
-    await settle();
-    expect(backend.to("save_playlist")).toHaveLength(1);
-    expect(savedIds(backend)).toEqual([id.A, id.B, id.C]);
-  });
-
-  test("Delete removes exactly the selected rows, by their places (a song missing from the library stays)", async () => {
-    const X = "gone-from-library";
-    const { backend, user } = openPlaylist([id.A, id.B, X, id.C, id.D]);
-    await user.click(row("Song B"));
-    await user.keyboard("{Control>}");
-    await user.click(row("Song D"));
-    await user.keyboard("{/Control}");
-    key("Delete");
-    await settle();
-    expect(backend.to("save_playlist")).toHaveLength(1);
-    expect(savedIds(backend)).toEqual([id.A, X, id.C]);
-    // With an Undo that puts the list back as it was.
-    expect(app.toast).toMatch(/Removed 2 songs/);
-    app.toastAction?.run();
-    await settle();
-    expect(savedIds(backend)).toEqual([id.A, id.B, X, id.C, id.D]);
-  });
-
-  test("the multi-song menu has Remove from this playlist, for all of them", async () => {
-    const X = "gone-from-library";
-    const { backend, user } = openPlaylist([id.A, id.B, X, id.C, id.D]);
-    await user.click(row("Song A"));
-    await user.keyboard("{Shift>}");
-    await user.click(row("Song C"));
-    await user.keyboard("{/Shift}");
-    await user.pointer({ keys: "[MouseRight]", target: row("Song B") });
-    await user.click(screen.getByRole("menuitem", { name: "Remove from this playlist" }));
-    await settle();
-    expect(savedIds(backend)).toEqual([X, id.D]);
-  });
-
-  test("Delete outside a playlist does nothing", async () => {
-    const { backend, user } = openList();
-    await user.click(row("Song B"));
-    key("Delete");
-    await settle();
-    expect(backend.to("save_playlist")).toHaveLength(0);
-    expect(rows()).toHaveLength(6);
-  });
-
-  test("dragging one of several selected rows moves them together, in order", async () => {
-    const X = "gone-from-library";
-    const { backend, user } = openPlaylist([id.A, id.B, X, id.C, id.D, id.E]);
-    await user.click(row("Song C"));
-    await user.keyboard("{Control>}");
-    await user.click(row("Song E"));
-    await user.keyboard("{/Control}");
-    const dataTransfer = { types: ["application/x-cadence-row"], setData() {}, effectAllowed: "" };
-    await fireEvent.dragStart(row("Song E"), { dataTransfer });
-    await fireEvent.dragOver(row("Song A"), { dataTransfer });
-    await fireEvent.drop(row("Song A"), { dataTransfer });
-    await settle();
-    expect(savedIds(backend)).toEqual([id.C, id.E, id.A, id.B, X, id.D]);
-  });
-
-  test("a single row still drags by itself (not the selection it isn't part of)", async () => {
-    const { backend, user } = openPlaylist([id.A, id.B, id.C, id.D]);
-    await user.click(row("Song A"));
-    await user.keyboard("{Control>}");
-    await user.click(row("Song B"));
-    await user.keyboard("{/Control}");
-    const dataTransfer = { types: ["application/x-cadence-row"], setData() {}, effectAllowed: "" };
-    await fireEvent.dragStart(row("Song D"), { dataTransfer });
-    await fireEvent.dragOver(row("Song A"), { dataTransfer });
-    await fireEvent.drop(row("Song A"), { dataTransfer });
-    await settle();
-    expect(savedIds(backend)).toEqual([id.D, id.A, id.B, id.C]);
-  });
-});
-
-describe("Touch and Back", () => {
-  const touchDown = (el: Element) => {
-    const ev = new Event("pointerdown", { bubbles: true });
-    Object.defineProperty(ev, "pointerType", { value: "touch" });
-    el.dispatchEvent(ev);
-  };
-
-  test("long-press enters selection mode; taps then toggle rows; Back leaves the mode first", async () => {
-    openList();
-    app.history = [{ name: "albums" }];
-    app.view = { name: "songs" };
-
-    touchDown(row("Song B"));
-    await fireEvent.contextMenu(row("Song B"));
-    expect(app.menu).toBeNull(); // no menu: the bar has the actions
-    expect(selected()).toEqual(["Song B"]);
-    expect(screen.getByRole("toolbar", { name: "Selected songs" })).toBeInTheDocument();
-    await fireEvent.click(row("Song B")); // the click that ends the long-press doesn't untick it
-
-    touchDown(row("Song D"));
-    await fireEvent.click(row("Song D"));
-    expect(selected()).toEqual(["Song B", "Song D"]);
-    touchDown(row("Song B"));
-    await fireEvent.click(row("Song B"));
-    expect(selected()).toEqual(["Song D"]);
-
-    expect(app.handleBack()).toBe(true);
-    flushSync();
-    expect(selected()).toEqual([]);
-    expect(app.view).toEqual({ name: "songs" }); // still here
-    expect(screen.queryByRole("toolbar", { name: "Selected songs" })).not.toBeInTheDocument();
-
-    // Out of selection mode a tap selects one song as before (and Back goes back).
-    touchDown(row("Song C"));
-    await fireEvent.click(row("Song C"));
-    expect(selected()).toEqual(["Song C"]);
-    expect(app.handleBack()).toBe(true);
-    expect(app.history).toHaveLength(0);
-  });
-});
-
 describe("Selection and list refreshes", () => {
   test("a library reload keeps the songs that are still there selected (at their new rows)", async () => {
     mockBackend();
-    resetApp({ tracks, albums: [makeAlbum(tracks)] });
+    resetApp({ tracks: fx.tracks, albums: [makeAlbum(fx.tracks)] });
     const user = userEvent.setup();
-    const { rerender } = render(TrackList, { tracks });
+    const { rerender } = render(TrackList, { tracks: fx.tracks });
     await user.click(row("Song B"));
     await user.keyboard("{Shift>}");
     await user.click(row("Song D"));
@@ -400,27 +219,27 @@ describe("Selection and list refreshes", () => {
     expect(selected()).toEqual(["Song B", "Song C", "Song D"]);
 
     // Reloaded: C is gone, the rest come back as new objects in another order.
-    const [A, B, , D, E, F] = tracks.map((t) => ({ ...t }));
+    const [A, B, , D, E, F] = fx.tracks.map((t) => ({ ...t }));
     await rerender({ tracks: [D, A, E, B, F] });
     expect(selected()).toEqual(["Song D", "Song B"]);
   });
 
   test("another list (identity changed) starts with nothing selected", async () => {
     mockBackend();
-    resetApp({ tracks, albums: [makeAlbum(tracks)] });
+    resetApp({ tracks: fx.tracks, albums: [makeAlbum(fx.tracks)] });
     const user = userEvent.setup();
-    const { rerender } = render(TrackList, { tracks, identity: "one" });
+    const { rerender } = render(TrackList, { tracks: fx.tracks, identity: "one" });
     await user.click(row("Song B"));
-    await rerender({ tracks: [...tracks], identity: "two" });
+    await rerender({ tracks: [...fx.tracks], identity: "two" });
     expect(selected()).toEqual([]);
   });
 
   test("selecting in one list clears the other list's selection", async () => {
     mockBackend();
-    resetApp({ tracks, albums: [makeAlbum(tracks)] });
+    resetApp({ tracks: fx.tracks, albums: [makeAlbum(fx.tracks)] });
     const user = userEvent.setup();
-    render(TrackList, { tracks: tracks.slice(0, 3), label: "First" });
-    render(TrackList, { tracks: tracks.slice(3), label: "Second" });
+    render(TrackList, { tracks: fx.tracks.slice(0, 3), label: "First" });
+    render(TrackList, { tracks: fx.tracks.slice(3), label: "Second" });
     const first = screen.getByRole("listbox", { name: "First" });
     const second = screen.getByRole("listbox", { name: "Second" });
     await user.click(within(first).getAllByRole("option")[0]);
@@ -437,7 +256,7 @@ describe("A 20,000-song list", () => {
 
   test("Shift+click from the first row to the last, and Ctrl+A, are quick and build only the window", async () => {
     const songs = big();
-    tracks = songs;
+    fx.tracks = songs;
     openList(songs);
     const builtAtMost = 80;
     expect(rows().length).toBeLessThanOrEqual(builtAtMost);
@@ -477,7 +296,7 @@ describe("A 20,000-song list", () => {
 
   test("End moves to the last song and scrolls the page there (the window then builds it)", () => {
     const songs = big();
-    tracks = songs;
+    fx.tracks = songs;
     openList(songs);
     list().focus();
     key("Home");

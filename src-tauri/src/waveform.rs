@@ -117,17 +117,21 @@ pub fn has(data_dir: &Path, id: &str, stamp: Stamp) -> bool {
     load(data_dir, id, stamp).is_some()
 }
 
-/// Stores a waveform: written beside its place and renamed over it, so a reader never sees half a
-/// file. Not synced to the disk: a waveform lost in a power cut is simply drawn again.
+/// Stores a waveform, plainly: one write, not synced and not renamed into place (the loudness job
+/// writes one per song, thousands in a row, and each extra step is another disk operation). A file
+/// cut short by a crash, or read while it is being written, has the wrong length and reads as
+/// missing (`valid`), so it is simply drawn again.
 pub fn save(data_dir: &Path, id: &str, stamp: Stamp, e: &Envelope) -> std::io::Result<()> {
     let path = file(data_dir, id).ok_or_else(|| std::io::Error::other("not a song id"))?;
-    let dir = path.parent().unwrap();
-    std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!("{id}.wf.tmp"));
-    std::fs::write(&tmp, encode(e, stamp))?;
-    std::fs::rename(&tmp, &path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
+    let bytes = encode(e, stamp);
+    match std::fs::write(&path, &bytes) {
+        // The first one: the folder isn't there yet.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(data_dir.join(DIR))?;
+            std::fs::write(&path, &bytes)
+        }
+        other => other,
+    }
 }
 
 /// Removes the waveforms of songs no longer in the library (and left-over temporary files).
@@ -219,7 +223,15 @@ pub struct Lazy {
 
 impl Lazy {
     /// `done(id, drawn)` is called on the worker thread after each song.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(data_dir: PathBuf, quiet: Duration, done: impl Fn(&str, bool) + Send + 'static) -> Self {
+        Self::new_waiting(data_dir, quiet, || false, done)
+    }
+
+    /// `new`, waiting while `busy()` says a heavy job is decoding songs (the loudness or sound
+    /// analysis, "Prepare waveforms"): with theirs, this decoder would make three at once beside
+    /// the music. The song asked for is drawn once they're done (or by them).
+    pub fn new_waiting(data_dir: PathBuf, quiet: Duration, busy: impl Fn() -> bool + Send + 'static, done: impl Fn(&str, bool) + Send + 'static) -> Self {
         let shared = Arc::new((Mutex::new(LazyState::default()), Condvar::new()));
         let worker = shared.clone();
         std::thread::Builder::new()
@@ -242,7 +254,11 @@ impl Lazy {
                                 break;
                             }
                         }
-                        let job = s.pending.take().unwrap();
+                        // (Asked without holding this lock: `busy` looks at the library.)
+                        while parking_lot::MutexGuard::unlocked(&mut s, &busy) {
+                            cv.wait_for(&mut s, Duration::from_secs(1));
+                        }
+                        let Some(job) = s.pending.take() else { continue };
                         s.busy = Some(job.id.clone());
                         job
                     };
@@ -289,7 +305,16 @@ static LAZY: OnceLock<Lazy> = OnceLock::new();
 fn lazy(ctx: &Ctx) -> &'static Lazy {
     LAZY.get_or_init(|| {
         let c = ctx.clone();
-        Lazy::new(ctx.state.data_dir.clone(), Duration::from_millis(1500), move |id, drawn| {
+        let state = Arc::downgrade(&ctx.state);
+        // The loudness or sound analysis, or "Prepare waveforms", is decoding on the background pool.
+        let busy = move || {
+            let analysing = state.upgrade().is_some_and(|s| {
+                let lib = s.library.lock();
+                lib.analyzing || lib.listening
+            });
+            analysing || (RUNNING.load(Ordering::SeqCst) && !PAUSED.load(Ordering::SeqCst))
+        };
+        Lazy::new_waiting(ctx.state.data_dir.clone(), Duration::from_millis(1500), busy, move |id, drawn| {
             c.emit("waveform-ready", Ready { track_id: id.to_string(), drawn });
         })
     })
@@ -360,9 +385,9 @@ pub fn stop(ctx: &Ctx) {
     report(ctx);
 }
 
-/// Draws the waveform of every song that has none, on the background pool (at most two threads,
-/// background priority), waiting while the loudness or sound analysis runs (they use the pool's
-/// threads) and while paused. False: it is already running.
+/// Draws the waveform of every song that has none, on the shared background pool (at most two
+/// threads, background priority), waiting while the loudness or sound analysis runs (they use the
+/// pool's threads) and while paused. False: it is already running.
 pub fn prepare_all(ctx: &Ctx) -> bool {
     if RUNNING.swap(true, Ordering::SeqCst) {
         return false;
@@ -386,26 +411,35 @@ pub fn prepare_all(ctx: &Ctx) -> bool {
             let lib = state.library.lock();
             lib.analyzing || lib.listening || lib.scanning
         };
-        crate::jobs::background_pool().install(|| {
-            todo.par_iter().for_each(|job| {
-                while !STOP.load(Ordering::SeqCst) && (PAUSED.load(Ordering::SeqCst) || busy()) {
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-                if STOP.load(Ordering::SeqCst) {
-                    return;
-                }
-                if let Err(e) = job.run(&state.data_dir) {
-                    log::debug!("no waveform for {}: {e:#}", job.path.display());
-                }
-                let done = DONE.fetch_add(1, Ordering::SeqCst) + 1;
-                // The sidebar's progress at most 5 times a second.
-                let now = started.elapsed().as_millis() as u64;
-                let was = last.load(Ordering::Relaxed);
-                if now >= was + 200 && last.compare_exchange(was, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() || done == todo.len() {
-                    report(&ctx);
-                }
+        // The waiting (paused, or the loudness or sound analysis running: they use the same pool's
+        // threads) is done here, never inside the pool, which would hold the threads they need.
+        // Then a few songs at a time go to the pool.
+        let step = crate::jobs::background_pool().current_num_threads().max(1) * 2;
+        for chunk in todo.chunks(step) {
+            while !STOP.load(Ordering::SeqCst) && (PAUSED.load(Ordering::SeqCst) || busy()) {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            if STOP.load(Ordering::SeqCst) {
+                break;
+            }
+            crate::jobs::background_pool().install(|| {
+                chunk.par_iter().for_each(|job| {
+                    if STOP.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    if let Err(e) = job.run(&state.data_dir) {
+                        log::debug!("no waveform for {}: {e:#}", job.path.display());
+                    }
+                    let done = DONE.fetch_add(1, Ordering::SeqCst) + 1;
+                    // The sidebar's progress at most 5 times a second.
+                    let now = started.elapsed().as_millis() as u64;
+                    let was = last.load(Ordering::Relaxed);
+                    if now >= was + 200 && last.compare_exchange(was, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() || done == todo.len() {
+                        report(&ctx);
+                    }
+                });
             });
-        });
+        }
         log::info!("waveforms of {} songs drawn in {:?}", DONE.load(Ordering::SeqCst), started.elapsed());
         RUNNING.store(false, Ordering::SeqCst);
         PAUSED.store(false, Ordering::SeqCst);
@@ -502,6 +536,24 @@ mod tests {
         assert!(lazy.request(job("s2", &dir.path().join("missing.flac"))));
         assert_eq!(rx.recv_timeout(Duration::from_secs(20)).unwrap(), ("s2".to_string(), false));
         assert!(!lazy.request(job("s2", &dir.path().join("missing.flac"))));
+    }
+
+    #[test]
+    fn a_song_asked_for_waits_while_a_heavy_job_decodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("song.wav");
+        crate::audio::envelope::test_wav(&wav, 44_100);
+        let busy = Arc::new(AtomicBool::new(true));
+        let b = busy.clone();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let lazy = Lazy::new_waiting(dir.path().to_path_buf(), Duration::from_millis(20), move || b.load(Ordering::SeqCst), move |id, drawn| {
+            let _ = tx.send((id.to_string(), drawn));
+        });
+        lazy.request(Job { id: "s".into(), path: wav.clone(), start: 0.0, end: None, stamp: STAMP });
+        assert!(rx.recv_timeout(Duration::from_millis(600)).is_err(), "not while the analysis runs");
+        assert!(!has(dir.path(), "s", STAMP));
+        busy.store(false, Ordering::SeqCst);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(20)).unwrap(), ("s".to_string(), true));
     }
 
     #[test]

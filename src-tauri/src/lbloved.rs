@@ -27,6 +27,19 @@ use crate::library::Track;
 use crate::musicbrainz::{Clock, Pacer};
 use crate::scrobble::Sent;
 
+/// "Send hearts to ListenBrainz" as the sender checks it before every turn (the setting, kept in
+/// step by `set_sending`): turned off, what waits stays waiting (bounded, `MOST_WAITING`) and
+/// nothing is sent or looked up until it's turned on again. Off until the app says otherwise.
+static SENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_sending(on: bool) {
+    SENDING.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn sending() -> bool {
+    SENDING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// The most feedback kept waiting (the newest).
 pub const MOST_WAITING: usize = 2000;
 /// Requests in one turn of the scrobbler's thread (listens are sent between turns).
@@ -464,8 +477,27 @@ pub struct SyncDone {
     pub queued: usize,
 }
 
+/// A sync's preview is being applied now (it changes the favourites).
+static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn applying() -> bool {
+    APPLYING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Applies the last preview: hearts the loved songs, queues the favourites to send.
 pub fn apply(ctx: &Ctx) -> Result<SyncDone, String> {
+    if APPLYING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("The sync is already being applied.".into());
+    }
+    let done = apply_now(ctx);
+    APPLYING.store(false, std::sync::atomic::Ordering::SeqCst);
+    done
+}
+
+fn apply_now(ctx: &Ctx) -> Result<SyncDone, String> {
+    if crate::backup::restoring() {
+        return Err("A backup is being restored. Try again when it has finished.".into());
+    }
     let state = &ctx.state;
     let user = state.settings.lock().listenbrainz_user.clone();
     let (who, plan) = PLAN.lock().take().ok_or("Check again first: nothing is ready to apply.")?;

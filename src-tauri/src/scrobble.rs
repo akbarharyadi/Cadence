@@ -256,6 +256,11 @@ impl Scrobbler {
         let _ = self.tx.send(Job::Flush);
     }
 
+    /// Looks at what waits now (sending hearts was turned on again).
+    pub fn wake(&self) {
+        let _ = self.tx.send(Job::Flush);
+    }
+
     pub fn loved_waiting(&self) -> usize {
         self.loved.len()
     }
@@ -376,7 +381,7 @@ fn submit(http: &reqwest::blocking::Client, token: &str, kind: &str, listens: &[
     let sent = outcome(r.status().as_u16(), retry_after.as_deref());
     if let Sent::Rejected(why) = &sent {
         // ListenBrainz says what was wrong in the body.
-        let body = r.text().unwrap_or_default();
+        let body = crate::net::text(r).unwrap_or_default();
         return Sent::Rejected(format!("{why}: {}", body.chars().take(300).collect::<String>()));
     }
     sent
@@ -528,7 +533,9 @@ fn run(rx: Receiver<Job>, waiting: Arc<Waiting>, loved: Arc<crate::lbloved::Queu
             }
         }
         // Then the hearts, a few requests a turn (the next turn comes a second later).
+        // (Only while sending hearts is on, checked now: turned off, nothing is sent or looked up.)
         if !loved.is_empty()
+            && crate::lbloved::sending()
             && let Some(lb) = lb.as_mut()
         {
             lb.set_token(Some(token.clone()));

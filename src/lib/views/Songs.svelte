@@ -3,7 +3,10 @@
   import TrackList from "#lib/components/TrackList.svelte";
   import { app } from "#lib/store.svelte.js";
 
-  const songs = $derived([...app.tracks].sort((a, b) => a.title.localeCompare(b.title)));
+  // One collator for the whole sort (the same order as `localeCompare`, several times faster on
+  // 20,000 songs: `localeCompare` sets up its comparison again on every call).
+  const collator = new Intl.Collator();
+  const songs = $derived([...app.tracks].sort((a, b) => collator.compare(a.title, b.title)));
   const skipped = $derived(songs.filter((t) => app.isSkipped(t)).length);
 </script>
 

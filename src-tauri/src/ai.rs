@@ -220,7 +220,7 @@ pub fn translate_json(s: &AiSettings, prompt: &str) -> Result<Value, String> {
         r = send(&body).map_err(|e| unreachable_message(s, &e))?;
     }
     let status = r.status();
-    let v: Value = r.json().map_err(|e| format!("Unexpected answer from the AI service: {e}"))?;
+    let v: Value = crate::net::json(r).map_err(|e| format!("Unexpected answer from the AI service: {e}"))?;
     if !status.is_success() {
         return Err(match status.as_u16() {
             401 | 403 => "The AI service didn’t accept the API key. Check it in Settings.".into(),
@@ -343,7 +343,7 @@ pub fn dj_json(s: &AiSettings, name: &str, system: &str, context: &str, prompt: 
         r = send(&body).map_err(|e| unreachable_message(s, &e))?;
     }
     let status = r.status();
-    let v: Value = r.json().map_err(|e| format!("Unexpected answer from the AI service: {e}"))?;
+    let v: Value = crate::net::json(r).map_err(|e| format!("Unexpected answer from the AI service: {e}"))?;
     if !status.is_success() {
         return Err(match status.as_u16() {
             401 | 403 => "The AI service didn’t accept the API key. Check it in Settings.".into(),
@@ -469,7 +469,7 @@ fn claude_send(http: &reqwest::blocking::Client, ep: &Endpoint, body: &Value, fa
             Err(e) => return Err(format!("Can’t reach Claude: {e}")),
         };
         let status = r.status().as_u16();
-        let v: Value = r.json().map_err(|e| format!("Unexpected answer from Claude: {e}"))?;
+        let v: Value = crate::net::json(r).map_err(|e| format!("Unexpected answer from Claude: {e}"))?;
         if (200..300).contains(&status) {
             return Ok(v);
         }
@@ -550,7 +550,7 @@ fn chat_json(s: &AiSettings, prompt: &str, search: bool) -> Result<Value, String
         }
     }
     let status = r.status();
-    let v: Value = r.json().map_err(|e| format!("Unexpected answer from the AI service: {e}"))?;
+    let v: Value = crate::net::json(r).map_err(|e| format!("Unexpected answer from the AI service: {e}"))?;
     if !status.is_success() {
         let msg = v["error"]["message"]
             .as_str()

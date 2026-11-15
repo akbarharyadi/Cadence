@@ -18,14 +18,37 @@
 
   const current = $derived(options.find((o) => o.value === value));
 
+  /** Inside a dialog (whose body scrolls) the list is a layer of its own, placed by the button,
+   *  so the dialog's edge doesn't cut it off. Elsewhere it hangs below the button as before. */
+  let layer = $state("");
+
   function toggle() {
     if (open) return close();
     active = Math.max(0, options.findIndex((o) => o.value === value));
     const r = button.getBoundingClientRect();
     placeUp = window.innerHeight - r.bottom < Math.min(320, options.length * 34 + 16);
+    layer = button.closest("[role='dialog']")
+      ? `position: fixed; left: ${Math.max(4, r.left)}px; min-width: ${r.width}px; ${placeUp ? `top: auto; bottom: ${window.innerHeight - r.top + 6}px` : `top: ${r.bottom + 6}px; bottom: auto`}`
+      : "";
     open = true;
     queueMicrotask(() => list?.querySelectorAll<HTMLElement>("[role=option]")[active]?.scrollIntoView({ block: "nearest" }));
   }
+
+  // A layered list stays where it was put: when the dialog scrolls or the window changes size it
+  // closes instead of floating away from its button.
+  $effect(() => {
+    if (!open || !layer) return;
+    const away = (e: Event) => {
+      if (e.target instanceof Node && list?.contains(e.target)) return;
+      open = false;
+    };
+    window.addEventListener("scroll", away, true);
+    window.addEventListener("resize", away);
+    return () => {
+      window.removeEventListener("scroll", away, true);
+      window.removeEventListener("resize", away);
+    };
+  });
 
   function close() {
     open = false;
@@ -77,7 +100,7 @@
   </button>
   {#if open}
     <div class="backdrop" role="presentation" onmousedown={() => (open = false)}></div>
-    <div class="list" class:up={placeUp} role="listbox" aria-label={label} bind:this={list}>
+    <div class="list" class:up={placeUp} role="listbox" aria-label={label} bind:this={list} style={layer || undefined}>
       {#each options as o, i (o.value)}
         <div
           role="option"

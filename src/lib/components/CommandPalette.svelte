@@ -1,9 +1,11 @@
 <script lang="ts">
   // Ctrl+K: one box for pages, actions and your music. A Modal, so it joins the dialogs'
   // Escape stack (Escape and Android Back close it first, and the window's shortcuts stand aside).
-  import { onDestroy, tick } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
+  import { app } from "#lib/store.svelte.js";
   import { actionItems, pageItems, search, type PaletteItem } from "#lib/paletteItems.js";
   import { overlays } from "#lib/palette.svelte.js";
+  import { warmSearch } from "#lib/searchWarm.js";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
 
@@ -18,7 +20,15 @@
   let timer: ReturnType<typeof setTimeout> | undefined;
   let listEl = $state<HTMLDivElement>();
 
+  // The other names and readings: asked for the first time the palette opens. When they arrive
+  // (or change) while it's open, the typed text is searched again (paletteItems reads them untracked).
+  // The library's search index too, while nothing is typed yet (shared with the Search page).
+  onMount(() => {
+    app.wantSearchKeys();
+    warmSearch();
+  });
   const groups = $derived.by(() => {
+    void app.searchKeys;
     try {
       return search(q, pages, actions);
     } catch (e) {

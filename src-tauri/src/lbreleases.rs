@@ -139,9 +139,9 @@ fn view(cache: &Cache, lib: &Library, enabled: bool, now: u64, error: String) ->
 
 /// Whether it's time to ask again: a day after the last fetch (and an hour after a failed try).
 fn due(c: &Cache, now: u64) -> bool {
-    let old = c.fetched == 0 || now >= c.fetched + A_DAY || c.days != DAYS;
+    let old = c.fetched == 0 || now >= c.fetched.saturating_add(A_DAY) || c.days != DAYS;
     // (A failed try is the only one that leaves the last try later than the last fetch.)
-    let rested = c.attempted <= c.fetched || now >= c.attempted + AFTER_FAILURE;
+    let rested = c.attempted <= c.fetched || now >= c.attempted.saturating_add(AFTER_FAILURE);
     old && rested
 }
 
@@ -153,10 +153,15 @@ pub fn fetch(net: &mut dyn Net, clock: &mut dyn Clock) -> Result<Vec<Fresh>, Fai
 
 /// What Discover shows: the kept releases, fetched anew first when it's due and allowed
 /// (`enabled`, and `ask`: the window is asking for it, not only for what's kept).
+/// Off: nothing at all, not even what was kept (each kept release's cover would still be loaded
+/// from the Cover Art Archive by the window).
 pub fn load(file: &Path, now: u64, enabled: bool, ask: bool, net: &mut dyn Net, clock: &mut dyn Clock, lib: &Library) -> View {
+    if !enabled {
+        return View { enabled: false, ..Default::default() };
+    }
     let mut cache: Cache = crate::state::read_json(file);
     let mut error = String::new();
-    if enabled && ask && due(&cache, now) {
+    if ask && due(&cache, now) {
         cache.attempted = now;
         match fetch(net, clock) {
             Ok(all) => {
@@ -181,13 +186,18 @@ fn library_of(ctx: &crate::ctx::Ctx) -> Vec<(String, String)> {
 /// For Discover: asks (when due) and returns what there is.
 pub fn for_discover(ctx: &crate::ctx::Ctx, ask: bool) -> View {
     let enabled = ctx.state.settings.lock().new_releases_online;
+    if !enabled {
+        return View::default();
+    }
     let albums = library_of(ctx);
     let who = crate::identity::current();
     let lib = Library { who: &who, albums: &albums };
     let file = ctx.state.data_dir.join(FILE);
     let now = crate::history::now();
-    let Some(mut http) = lbapi::Http::new(None) else {
-        return load(&file, now, false, false, &mut NoNet, &mut lbapi::Wall(std::time::Instant::now(), &NEVER), &lib);
+    // No client is made (nor network asked) when only what's kept is wanted.
+    let made = if ask { lbapi::Http::new(None) } else { None };
+    let Some(mut http) = made else {
+        return load(&file, now, true, false, &mut NoNet, &mut lbapi::Wall(std::time::Instant::now(), &NEVER), &lib);
     };
     let mut clock = lbapi::Wall(std::time::Instant::now(), &NEVER);
     load(&file, now, enabled, ask, &mut http, &mut clock, &lib)
@@ -321,6 +331,16 @@ mod tests {
         let v = load(&file, t0 + 2 * day + 600, true, true, &mut net, &mut clock, &lib);
         assert_eq!(net.asked.len(), 3, "after a failure, an hour's rest");
         assert_eq!(v.items.len(), 4);
+        // Turned off with releases kept: none are shown (their covers would still be loaded from
+        // the Cover Art Archive), asked or not.
+        for ask in [false, true] {
+            let v = load(&file, t0 + 2 * day + 700, false, ask, &mut net, &mut clock, &lib);
+            assert!(v.items.is_empty() && !v.enabled && v.fetched == 0, "{v:?}");
+        }
+        assert_eq!(net.asked.len(), 3);
+        // An absurd time kept in the file doesn't overflow.
+        std::fs::write(&file, r#"{"fetched":18446744073709551615,"attempted":18446744073709551615,"days":30,"items":[]}"#).unwrap();
+        let _ = load(&file, t0, true, true, &mut net, &mut clock, &lib);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

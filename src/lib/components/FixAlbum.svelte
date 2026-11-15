@@ -326,10 +326,10 @@
     margin: 12px 0 0;
     font-size: 13px;
   }
-  /* Placeholder rows while searching. */
+  /* Placeholder rows while searching: ~10 s of pulse at most, then they rest (never unbounded). */
   .ghost-row .art,
   .ghost-row i {
-    animation: pulse 1.2s ease-in-out infinite;
+    animation: pulse 1.2s ease-in-out 8;
   }
   .ghost-row i {
     display: block;

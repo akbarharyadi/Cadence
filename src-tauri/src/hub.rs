@@ -211,8 +211,16 @@ fn status_hub(
     // The last update without its position (and peak level): when only those moved, windows hidden in the
     // tray or minimized aren't sent it (see winvis.rs); anything else goes to every window.
     let mut sent_headline: Option<serde_json::Map<String, serde_json::Value>> = None;
+    // While nothing plays the engine still reports once a second: the same status again changes
+    // nothing anywhere (no window is woken for it, nothing is saved or told).
+    let mut last: Option<serde_json::Value> = None;
     for s in rx {
-        if let Ok(mut update) = serde_json::to_value(&s) {
+        let full = serde_json::to_value(&s).ok();
+        if !changed(&last, &full) {
+            continue;
+        }
+        last.clone_from(&full);
+        if let Some(mut update) = full {
             let mut significant = false;
             if sent_queue.as_ref() == Some(&s.queue) {
                 if let Some(o) = update.as_object_mut() {
@@ -291,5 +299,25 @@ fn status_hub(
             shown_playing = s.playing;
             shown_at = std::time::Instant::now();
         }
+    }
+}
+
+/// Whether a status differs from the last one (one that can't be read always counts as new).
+fn changed(last: &Option<serde_json::Value>, now: &Option<serde_json::Value>) -> bool {
+    now.is_none() || last != now
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn the_same_status_again_is_not_passed_on() {
+        let paused = Some(json!({ "playing": false, "position": 12.5, "peakDb": -120 }));
+        assert!(super::changed(&None, &paused), "the first one");
+        assert!(!super::changed(&paused, &paused.clone()), "paused: once a second, the same");
+        let moved = Some(json!({ "playing": false, "position": 30.0, "peakDb": -120 }));
+        assert!(super::changed(&paused, &moved), "a seek while paused");
+        assert!(super::changed(&paused, &None));
     }
 }

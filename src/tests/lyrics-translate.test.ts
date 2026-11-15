@@ -99,6 +99,30 @@ describe("LyricsView: translation under each line", () => {
     expect(localStorage.getItem("cadence-translate-lang")).toBe("id");
   });
 
+  test("new timings for the same lines (the singer followed) keep the translation: no new request", async () => {
+    localStorage.setItem("cadence-translate", "on");
+    let served: Lyrics = lyrics;
+    const backend = open({ get_lyrics: () => served, translate_lyrics: () => ({ lang: "en", from: "ai", lines: ["it is raining today", "the blue sky"] }) });
+    render(LyricsView, { trackId: first.id });
+    await waitFor(() => expect(document.querySelectorAll(".tr")).toHaveLength(2));
+    expect(backend.to("translate_lyrics")).toHaveLength(1);
+
+    // A voice job finished: the same lines, placed on the singing (other times).
+    served = { ...lyrics, synced: [{ time: 1.4, text: "今日は雨" }, { time: 10.8, text: "青い空" }] };
+    app.voiceDone = { trackId: first.id, error: "", at: Date.now() };
+    await settle();
+    await settle();
+    expect(backend.to("get_lyrics").length).toBeGreaterThanOrEqual(2);
+    expect(backend.to("translate_lyrics")).toHaveLength(1);
+    expect(backend.to("translate_cancel")).toHaveLength(0);
+    expect(document.querySelectorAll(".tr")).toHaveLength(2);
+
+    // Other lines (another version chosen): translated anew.
+    served = { ...lyrics, synced: [{ time: 1, text: "今日は晴れ" }, { time: 10, text: "青い空" }] };
+    app.voiceDone = { trackId: first.id, error: "", at: Date.now() + 1 };
+    await waitFor(() => expect(backend.to("translate_lyrics")).toHaveLength(2));
+  });
+
   test("another song cancels the one being translated", async () => {
     localStorage.setItem("cadence-translate", "on");
     const backend = open({ translate_lyrics: () => new Promise(() => {}) });

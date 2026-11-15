@@ -84,7 +84,7 @@
   function setVolume(v: number) {
     volume = v;
     if (v > 0) lastNonZero = v;
-    api.setVolume(v * v);
+    api.setVolume(v * v, s?.deviceGen);
   }
 
   const repeatLabel = $derived(

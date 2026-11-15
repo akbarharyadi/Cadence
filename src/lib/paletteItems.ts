@@ -1,8 +1,8 @@
 // What the command palette lists and how it ranks it. No UI here: the component only shows it.
 import { untrack } from "svelte";
-import { api, type Album, type Track } from "./api";
+import { api, type Track } from "./api";
 import { PLACES } from "./places";
-import { fold, ranked } from "./searchIndex";
+import { albumFields, artistFields, fold, ranked, trackFields, type Extra } from "./searchIndex";
 import { extraMatch } from "./searchKeys";
 import { keysOf } from "./shortcuts";
 import { newSmart } from "./smart";
@@ -171,9 +171,10 @@ export function filterItems(items: PaletteItem[], tokens: string[], max: number)
     .map((x) => x.item);
 }
 
-const albumFields = (a: Album) => [a.title, a.artist];
-const trackFields = (t: Track) => [t.title, t.subtitle ?? "", t.artist, t.album];
-const artistFields = (a: Artist) => [a.name];
+/** The best `max` of a store list: the list is read here (a new one is searched again), its songs
+ *  without subscribing to each (scanning 20,000 of them that way cost more than the search). */
+const bestOf = <T>(list: T[] | undefined, fields: (x: T) => string[], q: string, max: number, extra?: Extra<T>): T[] =>
+  list?.length ? untrack(() => ranked(list, fields, q, max, extra)) : [];
 
 export const LIMITS = { pages: 6, actions: 6, albums: 4, artists: 4, songs: 6 };
 
@@ -190,15 +191,15 @@ export function playSong(t: Track) {
 export function libraryItems(q: string): { albums: PaletteItem[]; artists: PaletteItem[]; songs: PaletteItem[] } {
   // Other names and readings ("yonezu" → 米津玄師) rank after every match on the names.
   const extra = extraMatch(untrack(() => app.searchKeys), q);
-  const albums = ranked(app.albums ?? [], albumFields, q, LIMITS.albums, extra?.album).map((al) =>
+  const albums = bestOf(app.albums, albumFields, q, LIMITS.albums, extra?.album).map((al) =>
     make("album", al.id, al.title, "album", () => app.go({ name: "album", id: al.id }), { hint: al.artist }),
   );
-  const artists = ranked(app.artists ?? [], artistFields, q, LIMITS.artists, extra?.artist).map((ar) =>
+  const artists = bestOf<Artist>(app.artists, artistFields, q, LIMITS.artists, extra?.artist).map((ar) =>
     make("artist", ar.name, ar.name, "artist", () => app.go({ name: "artist", artist: ar.name }), {
       hint: `${ar.albums.length} ${ar.albums.length === 1 ? "album" : "albums"}`,
     }),
   );
-  const songs = ranked(app.tracks ?? [], trackFields, q, LIMITS.songs, extra?.track).map((t) =>
+  const songs = bestOf<Track>(app.tracks, trackFields, q, LIMITS.songs, extra?.track).map((t) =>
     make("song", t.id, t.title, "song", () => playSong(t), { hint: `${t.artist} · ${t.album}` }),
   );
   return { albums, artists, songs };

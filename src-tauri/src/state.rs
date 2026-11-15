@@ -8,6 +8,44 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 
+/// Saves of the session (session.json) held back while a restore replaces it, so the player's
+/// status (saved every few seconds while music plays) can't land between the restore writing the
+/// file and the player reading it.
+enum SessionHold {
+    /// No save at all.
+    All,
+    /// Only once the player's queue is this one (the restored queue has reached it), or after
+    /// `SESSION_HOLD_LONGEST` at the latest; statuses of the queue before don't save.
+    Until(Vec<String>, std::time::Instant),
+}
+
+static SESSION_HOLD: Mutex<Option<SessionHold>> = Mutex::new(None);
+const SESSION_HOLD_LONGEST: Duration = Duration::from_secs(15);
+
+/// No session saves until `release_session_saves`.
+pub fn hold_session_saves() {
+    *SESSION_HOLD.lock() = Some(SessionHold::All);
+}
+
+/// Session saves again: at once (`expect` empty), or once the player shows the queue `expect`.
+pub fn release_session_saves(expect: Vec<String>) {
+    *SESSION_HOLD.lock() = if expect.is_empty() { None } else { Some(SessionHold::Until(expect, std::time::Instant::now())) };
+}
+
+/// Whether a status with this queue may be saved as the session now.
+pub(crate) fn session_save_allowed(queue: &[String]) -> bool {
+    let mut hold = SESSION_HOLD.lock();
+    let allowed = match hold.as_ref() {
+        None => return true,
+        Some(SessionHold::All) => false,
+        Some(SessionHold::Until(want, since)) => want.as_slice() == queue || since.elapsed() >= SESSION_HOLD_LONGEST,
+    };
+    if allowed {
+        *hold = None;
+    }
+    allowed
+}
+
 /// Settings changed with `save_settings_later` and not saved yet.
 static SETTINGS_LATER: AtomicBool = AtomicBool::new(false);
 /// How long the settings must stay unchanged before a `save_settings_later` save.
@@ -158,6 +196,14 @@ impl Library {
             .collect();
         self.snapshot = Snapshot { tracks, albums };
     }
+
+    /// Only the songs `ids` (those still in the library, at most 50) and their albums: what a
+    /// window showing just the song playing (the mini player) needs, without the whole library.
+    pub fn part(&self, ids: &[String]) -> Snapshot {
+        let tracks: Vec<Track> = ids.iter().take(50).filter_map(|id| self.by_id.get(id)).filter_map(|&i| self.snapshot.tracks.get(i)).cloned().collect();
+        let albums = self.snapshot.albums.iter().filter(|a| tracks.iter().any(|t| t.album_id == a.id)).cloned().collect();
+        Snapshot { tracks, albums }
+    }
 }
 
 pub struct AppState {
@@ -228,6 +274,9 @@ impl AppState {
     }
 
     pub fn save_session(&self, s: &crate::audio::Status) {
+        if !session_save_allowed(&s.queue) {
+            return;
+        }
         write_json(
             &self.data_dir.join("session.json"),
             &Session {
@@ -241,12 +290,13 @@ impl AppState {
     }
 
     /// Puts the last session's queue back, paused where it was left (songs no longer in the
-    /// library are left out).
-    pub fn restore_session(&self) {
+    /// library are left out). The queue handed to the player (empty: nothing was).
+    pub fn restore_session(&self) -> Vec<String> {
         let session: Session = read_json(&self.data_dir.join("session.json"));
-        let Some(current) = session.index.and_then(|i| session.queue.get(i)).cloned() else { return };
+        let Some(current) = session.index.and_then(|i| session.queue.get(i)).cloned() else { return Vec::new() };
         let items = self.queue_items(&session.queue);
-        let Some(index) = items.iter().position(|q| q.id == current) else { return };
+        let Some(index) = items.iter().position(|q| q.id == current) else { return Vec::new() };
+        let ids: Vec<String> = items.iter().map(|q| q.id.clone()).collect();
         // Places in the saved queue → places among the songs still in the library.
         let autoplay_from = session.autoplay_from.map(|from| {
             let lib = self.library.lock();
@@ -259,6 +309,7 @@ impl AppState {
             unshuffled: crate::shuffle::from_positions(&session.queue, &session.unshuffled),
             autoplay_from,
         });
+        ids
     }
 
     pub fn save_history(&self) {
@@ -638,6 +689,21 @@ pub(crate) fn moved_songs(gone: &[&Track], finder: &Finder) -> Vec<(String, Stri
 /// removed → the copy that stayed) and ones it followed, for playlists the window saves with ids
 /// it loaded before the move, and for the rescan after a removal.
 static MOVES: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// Where a song that moved (`MOVES`) is now: its latest id, followed to the end; None when no move
+/// of it is known.
+pub(crate) fn moved_to(id: &str) -> Option<String> {
+    let moves = MOVES.lock();
+    let moves = moves.as_ref()?;
+    let mut now = moves.get(id)?;
+    for _ in 0..8 {
+        match moves.get(now) {
+            Some(next) => now = next,
+            None => break,
+        }
+    }
+    Some(now.clone())
+}
 
 pub(crate) fn remember_moves<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) {
     let mut moves = MOVES.lock();
@@ -1149,6 +1215,24 @@ pub(crate) fn match_key(s: &str) -> String {
         .filter(|c| c.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+#[cfg(test)]
+mod part_tests {
+    use super::Library;
+    use crate::library::{Album, Track};
+
+    #[test]
+    fn a_part_of_the_library_has_only_the_songs_asked_for_and_their_albums() {
+        let song = |id: &str, album: &str| Track { id: id.into(), album_id: album.into(), ..Default::default() };
+        let album = |id: &str| Album { id: id.into(), ..Default::default() };
+        let mut lib = Library::default();
+        lib.set_tracks(vec![song("a", "x"), song("b", "y"), song("c", "x")], vec![album("x"), album("y"), album("z")]);
+        let part = lib.part(&["c".into(), "gone".into()]);
+        assert_eq!(part.tracks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["c"]);
+        assert_eq!(part.albums.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["x"]);
+        assert!(lib.part(&[]).tracks.is_empty() && lib.part(&[]).albums.is_empty());
+    }
 }
 
 #[cfg(test)]

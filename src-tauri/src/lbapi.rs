@@ -192,7 +192,8 @@ impl Net for Http {
         let status = r.status().as_u16();
         let rate = Rate { remaining: header_u64(&r, "x-ratelimit-remaining"), reset_in: header_u64(&r, "x-ratelimit-reset-in") };
         match status {
-            200..=299 => r.text().map(|body| Reply::Ok { status, body, rate }).unwrap_or(Reply::Offline),
+            // (Read with a cap: no answer of these is anywhere near it.)
+            200..=299 => crate::net::text(r).map(|body| Reply::Ok { status, body, rate }).unwrap_or(Reply::Failed(status)),
             401 => Reply::Unauthorized,
             408 | 429 | 500..=599 => Reply::Busy(header_u64(&r, "retry-after").or(rate.reset_in)),
             _ => Reply::Failed(status),
@@ -223,6 +224,9 @@ fn mbid(v: &Value) -> Option<String> {
     v.as_str().map(|s| s.trim().to_ascii_lowercase()).filter(|s| crate::tagids::is_mbid(s))
 }
 
+/// 2100-01-01: listens said to start later are left out.
+const LATEST_LISTEN: u64 = 4_102_444_800;
+
 /// `GET /user/<name>/listens`: its listens, newest first (those without a time or a title are left out).
 pub fn parse_listens(body: &str) -> Option<Vec<Remote>> {
     let v: Value = serde_json::from_str(body).ok()?;
@@ -234,7 +238,8 @@ pub fn parse_listens(body: &str) -> Option<Vec<Remote>> {
                 let m = &l["track_metadata"];
                 let info = &m["additional_info"];
                 let (artist, title) = (text(&m["artist_name"]), text(&m["track_name"]));
-                let at = l["listened_at"].as_u64()?;
+                // (A time past 2100 is a broken listen, not one to file in a year of its own.)
+                let at = l["listened_at"].as_u64().filter(|t| *t < LATEST_LISTEN)?;
                 if artist.is_empty() || title.is_empty() {
                     return None;
                 }

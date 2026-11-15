@@ -5,6 +5,43 @@ import { eqSync } from "./eq";
 import { pageShowing, setWindowVisible } from "./showing.svelte.js";
 import { closeTopModal } from "./components/Modal.svelte";
 import { leaveSelection } from "./selection";
+import { overlays } from "./palette.svelte.js";
+
+/**
+ * One request at a time: calls while one runs ask for exactly one more run after it (never
+ * several), and all of them get the promise of the run that covers them. The last run's error,
+ * if it failed, is passed on.
+ */
+export function coalesced(run: () => Promise<void>): () => Promise<void> {
+  let current: Promise<void> | null = null;
+  let again = false;
+  return () => {
+    if (current) {
+      again = true;
+      return current;
+    }
+    current = (async () => {
+      try {
+        let failed = false;
+        let error: unknown;
+        do {
+          again = false;
+          try {
+            await run();
+            failed = false;
+          } catch (e) {
+            failed = true;
+            error = e;
+          }
+        } while (again);
+        if (failed) throw error;
+      } finally {
+        current = null;
+      }
+    })();
+    return current;
+  };
+}
 
 /** Top-level places (tabs and sidebar): switching between them crossfades instead of sliding. */
 const TOP_LEVEL = new Set(["home", "discover", "stats", "albums", "artists", "songs", "favorites", "health", "recent", "search", "sound", "settings", "library"]);
@@ -103,8 +140,10 @@ function animate(kind: "forward" | "back" | "tab", change: () => void, after?: (
     if (run === transitions) delete root.dataset.nav;
   });
 }
+import { announceInterrupted } from "./backupNotice";
 import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type AttentionState, type DspSettings, type DupGroup, type HealthProgress, type HealthReport, type HistoryStats, type JobProgress, type Mark, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track, type VoiceBatch, type VoiceJob, type VoiceStatus, type ArtistGroup, type ArtistIdentity, type ArtistNamesStatus, type SearchKeys, type WaveformJob } from "./api";
 import { deviceName } from "./devices";
+import { throttled } from "./throttle";
 
 /** One album (same name, same folder) shown as several: its songs have different album artists. */
 export interface SplitAlbum {
@@ -153,8 +192,10 @@ export interface Artist {
 }
 
 class AppState {
-  tracks = $state<Track[]>([]);
-  albums = $state<Album[]>([]);
+  /** Replaced whole when the library changes, never changed in place: not deeply reactive, so
+   *  20,000 songs aren't wrapped in proxies with a signal per field read (tens of MB). */
+  tracks = $state.raw<Track[]>([]);
+  albums = $state.raw<Album[]>([]);
   /** Replaced whole on every update (four times a second while playing), never changed in place. */
   status = $state.raw<Status | null>(null);
   /**
@@ -469,20 +510,78 @@ class AppState {
     return this.artistIndexByName.get((name ?? "").toLowerCase());
   }
 
-  /** The artists and the search words, after the library changed (or the artists did). */
-  async loadIdentity() {
+  /** The songs of the artist written `name`, under any of its spellings: the songs of their albums
+   *  (as on the artist's page) and the songs credited to them on other albums, in library order. */
+  songsOfArtist(name: string): Track[] {
+    const a = this.artistByName(name);
+    const names = new Set([name ?? "", ...(a ? [a.name, ...(a.also ?? [])] : [])].map((n) => n.toLowerCase()));
+    const albums = new Set((a?.albums ?? []).map((x) => x.id));
+    return this.tracks.filter((t) => albums.has(t.albumId) || names.has((t.artist ?? "").toLowerCase()));
+  }
+
+  /** The name of the artist page for `name` (its merged artist's shown spelling). */
+  artistPageName(name: string): string {
+    return this.artistByName(name)?.name ?? name;
+  }
+
+  /**
+   * The artists written several ways, from the app. One request at a time (a burst of changes is
+   * one more request after the running one), and an answer is only used when it is newer than the
+   * one held: `version` only goes up, and an unchanged one leaves `artists` (and everything reading
+   * it) alone. Search and the artist pages work without it (by the names as written).
+   */
+  loadIdentity(): Promise<void> {
+    return this.identityRun();
+  }
+  private identityRun = coalesced(async () => {
     try {
-      const [identity, keys] = await Promise.all([api.artistIdentity(), api.searchKeys()]);
-      this.identity = identity ?? null;
-      this.searchKeys = keys ?? null;
+      const id = await api.artistIdentity();
+      if (!id || !Array.isArray(id.groups)) return;
+      const have = this.identity;
+      if (have && typeof id.version === "number" && typeof have.version === "number" && id.version <= have.version) return;
+      this.identity = id;
     } catch {
-      // Search and the artist pages work without them (by the names as written).
+      // Kept as it is.
     }
+  });
+  /** The app says the artists changed (the event carries the new version): asked only when it's new. */
+  private identityChanged(version: unknown) {
+    if (typeof version === "number" && this.identity && this.identity.version === version) return;
+    void this.identityRun();
+  }
+
+  // ---------- the search keys (other spellings, readings), hundreds of KB for a big library ----------
+  // Never at startup: the first time Search or the command palette opens. After that they are
+  // marked out of date when the library or the artists change (asked again the next time Search or
+  // the palette opens: a downloader writing files sends "library-changed" often), and asked at
+  // once on "search-keys-changed" when Search or the palette is on screen.
+  private keysWanted = false;
+  private keysStale = true;
+  private keysRun = coalesced(async () => {
+    this.keysStale = false;
+    try {
+      const k = await api.searchKeys();
+      // No answer: the keys held (if any) stay.
+      if (k && typeof k === "object") this.searchKeys = k;
+    } catch {
+      this.keysStale = true;
+    }
+  });
+  /** Search or the command palette opened: the search keys, if they aren't here or are out of date. */
+  wantSearchKeys() {
+    this.keysWanted = true;
+    if (this.keysStale) void this.keysRun();
+  }
+  private searchKeysOutdated(now = false) {
+    this.keysStale = true;
+    if (now && this.keysWanted && (this.view.name === "search" || overlays.paletteOpen)) void this.keysRun();
   }
 
   /** The artist page for a credit: its lead artist. */
   artistOf(credit: string): string {
-    return this.creditIndex.get(credit)?.[0] ?? credit;
+    // Under the spelling the artist's page is shown with (米津玄師 → Kenshi Yonezu when they're
+    // one artist), so both spellings open the same page (and Back sees it as the same).
+    return this.artistPageName(this.creditIndex.get(credit)?.[0] ?? credit);
   }
 
   /** The song and album last shown as playing: a rescan can drop a song that's still playing
@@ -509,8 +608,12 @@ class AppState {
   /** The album whose colours theme the app: the one playing, else the one on screen. */
   themeAlbum = $derived.by(() => this.currentAlbum ?? (this.view.name === "album" ? (this.albumById.get(this.view.id) ?? null) : null));
 
+  /** The history again after plays ended, at most every 3 s: each answer (every played song's
+   *  count) rebuilds "On repeat" and the recent albums, and with short songs a play ends every
+   *  second. */
+  private historyLater = throttled(() => api.history().then((h) => (this.listening = h)).catch(() => {}), 3000);
   /** Listening history stats (plays, skips, recent albums). */
-  listening = $state<HistoryStats | null>(null);
+  listening = $state.raw<HistoryStats | null>(null);
   /** Albums played this session, before the history has recorded them. */
   private sessionAlbums = $state<string[]>([]);
   /** Albums, most recently played first (this session, then the saved history). */
@@ -531,7 +634,9 @@ class AppState {
   skipInstrumentals = $state(false);
 
   /** Favourites and star ratings, by song id (songs with neither aren't listed). */
-  marks = $state<Record<string, Mark>>({});
+  /** Replaced whole on every change (`setMarks`): raw, so looking up 20,000 songs that have no
+   *  mark doesn't leave a signal behind for each. */
+  marks = $state.raw<Record<string, Mark>>({});
   ratingOf(t: Track): number {
     return this.marks[t.id]?.rating ?? 0;
   }
@@ -825,6 +930,11 @@ class AppState {
       // Hidden in the tray or minimized, or shown again (after a fresh "player-status").
       listen<boolean>("window-visible", (e) => setWindowVisible(e.payload)),
       listen("library-changed", async () => {
+        // The artists aren't asked for here: the app rebuilds them after a library change and says
+        // so ("artist-identity-changed") only when they changed. The search keys are only marked
+        // out of date (asked again when Search or the palette is on screen).
+        this.searchKeysOutdated();
+        if (!this.identity) void this.identityRun();
         await Promise.all([this.loadLibrary(), this.loadMarks()]);
         this.scan = null;
         this.startedAdding(false);
@@ -852,7 +962,8 @@ class AppState {
         this.scan = null;
         this.startedAdding(false);
       }),
-      listen("history-changed", async () => (this.listening = await api.history())),
+      // A play ended: every second with very short songs or skipping, so gathered (see historyLater).
+      listen("history-changed", () => this.historyLater()),
       listen("marks-changed", () => this.loadMarks()),
       listen<HealthProgress>("health-progress", (e) => (this.healthJob = e.payload.running ? e.payload : null)),
       listen<{ running: boolean }>("backup-progress", (e) => (this.backupRunning = !!e.payload?.running)),
@@ -887,8 +998,12 @@ class AppState {
       }),
       listen<number | null>("sleep-timer", (e) => (this.sleepEndsAt = e.payload)),
       // The artists changed (MusicBrainz learned names, or a "same" / "not the same" decision).
-      listen("artist-identity-changed", () => this.loadIdentity()),
-      listen("search-keys-changed", () => api.searchKeys().then((k) => (this.searchKeys = k ?? null)).catch(() => {})),
+      listen<number>("artist-identity-changed", (e) => {
+        this.identityChanged(e.payload);
+        // The keys are worked out from the artists too.
+        this.searchKeysOutdated();
+      }),
+      listen("search-keys-changed", () => this.searchKeysOutdated(true)),
       listen<ArtistNamesStatus>("artist-names-progress", (e) => (this.namesJob = e.payload?.running ? e.payload : null)),
       listen<import("./api").LbImportStatus>("listenbrainz-import-progress", (e) => (this.lbImportJob = e.payload?.phase === "scanning" ? e.payload : null)),
       listen<{ done: number; total: number; running: boolean }>("lyric-index-progress", (e) => (this.lyricIndexJob = e.payload?.running && e.payload.total > 0 ? e.payload : null)),
@@ -930,10 +1045,16 @@ class AppState {
     api.artistImages().then((m) => (this.artistImages = m)).catch(() => {});
     // The mini player is another window: follow a theme changed in the main one.
     window.addEventListener("storage", (e) => e.key === "cadence-theme" && (this.theme = savedTheme()));
+    // Whether a pointer is held (a sound slider may be mid-drag): see `applyDeviceDsp`.
+    this.watchPointer();
     this.loadMarks();
     api.sleepTimer().then((t) => (this.sleepEndsAt = t)).catch(() => {});
     // The day's snapshot may have started before this window was listening.
-    api.backupInfo().then((b) => b?.running && (this.backupRunning = true)).catch(() => {});
+    api.backupInfo().then((b) => {
+      if (b?.running) this.backupRunning = true;
+      // A restore cut short was dealt with at this start: said once (the Backup section keeps it).
+      announceInterrupted(b, (m) => this.showToast(m, null, 12000));
+    }).catch(() => {});
     api.skips().then((s) => {
       this.skipped = s.ids;
       this.skipInstrumentals = s.instrumentals;
@@ -974,16 +1095,33 @@ class AppState {
       listen<Omit<Status, "queue"> & { queue?: string[] }>("player-status", (e) => {
         const queue = e.payload.queue ?? this.status?.queue;
         if (queue) this.applyStatus({ ...e.payload, queue });
+        this.miniFollow();
       }),
       listen<boolean>("window-visible", (e) => setWindowVisible(e.payload)),
-      listen("library-changed", () => this.loadLibrary().catch(() => {})),
+      listen("library-changed", () => this.miniFollow(true)),
     ]);
     window.addEventListener("storage", (e) => e.key === "cadence-theme" && (this.theme = savedTheme()));
-    const [lib, status] = await Promise.all([api.library(), api.status()]);
-    this.setLibrary(lib);
+    const status = await api.status();
     if (!this.status) this.applyStatus(status);
+    await this.miniFollow();
     this.loaded = true;
   }
+
+  /** The mini player's songs: the one playing and the next (so a song change shows at once), not
+   *  the whole library (tens of MB for 20,000 songs). Asked again when they change. */
+  private miniFollow(changed = false): Promise<void> {
+    const s = this.status;
+    const ids = s?.index != null ? s.queue.slice(s.index, s.index + 2) : [];
+    const key = ids.join("\n");
+    if (!changed && key === this.miniKey) return Promise.resolve();
+    this.miniKey = key;
+    return this.miniRun().catch(() => {});
+  }
+  private miniKey: string | null = null;
+  private miniRun = coalesced(async () => {
+    const lib = await api.libraryPart(this.miniKey ? this.miniKey.split("\n") : []);
+    if (lib && Array.isArray(lib.tracks) && Array.isArray(lib.albums)) this.setLibrary(lib);
+  });
 
   private applyStatus(s: Status) {
     this.status = s;
@@ -995,6 +1133,7 @@ class AppState {
     if (s.error && s.error !== this.lastError) this.showToast(s.error);
     this.lastError = s.error;
     this.followDevice(s);
+    if (this.startSeek) this.seekOnStart(s);
   }
   private lastError: string | null = null;
 
@@ -1007,7 +1146,15 @@ class AppState {
     if (profile !== this.lastProfile) {
       const first = this.lastProfile === undefined;
       this.lastProfile = profile;
-      if (!first && this.dsp) api.dsp().then((d) => d && (this.dsp = d)).catch(() => {});
+      if (!first && this.dsp) {
+        // What the page holds is the old device's settings: nothing of it may reach the engine now
+        // (it would be saved in the new device's profile). An edit waiting to be sent is dropped,
+        // and edits wait until the new device's settings are here.
+        clearTimeout(this.dspTimer);
+        this.dspTimer = undefined;
+        this.dspStale = true;
+        this.reloadDsp();
+      }
     }
     const missing = s.deviceMissing?.name ?? null;
     if (missing && missing !== this.lastMissing) {
@@ -1023,10 +1170,15 @@ class AppState {
   private lastProfile: string | null | undefined = undefined;
   private lastMissing: string | null = null;
 
-  async loadLibrary() {
-    this.setLibrary(await api.library());
-    void this.loadIdentity();
+  /** The library again. While the downloader writes files "library-changed" comes often: one
+   *  request at a time, and a burst during one is one more after it. */
+  loadLibrary(): Promise<void> {
+    return this.libraryRun();
   }
+  private libraryRun = coalesced(async () => {
+    const lib = await api.library();
+    if (lib && Array.isArray(lib.tracks) && Array.isArray(lib.albums)) this.setLibrary(lib);
+  });
 
   async loadSonic() {
     const [status, mixes] = await Promise.all([api.sonicStatus(), api.soundMixes()]);
@@ -1223,7 +1375,7 @@ class AppState {
     }
     const kind = TOP_LEVEL.has(view.name) ? "tab" : "forward";
     const here: HistoryEntry = { view: this.view, scroll: contentScroll(), section: this.section };
-    animate(kind, () => {
+    const change = () => {
       if (fromTyping) {
         this.pendingSearch = false;
         // Letters typed while waiting are in the box, not in `view`.
@@ -1238,7 +1390,21 @@ class AppState {
       this.navSeq++;
       this.nowPlayingOpen = false;
       document.querySelector(".content")?.scrollTo({ top: 0 });
-    });
+    };
+    try {
+      animate(kind, () => {
+        try {
+          change();
+        } finally {
+          // Whatever happened, the search box can open Search again.
+          if (fromTyping) this.pendingSearch = false;
+        }
+      });
+    } catch (e) {
+      // The transition couldn't start (or the change threw without one): never left waiting.
+      if (fromTyping) this.pendingSearch = false;
+      throw e;
+    }
   }
 
   back() {
@@ -1531,12 +1697,168 @@ class AppState {
 
   /** Changes sound settings; the engine is updated at most every 40 ms while sliders move. */
   updateDsp(change: (d: DspSettings) => void) {
-    if (!this.dsp) return;
+    // The output device changed and its settings aren't here yet: an edit now would carry the
+    // old device's settings into the new one's profile. It's dropped (the slider then shows the
+    // new device's value).
+    if (!this.dsp || this.dspStale) return;
     change(this.dsp);
+    // The device generation shown when the first edit of this batch was made (not when the timer
+    // fires): if the output moved on meanwhile, the engine drops the stale send.
+    const gen = this.dspTimer === undefined ? this.status?.deviceGen : this.dspGen;
+    this.dspGen = gen;
     clearTimeout(this.dspTimer);
-    this.dspTimer = setTimeout(() => api.setDsp($state.snapshot(this.dsp!)), 40);
+    const profile = this.lastProfile;
+    this.dspTimer = setTimeout(() => {
+      this.dspTimer = undefined;
+      // Belt and braces: never sent once another device's settings are in use.
+      if (!this.dsp || this.dspStale || profile !== this.lastProfile) return;
+      api.setDsp($state.snapshot(this.dsp), gen);
+    }, 40);
   }
+  private dspGen: number | undefined;
   private dspTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The device (or its profile) changed and its settings are being asked for. */
+  private dspStale = false;
+  /** Numbers the requests for the settings: only the newest answer is used. */
+  private dspSeq = 0;
+  /** A pointer is held down in the window (a slider may be mid-drag). */
+  private pointerHeld = false;
+  /** The new device's settings, waiting for the pointer to be let go. */
+  private deferredDsp: DspSettings | null = null;
+
+  /** The settings of the device now in use, asked for after a device or profile change. */
+  private reloadDsp(retry = true) {
+    const seq = ++this.dspSeq;
+    api
+      .dsp()
+      .then((d) => {
+        if (seq !== this.dspSeq) return;
+        if (d) this.applyDeviceDsp(d);
+        else this.dspStale = false;
+      })
+      .catch(() => {
+        if (seq !== this.dspSeq) return;
+        if (retry) this.reloadDsp(false);
+        // Can't be had: editing carries on with what's shown (as before the device changed).
+        else this.dspStale = false;
+      });
+  }
+
+  /** Shows the new device's settings, once no slider is being dragged (they'd jump under the
+   *  finger otherwise); until then edits are dropped (see `updateDsp`). */
+  private applyDeviceDsp(d: DspSettings) {
+    if (this.pointerHeld) {
+      this.deferredDsp = d;
+      return;
+    }
+    this.deferredDsp = null;
+    this.dsp = d;
+    this.dspStale = false;
+  }
+
+  private watchPointer() {
+    if (typeof window === "undefined") return;
+    const up = () => {
+      this.pointerHeld = false;
+      const d = this.deferredDsp;
+      if (d) this.applyDeviceDsp(d);
+    };
+    window.addEventListener("pointerdown", () => (this.pointerHeld = true), true);
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", up, true);
+    // Let go outside the window (the release may never reach it).
+    window.addEventListener("blur", up);
+  }
+
+  /**
+   * After a backup was restored: everything the window holds that a restore can change, asked
+   * for again (the app has already put the restored settings to use). The pages' own copies
+   * (Settings' toggles, the Sound page's options) follow `restored`.
+   */
+  async reloadAfterRestore() {
+    // An edit waiting to be sent would undo the restored sound settings.
+    clearTimeout(this.dspTimer);
+    this.dspTimer = undefined;
+    this.deferredDsp = null;
+    const dspSeq = ++this.dspSeq;
+    const get = <T,>(p: Promise<T>): Promise<T | undefined> => p.then((v) => v ?? undefined, () => undefined);
+    const [lib, folders, status, dsp, history, playlists, marks, skips, ai, images, sleep, prefs] = await Promise.all([
+      get(api.library()),
+      get(api.folders()),
+      get(api.status()),
+      get(api.dsp()),
+      get(api.history()),
+      get(api.playlists()),
+      get(api.marks()),
+      get(api.skips()),
+      get(api.aiSettings()),
+      get(api.artistImages()),
+      get(api.sleepTimer()),
+      get(api.attentionState()),
+    ]);
+    if (lib && Array.isArray(lib.tracks) && Array.isArray(lib.albums)) this.setLibrary(lib);
+    if (Array.isArray(folders)) this.folders = folders;
+    if (history) this.listening = history;
+    if (Array.isArray(playlists)) this.playlists = playlists;
+    if (marks) this.marks = marks;
+    if (skips) {
+      this.skipped = Array.isArray(skips.ids) ? skips.ids : [];
+      this.skipInstrumentals = !!skips.instrumentals;
+    }
+    if (ai) this.ai = ai;
+    if (images) this.artistImages = images;
+    this.sleepEndsAt = sleep ?? null;
+    if (prefs) this.attentionPrefs = prefs;
+    if (dsp && dspSeq === this.dspSeq) {
+      this.dsp = dsp;
+      this.dspStale = false;
+    }
+    // The queue, the position and the device (a device change here asks for its settings itself).
+    if (status && Array.isArray(status.queue)) this.applyStatus(status);
+    void this.identityRun();
+    this.searchKeysOutdated();
+    api.voiceStatus().then((v) => v && (this.voice = v)).catch(() => {});
+    this.loadDuplicates().catch(() => {});
+    this.loadHealth().catch(() => {});
+    this.loadArtistPairsCount().catch(() => {});
+    if (this.aiReady && !this.aiMixes.length) this.loadAiMixes(false);
+    this.restored++;
+  }
+  /** Counts the backup restores (pages re-read their own copies of settings when it moves). */
+  restored = $state(0);
+
+  /**
+   * Plays a list from song `start`, at `position` seconds into it. The app has no "start at"
+   * for a list, so the seek waits for the player to say the song is playing (from the status
+   * updates it sends anyway; given up after a few seconds): sent at once, it could land on the
+   * song before, or be lost when the new one starts.
+   */
+  async playFrom(ids: string[], start: number, position: number) {
+    const id = ids[start];
+    if (!id) return;
+    this.startSeek = position > 0 ? { id, position, until: Date.now() + 6000 } : null;
+    try {
+      await api.play(ids, start, true);
+    } catch (e) {
+      this.startSeek = null;
+      throw e;
+    }
+  }
+  private startSeek: { id: string; position: number; until: number } | null = null;
+  /** A status update: the waiting seek of `playFrom`, once its song has started. */
+  private seekOnStart(s: Status) {
+    const w = this.startSeek;
+    if (!w) return;
+    if (Date.now() > w.until) {
+      this.startSeek = null;
+      return;
+    }
+    const id = s.index != null ? s.queue[s.index] : undefined;
+    // The new play, just started (a song already playing past the start doesn't count).
+    if (id !== w.id || s.position > 2 || !(s.duration > 0)) return;
+    this.startSeek = null;
+    this.seek(w.position);
+  }
 
   /** Optimistic position update so the slider doesn't jump back while the engine seeks. */
   seek(position: number) {

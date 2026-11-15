@@ -19,13 +19,31 @@
     $props();
 
   const me = Symbol("dialog");
+  /** What had the keyboard when the dialog opened (a song row, a button): it gets it back. */
+  const opener = typeof document === "undefined" ? null : (document.activeElement as HTMLElement | null);
   onMount(() => {
     open.push({ id: me, close: () => onclose() });
     return () => {
       const i = open.findIndex((m) => m.id === me);
       if (i >= 0) open.splice(i, 1);
+      try {
+        giveFocusBack();
+      } catch {
+        // Focus is a nicety: closing never fails over it.
+      }
     };
   });
+
+  /** Closing: the keyboard goes back where it was (as the context menu does), unless what closed
+   *  the dialog moved it on purpose (another dialog's field, a page's box). */
+  function giveFocusBack() {
+    const el = opener;
+    if (!el || el === document.body || !el.isConnected || typeof el.focus !== "function") return;
+    const now = document.activeElement;
+    if (now && now !== document.body && now !== el && !panel?.contains(now)) return;
+    if ((el as HTMLButtonElement).disabled || el.closest("[inert], [hidden], [aria-hidden='true']")) return;
+    el.focus({ preventScroll: true });
+  }
 
   /** Escape closes the dialog, unless something inside it (an open dropdown, a menu) already
    *  used the key, or another dialog is open on top of it. */
@@ -67,9 +85,14 @@
     backdrop-filter: blur(6px);
     animation: fade 0.15s ease-out;
   }
+  /* Never taller than what can be seen (dvh: the visible viewport, without a phone's browser bars
+     or keyboard; vh where it's unknown): the title and the buttons stay on screen and the body
+     scrolls between them. */
   .panel {
     max-width: calc(100vw - 24px);
     max-height: calc(100vh - 80px);
+    max-height: calc(100dvh - 80px);
+    min-height: 0;
     display: flex;
     flex-direction: column;
     border-radius: var(--r-lg);
@@ -80,6 +103,7 @@
     animation: pop 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
   header {
+    flex: none;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -91,16 +115,42 @@
     font-size: 20px;
     letter-spacing: -0.015em;
   }
-  /* Not scrollable on purpose: dropdowns inside must be able to overflow the dialog. */
+  /* Scrolls when the dialog is taller than the screen. Dropdowns (Select) inside a dialog open as
+     a layer of their own (position: fixed), so the scrolling doesn't cut them off. */
   .body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 8px 22px 18px;
   }
   footer {
+    flex: none;
     display: flex;
     justify-content: flex-end;
     gap: 10px;
     padding: 14px 22px 18px;
     border-top: 1px solid var(--line);
+  }
+  /* A short window (a phone on its side, ~360 px): less space around the dialog and in its
+     title and buttons, so more of the body shows. */
+  @media (max-height: 560px) {
+    .overlay {
+      padding: 8px;
+    }
+    .panel {
+      max-height: calc(100vh - 16px);
+      max-height: calc(100dvh - 16px);
+    }
+    header {
+      padding: 10px 12px 2px 18px;
+    }
+    footer {
+      padding: 8px 18px 10px;
+    }
+    .body {
+      padding: 6px 18px 10px;
+    }
   }
   /* Phones: a sheet that rises from the bottom, the full width of the screen. */
   @media (max-width: 720px) {
@@ -111,11 +161,33 @@
     .panel {
       width: 100% !important;
       max-height: 85vh;
+      max-height: calc(100dvh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
       border-radius: 24px;
       animation: rise 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
     }
     footer {
       flex-wrap: wrap;
+    }
+  }
+  /* The Android app at any width (a phone on its side, a tablet): the same sheet, inside the
+     screen's safe area. */
+  :global(html.phone) .overlay {
+    align-items: end;
+    padding: calc(8px + env(safe-area-inset-top)) calc(8px + env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) calc(8px + env(safe-area-inset-left));
+  }
+  :global(html.phone) .panel {
+    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    max-width: 100%;
+    border-radius: 24px;
+    animation: rise 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  :global(html.phone) footer {
+    flex-wrap: wrap;
+  }
+  @media (max-width: 720px) {
+    :global(html.phone) .panel {
+      width: 100% !important;
     }
   }
   @keyframes rise {

@@ -2,6 +2,7 @@
   // What happens to the music on its way to the speakers, as a row of stages.
   import { db, khz } from "#lib/api.js";
   import { shortDeviceName } from "#lib/devices.js";
+  import { untrack } from "svelte";
   import { app, signalPath, systemMixer } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
 
@@ -76,6 +77,25 @@
     ];
   });
 
+  // The light along the wires: one pass (two sweeps, ~3 s) when the path changes (a song starts,
+  // playback resumes, the mode, rate or a stage changes), then the wires just glow. A light that
+  // ran for as long as music played drew a frame at the display's rate (160 a second here).
+  // `sig` is a short string; the effect below only runs when it is a different one.
+  const sig = $derived(
+    s?.playing && o && src
+      ? `${s.index}|${s.index != null ? s.queue[s.index] : ""}|${path?.tier}|${o.mode}|${o.sampleRate}|${src.sampleRate}|${o.device}|${stages.map((x) => (x.active ? 1 : 0)).join("")}`
+      : "",
+  );
+  let sweeps = $state(0);
+  let swept = "";
+  $effect(() => {
+    const k = sig;
+    if (!k || k === swept) return;
+    swept = k;
+    // Another animation name restarts the pass (the same one again wouldn't).
+    sweeps = untrack(() => sweeps) + 1;
+  });
+
   const headline = $derived.by(() => {
     if (!path) return "";
     if (path.tier === "bitperfect") return "Bit-perfect: every sample reaches your device untouched";
@@ -85,7 +105,7 @@
 </script>
 
 {#if stages.length && path}
-  <div class="flow" class:playing={s?.playing}>
+  <div class="flow" class:playing={s?.playing} class:sweep-a={sweeps > 0 && sweeps % 2 === 1} class:sweep-b={sweeps > 0 && sweeps % 2 === 0}>
     <div class="head">
       <span class="tier {path.tier}">{path.label}</span>
       <span class="headline">{headline}</span>
@@ -188,15 +208,15 @@
     height: 2px;
     background: var(--line-strong);
   }
+  /* A live wire glows (still). */
   .wire.lit {
-    background: linear-gradient(90deg, transparent, var(--accent), transparent);
-    background-size: 200% 100%;
+    background: color-mix(in srgb, var(--accent) 60%, transparent);
   }
-  /* The light travels by transform (no repaint every frame). */
+  /* While playing, a light passes along it when the path changes (see `sweeps`): by transform (no
+     repaint), a set number of times, ending out of sight; then only the glow is left. */
   .playing .wire.lit {
     position: relative;
     overflow: hidden;
-    background: none;
   }
   .playing .wire.lit::after {
     content: "";
@@ -205,8 +225,14 @@
     bottom: 0;
     left: 0;
     width: 200%;
-    background: linear-gradient(90deg, transparent, var(--accent), transparent);
-    animation: flow 1.6s linear infinite;
+    background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 55%, #fff), transparent);
+    transform: translateX(50%);
+  }
+  .sweep-a.playing .wire.lit::after {
+    animation: flow-a 1.6s linear 2 both;
+  }
+  .sweep-b.playing .wire.lit::after {
+    animation: flow-b 1.6s linear 2 both;
   }
   /* Narrow windows: stages wrap into a grid instead of squeezing their text. */
   @container (max-width: 860px) {
@@ -221,13 +247,18 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .playing .wire.lit::after {
-      animation: none;
-    }
-    .meter .fill {
-      transition: none;
+      animation: none !important;
     }
   }
-  @keyframes flow {
+  @keyframes flow-a {
+    from {
+      transform: translateX(-50%);
+    }
+    to {
+      transform: translateX(50%);
+    }
+  }
+  @keyframes flow-b {
     from {
       transform: translateX(-50%);
     }
@@ -303,7 +334,9 @@
     height: 100%;
     border-radius: 3px;
     background: linear-gradient(90deg, var(--good), var(--good) 75%, var(--warn));
-    transition: transform 0.25s;
+    /* No transition: a 0.25 s glide on each of the four updates a second never ended (the
+       compositor drew every display frame while music played); a level meter that steps four
+       times a second reads just as well. */
   }
   .meter .fill.hot {
     background: linear-gradient(90deg, var(--good), var(--warn) 70%, var(--bad));

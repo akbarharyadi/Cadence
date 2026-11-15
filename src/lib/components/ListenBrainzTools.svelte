@@ -4,8 +4,9 @@
   // shows what it found and asks before it changes anything.
   import { listen } from "@tauri-apps/api/event";
   import { save } from "@tauri-apps/plugin-dialog";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { api, type LbApplied, type LbImportStatus, type LbSyncDone, type LbSyncPreview } from "#lib/api.js";
+  import { app } from "#lib/store.svelte.js";
   import Modal from "./Modal.svelte";
   import Toggle from "./Toggle.svelte";
 
@@ -27,8 +28,26 @@
   /** " (3 fit more than one song)", or nothing. */
   const fits = (v: number) => (v > 0 ? ` (${n(v)} fit more than one song)` : "");
 
+  const readLoved = () => api.appSettings().then((s) => s && (loved = s.listenbrainzLoved ?? true)).catch(() => {});
+  // A backup was restored: the setting may be another now.
+  $effect(() => {
+    if (!app.restored) return;
+    untrack(() => void readLoved());
+  });
+
+  /** The toggle shows the new state at once; if the app couldn't save it, it goes back. */
+  async function setLoved(v: boolean) {
+    loved = v;
+    try {
+      await api.setListenbrainzLoved(v);
+    } catch (e) {
+      loved = !v;
+      app.showToast(`Couldn't change that: ${e}`);
+    }
+  }
+
   onMount(() => {
-    api.appSettings().then((s) => (loved = s.listenbrainzLoved ?? true)).catch(() => {});
+    void readLoved();
     api.lbLovedWaiting().then((w) => (waiting = w ?? 0)).catch(() => {});
     api.lbImportStatus().then((s) => (status = s ?? null)).catch(() => {});
     let off: (() => void) | undefined;
@@ -121,7 +140,7 @@
       <strong>Loved songs</strong>
       <p class="hint">Hearting a song marks it as loved on ListenBrainz too (and un-hearting takes it back). It’s sent in the background when the song’s recording can be identified.</p>
     </div>
-    <Toggle checked={loved} label="Send favorites to ListenBrainz as loved songs" onchange={(v) => { loved = v; void api.setListenbrainzLoved(v); }} />
+    <Toggle checked={loved} label="Send favorites to ListenBrainz as loved songs" onchange={(v) => void setLoved(v)} />
   </div>
   {#if waiting > 0}<p class="hint">{plural(waiting, "loved song")} waiting to be sent.</p>{/if}
   <div class="buttons">

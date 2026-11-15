@@ -1,11 +1,12 @@
 <script lang="ts">
   import { api, khz } from "#lib/api.js";
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
   import { updates } from "#lib/updates.svelte.js";
   import AiSettings from "#lib/components/AiSettings.svelte";
   import BackupSettings from "#lib/components/BackupSettings.svelte";
   import Icon from "#lib/components/Icon.svelte";
+  import ProgressBar from "#lib/components/ui/ProgressBar.svelte";
   import ListenBrainzTools from "#lib/components/ListenBrainzTools.svelte";
   import Toggle from "#lib/components/Toggle.svelte";
   import Licenses from "#lib/components/Licenses.svelte";
@@ -34,16 +35,27 @@
   let lbToken = $state("");
   let lbBusy = $state(false);
   let lbError = $state("");
-  onMount(async () => {
-    const s = await api.appSettings();
-    closeToTray = s.closeToTray;
-    globalHotkeys = s.globalHotkeys;
-    lyricsOnline = s.lyricsOnline;
-    fixTags = s.fixTagsOnline;
-    artistNames = s.artistNamesOnline ?? true;
-    newReleases = s.newReleasesOnline ?? true;
+  async function readSettings() {
+    try {
+      const s = await api.appSettings();
+      if (!s) return;
+      closeToTray = s.closeToTray;
+      globalHotkeys = s.globalHotkeys;
+      lyricsOnline = s.lyricsOnline;
+      fixTags = s.fixTagsOnline;
+      artistNames = s.artistNamesOnline ?? true;
+      newReleases = s.newReleasesOnline ?? true;
+      lbUser = s.listenbrainzUser;
+    } catch {
+      // The toggles keep what they show.
+    }
     loadNames();
-    lbUser = s.listenbrainzUser;
+  }
+  onMount(readSettings);
+  // A backup was restored: its settings are the ones in use now.
+  $effect(() => {
+    if (!app.restored) return;
+    untrack(() => void readSettings());
   });
 
   // ListenBrainz refused the token while Cadence was open: the account was cleared in the backend.
@@ -262,9 +274,7 @@
     <p class="desc">Cadence listens to each song once (tempo, timbre, loudness and harmony) to make mixes by sound, sound radio and “sounds like” lists. It all happens on this {droid ? "phone" : "computer"}.</p>
     {#if app.sonic}
       {@const s = app.sonic}
-      <div class="meter" role="progressbar" aria-valuemin={0} aria-valuemax={s.total} aria-valuenow={s.analyzed} aria-label="Songs analysed">
-        <span style="width: {s.total ? (s.analyzed / s.total) * 100 : 0}%"></span>
-      </div>
+      <div class="meter"><ProgressBar value={s.total ? s.analyzed / s.total : 0} max={s.total} now={s.analyzed} label="Songs analysed" /></div>
       <p class="hint">
         {#if s.total === 0}Nothing to analyse yet: add some music first{:else if s.running}Listening… {s.analyzed} of {s.total} songs{:else if s.analyzed >= s.total}All {s.total} songs analysed{:else}{s.analyzed} of {s.total} songs analysed{/if}{app.mixes.length ? `, ${app.mixes.length} ${app.mixes.length === 1 ? "mix" : "mixes"} on Home` : ""}.
       </p>
@@ -464,17 +474,13 @@
         {/if}
       </div>
       {#if v.installing}
-        <div class="meter" role="progressbar" aria-valuemin={0} aria-valuemax={v.installing[1]} aria-valuenow={v.installing[0]} aria-label="Downloaded">
-          <span style="width: {v.installing[1] ? (v.installing[0] / v.installing[1]) * 100 : 0}%"></span>
-        </div>
+        <div class="meter"><ProgressBar value={v.installing[1] ? v.installing[0] / v.installing[1] : 0} max={v.installing[1]} now={v.installing[0]} label="Downloaded" /></div>
         <p class="hint">Downloading… {Math.round(v.installing[0] / 1e6)} of {Math.round(v.installing[1] / 1e6)} MB</p>
       {:else if v.installed}
         {@const b = v.batch}
         {#if b?.running}
           {@const part = v.job ? v.job.done / Math.max(v.job.total, 1) : 0}
-          <div class="meter" role="progressbar" aria-valuemin={0} aria-valuemax={b.total} aria-valuenow={b.done} aria-label="Songs done">
-            <span style="width: {b.total ? ((b.done + part) / b.total) * 100 : 0}%"></span>
-          </div>
+          <div class="meter"><ProgressBar value={b.total ? (b.done + part) / b.total : 0} max={b.total} now={b.done} label="Songs done" /></div>
           <div class="row">
             <p class="hint">
               {#if b.preparing}Finding your songs with lyrics…{:else}
@@ -922,19 +928,11 @@
     padding: 8px 12px;
   }
   .meter {
-    height: 6px;
     max-width: 420px;
     margin-top: 16px;
-    border-radius: 99px;
-    background: var(--surface-2);
-    overflow: hidden;
-  }
-  .meter span {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background: var(--accent);
-    transition: width 0.3s;
+    --bar-height: 6px;
+    --bar-radius: 99px;
+    --bar-track: var(--surface-2);
   }
   .update-actions {
     margin-top: 12px;

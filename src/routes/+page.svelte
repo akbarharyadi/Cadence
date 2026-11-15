@@ -230,6 +230,7 @@
     if (typing) return;
     // The command palette and the shortcut help have the keyboard (see AppKeys.svelte).
     if (overlays.paletteOpen || overlays.helpOpen) return;
+    // (Escape with nothing above the page clears a song selection: AppKeys.svelte.)
     // An open dialog or menu has the keyboard (Escape, arrows, Space in its own controls).
     if (app.menu || target.closest("[aria-modal='true'], [role=menu]")) return;
     if (e.altKey && !e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {

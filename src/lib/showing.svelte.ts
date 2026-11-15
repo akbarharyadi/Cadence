@@ -20,15 +20,25 @@ class Showing {
 }
 const signal = new Showing();
 
+/** `html.page-hidden` while the page can't be seen: app.css pauses every CSS animation then (a
+ *  window hidden in the tray on Linux or macOS may keep "visible" and keep drawing). */
+function mark(showing: boolean) {
+  if (typeof document !== "undefined") document.documentElement?.classList.toggle("page-hidden", !showing);
+}
+
 function update() {
   const now = windowVisible && docVisible();
   if (now === lastShowing) return;
   lastShowing = now;
   signal.on = now;
+  mark(now);
   for (const f of [...listeners]) f(now);
 }
 
-if (typeof document !== "undefined") document.addEventListener("visibilitychange", update);
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", update);
+  if (!lastShowing) mark(false);
+}
 
 /** True while the page can be seen. Reactive in components and effects. */
 export function pageShowing(): boolean {

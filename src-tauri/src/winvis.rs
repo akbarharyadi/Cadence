@@ -4,9 +4,15 @@
 //! On showing it again the page gets one fresh status first, so the first frame is right.
 //!
 //! The state follows Tauri's window events, nothing polls: the main window's close-to-tray hide
-//! and `tray::show_main`, and `WindowEvent::Resized` (Windows sends a 0×0 size when a window is
-//! minimized and its real size when it's restored). On phones nothing here changes: every window
-//! counts as visible and gets every update (the Android notification is driven from them).
+//! and `tray::show_main`, and, for minimizing, the window's own minimized state (`is_minimized`,
+//! Win32 `IsIconic`) asked on every `Moved` and `Resized` event. The size those events carry can't
+//! tell: Cadence's windows have no system frame, so tao makes the client area the whole window
+//! (its `WM_NCCALCSIZE`), and a minimized window keeps a small non-zero size (the iconic
+//! placeholder at −32000, −32000); Tauri also replaces tao's size with `inner_size()` (tauri-
+//! runtime-wry `WindowEventWrapper::parse`). Minimizing moves the window there (`Moved`), and
+//! restoring moves it back and sizes it (`Moved`, `Resized`). On phones nothing here changes:
+//! every window counts as visible and gets every update (the Android notification is driven from
+//! them).
 #![cfg_attr(mobile, allow(dead_code))]
 
 use parking_lot::Mutex;
@@ -34,8 +40,8 @@ pub enum WinEvent {
     Hide,
     /// Shown and restored (the tray, the taskbar, a second start).
     Show,
-    /// A new size: 0×0 is minimized.
-    Resized { width: u32, height: u32 },
+    /// The window moved or changed size: whether it is minimized now (asked of the window).
+    Minimized(bool),
     Opened,
     Closed,
 }
@@ -106,9 +112,9 @@ impl Windows {
                     *w = Win::default();
                 }
             }
-            WinEvent::Resized { width, height } => {
+            WinEvent::Minimized(minimized) => {
                 if let Some(w) = self.slot(label) {
-                    w.minimized = width == 0 || height == 0;
+                    w.minimized = minimized;
                 }
             }
         }
@@ -236,25 +242,43 @@ mod tests {
     }
 
     #[test]
-    fn minimize_is_a_zero_size_and_restore_a_real_one() {
+    fn minimizing_and_restoring_flip_once_each() {
         let mut w = main_only();
-        assert_eq!(w.apply(MAIN, WinEvent::Resized { width: 1320, height: 860 }), None);
-        assert_eq!(w.apply(MAIN, WinEvent::Resized { width: 0, height: 0 }), Some(false));
-        assert_eq!(w.apply(MAIN, WinEvent::Resized { width: 0, height: 0 }), None);
-        assert_eq!(w.apply(MAIN, WinEvent::Resized { width: 1320, height: 860 }), Some(true));
+        // A plain move or resize of a window on screen changes nothing.
+        assert_eq!(w.apply(MAIN, WinEvent::Minimized(false)), None);
+        // Minimizing: `Moved` (to −32000, −32000), then `Resized` (the placeholder's size).
+        assert_eq!(w.apply(MAIN, WinEvent::Minimized(true)), Some(false));
+        assert_eq!(w.apply(MAIN, WinEvent::Minimized(true)), None, "the second event of the pair");
+        assert!(!w.visible(MAIN));
+        assert_eq!(w.targets(false), Targets::Only(vec![]), "no position ticks while minimized");
+        // Restoring: `Moved` back, then `Resized`: one flip, which sends a fresh status first.
+        let flipped = w.apply(MAIN, WinEvent::Minimized(false));
+        assert_eq!(flipped, Some(true));
+        assert_eq!(steps(flipped.unwrap())[0], Step::FreshStatus);
+        assert_eq!(w.apply(MAIN, WinEvent::Minimized(false)), None);
+        assert_eq!(w.targets(false), Targets::All);
+    }
+
+    #[test]
+    fn minimizing_is_like_hiding_in_the_tray() {
+        let (mut tray, mut min) = (main_only(), main_only());
+        assert_eq!(tray.apply(MAIN, WinEvent::Hide), min.apply(MAIN, WinEvent::Minimized(true)));
+        assert_eq!(tray.targets(false), min.targets(false));
+        assert_eq!(tray.apply(MAIN, WinEvent::Show), min.apply(MAIN, WinEvent::Minimized(false)));
+        assert_eq!(tray.targets(false), min.targets(false));
     }
 
     #[test]
     fn hidden_and_minimized_needs_showing() {
         let mut w = main_only();
-        w.apply(MAIN, WinEvent::Resized { width: 0, height: 0 });
+        w.apply(MAIN, WinEvent::Minimized(true));
         assert_eq!(w.apply(MAIN, WinEvent::Hide), None, "already not visible");
         // Restored while still hidden in the tray: still not visible.
-        assert_eq!(w.apply(MAIN, WinEvent::Resized { width: 800, height: 600 }), None);
+        assert_eq!(w.apply(MAIN, WinEvent::Minimized(false)), None);
         assert!(!w.visible(MAIN));
         assert_eq!(w.apply(MAIN, WinEvent::Show), Some(true));
         // `show_main` also unminimizes: the restore that follows changes nothing.
-        assert_eq!(w.apply(MAIN, WinEvent::Resized { width: 800, height: 600 }), None);
+        assert_eq!(w.apply(MAIN, WinEvent::Minimized(false)), None);
     }
 
     #[test]
@@ -263,8 +287,8 @@ mod tests {
         assert!(!w.visible(MINI));
         assert_eq!(w.apply(MINI, WinEvent::Opened), None);
         assert!(w.visible(MINI));
-        assert_eq!(w.apply(MINI, WinEvent::Resized { width: 0, height: 0 }), Some(false));
-        assert_eq!(w.apply(MINI, WinEvent::Resized { width: 420, height: 140 }), Some(true));
+        assert_eq!(w.apply(MINI, WinEvent::Minimized(true)), Some(false));
+        assert_eq!(w.apply(MINI, WinEvent::Minimized(false)), Some(true));
         assert_eq!(w.apply(MINI, WinEvent::Closed), None);
         assert_eq!(w.mini, None);
         // Events for a closed mini player do nothing.
@@ -294,7 +318,7 @@ mod tests {
     fn main_minimized_and_mini_visible() {
         let mut w = main_only();
         w.apply(MINI, WinEvent::Opened);
-        w.apply(MAIN, WinEvent::Resized { width: 0, height: 0 });
+        w.apply(MAIN, WinEvent::Minimized(true));
         assert_eq!(w.targets(false), Targets::Only(vec![MINI]));
     }
 
@@ -302,7 +326,7 @@ mod tests {
     fn mini_hidden_and_main_visible() {
         let mut w = main_only();
         w.apply(MINI, WinEvent::Opened);
-        w.apply(MINI, WinEvent::Resized { width: 0, height: 0 });
+        w.apply(MINI, WinEvent::Minimized(true));
         assert_eq!(w.targets(false), Targets::Only(vec![MAIN]));
     }
 
@@ -312,7 +336,7 @@ mod tests {
         w.apply(MAIN, WinEvent::Hide);
         assert_eq!(w.targets(false), Targets::Only(vec![]));
         w.apply(MINI, WinEvent::Opened);
-        w.apply(MINI, WinEvent::Resized { width: 0, height: 0 });
+        w.apply(MINI, WinEvent::Minimized(true));
         assert_eq!(w.targets(false), Targets::Only(vec![]));
         assert_eq!(w.targets(true), Targets::All);
     }
