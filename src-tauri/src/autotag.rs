@@ -132,15 +132,10 @@ fn tried_file(dir: &Path) -> PathBuf {
     dir.join("autotag.json")
 }
 fn load_tried(dir: &Path) -> HashSet<String> {
-    std::fs::read(tried_file(dir))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    crate::state::read_json(&tried_file(dir))
 }
 fn save_tried(dir: &Path, tried: &HashSet<String>) {
-    if let Ok(b) = serde_json::to_vec(tried) {
-        let _ = std::fs::write(tried_file(dir), b);
-    }
+    crate::state::write_json(&tried_file(dir), tried);
 }
 
 /// Writes what was found into the file and refreshes the library.

@@ -232,12 +232,14 @@ pub fn check(picks: Vec<Discovery>, library: &[Track]) -> Vec<Discovery> {
             log::info!("dropping suggestion not found in the catalogue: {} - {}", d.artist, d.title);
         }
     }
-    out
+    // The catalogue's spelling can make two suggestions one song.
+    crate::ai::distinct_picks(out)
 }
 
-/// Saved suggestions without the ones the listener has now (got since, or had under other names).
+/// Saved suggestions without the ones the listener has now (got since, or had under other names),
+/// each song once (saved lists may have it twice).
 pub fn still_new(picks: Vec<Discovery>, library: &[Track]) -> Vec<Discovery> {
-    picks.into_iter().filter(|d| !owned(d, library) && !album_owned(d, library)).collect()
+    crate::ai::distinct_picks(picks.into_iter().filter(|d| !owned(d, library) && !album_owned(d, library)).collect())
 }
 
 /// Notes the other names of saved suggestions that don't have them yet (saved by an older version,

@@ -10,11 +10,21 @@
   let stats = $state<ListeningStats | null>(null);
   let tab = $state<"songs" | "artists" | "albums">("songs");
 
+  let error = $state("");
   $effect(() => {
     const r = range;
     // Again when a play is counted, so the page stays current while music plays.
     void app.listening;
-    api.listeningStats(r).then((s) => r === range && (stats = s));
+    api
+      .listeningStats(r)
+      .then((s) => {
+        if (r !== range) return;
+        stats = s;
+        error = "";
+      })
+      .catch((e) => {
+        if (r === range) error = String(e);
+      });
   });
 
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -84,7 +94,13 @@
     />
   </div>
 
-  {#if stats}
+  {#if error && (!stats || stats.range !== range)}
+    <p class="empty failed">Couldn't read your listening history: {error}</p>
+  {:else if !stats}
+    <div class="tiles" aria-busy="true" aria-label="Loading">
+      {#each [0, 1, 2, 3] as i (i)}<div class="tile ghost"><span class="num">–</span><span class="what">&nbsp;</span></div>{/each}
+    </div>
+  {:else}
     <div class="tiles">
       <div class="tile"><span class="num">{hours(stats.minutes)}</span><span class="what">listening</span></div>
       <div class="tile"><span class="num">{stats.finished}</span><span class="what">{stats.finished === 1 ? "song" : "songs"} played to the end</span></div>
@@ -220,6 +236,12 @@
   }
   .empty {
     color: var(--text-2);
+  }
+  .empty.failed {
+    color: var(--warn);
+  }
+  .tile.ghost .num {
+    color: var(--text-3);
   }
   .tabs {
     margin-bottom: 14px;

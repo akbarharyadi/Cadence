@@ -1,22 +1,29 @@
 <script lang="ts">
-  // Phone navigation: the sidebar's main places as a tab bar at the bottom of the screen.
+  // Phone navigation: the sidebar's main places as a tab bar at the bottom of the screen. Library
+  // opens a page listing everything else the sidebar has (Artists, playlists, Needs Attention…).
   import { app, type View } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
 
-  const tabs: { label: string; icon: string; view: View; match: string[] }[] = [
-    { label: "Listen Now", icon: "home", view: { name: "home" }, match: ["home"] },
-    { label: "Albums", icon: "album", view: { name: "albums" }, match: ["albums", "album", "recent"] },
-    { label: "Songs", icon: "song", view: { name: "songs" }, match: ["songs", "favorites", "artists", "artist", "playlist", "similar"] },
-    { label: "Search", icon: "search", view: { name: "search", query: "" }, match: ["search"] },
-    { label: "Settings", icon: "settings", view: { name: "settings" }, match: ["settings", "sound"] },
+  const tabs: { label: string; icon: string; view: View; sections: string[] }[] = [
+    { label: "Listen Now", icon: "home", view: { name: "home" }, sections: ["home", "discover", "stats"] },
+    { label: "Albums", icon: "album", view: { name: "albums" }, sections: ["albums", "recent"] },
+    { label: "Library", icon: "song", view: { name: "library" }, sections: ["library", "songs", "artists", "favorites", "attention", "health", "playlist"] },
+    { label: "Search", icon: "search", view: { name: "search", query: "" }, sections: ["search"] },
+    { label: "Settings", icon: "settings", view: { name: "settings" }, sections: ["settings", "sound"] },
   ];
+
+  /** The section the page on screen belongs to (playlists are all under Library). */
+  const section = $derived(app.section.startsWith("playlist:") ? "playlist" : app.section);
 </script>
 
 <nav class="tabs" aria-label="Main">
   {#each tabs as t (t.label)}
-    {@const active = t.match.includes(app.view.name)}
+    {@const active = t.sections.includes(section)}
     <button class:active onclick={() => app.go(t.view)} aria-current={active ? "page" : undefined}>
-      <Icon name={t.icon} size={21} />
+      <span class="icon">
+        <Icon name={t.icon} size={21} />
+        {#if t.view.name === "library" && app.attentionCount > 0}<span class="dot" aria-label="{app.attentionCount} to fix"></span>{/if}
+      </span>
       <span>{t.label}</span>
     </button>
   {/each}
@@ -48,5 +55,18 @@
   }
   button.active {
     color: var(--accent);
+  }
+  .icon {
+    position: relative;
+  }
+  /* Needs Attention has something to fix (the number is on the Library page). */
+  .dot {
+    position: absolute;
+    top: -1px;
+    right: -4px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
   }
 </style>

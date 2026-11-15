@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Don't ask LRCLIB again for a song it didn't have within this many days.
 const RETRY_MISSING_DAYS: u64 = 14;
 /// Bumped when the lookup gets better, so earlier "not found" answers are checked again.
-const LOOKUP_VERSION: u32 = 3;
+const LOOKUP_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Line {
@@ -543,15 +543,89 @@ impl From<RawHit> for Hit {
     }
 }
 
-/// Searches LRCLIB for any text (title, artist, a line of the lyrics).
+/// Searches LRCLIB for any text (it looks in titles, artists and albums).
 pub fn search(query: &str) -> Result<Vec<Hit>, String> {
     let url = format!("https://lrclib.net/api/search?q={}", urlencoding::encode(query.trim()));
-    let r = get(&http()?, &url)?;
+    search_url(&http()?, &url)
+}
+
+fn search_url(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<Hit>, String> {
+    let r = get(client, url)?;
     if !r.status().is_success() {
         return Err(format!("LRCLIB answered {}", r.status()));
     }
     let raw: Vec<RawHit> = r.json().map_err(|e| format!("Unexpected answer from LRCLIB: {e}"))?;
     Ok(raw.into_iter().take(30).map(Hit::from).collect())
+}
+
+/// With this many results the looser searches aren't needed.
+const ENOUGH_HITS: usize = 5;
+
+/// The searches for a song, strictest first: LRCLIB's fields (title, artist, album), then the
+/// title and artist as free text (the album is often a compilation LRCLIB lists under the
+/// original one, or the artist is spelt another way there), then the title alone.
+fn search_urls(title: &str, artist: &str, album: &str) -> Vec<String> {
+    let (title, artist, album) = (title.trim(), artist.trim(), album.trim());
+    let e = |s: &str| urlencoding::encode(s).into_owned();
+    let free = |s: &str| format!("https://lrclib.net/api/search?q={}", e(s));
+    let mut out = Vec::new();
+    if title.is_empty() {
+        // Nothing to look for by title: the credits as free text.
+        let q = format!("{artist} {album}");
+        if !q.trim().is_empty() {
+            out.push(free(q.trim()));
+        }
+        return out;
+    }
+    let mut fields = format!("https://lrclib.net/api/search?track_name={}", e(title));
+    if !artist.is_empty() {
+        fields += &format!("&artist_name={}", e(artist));
+    }
+    if !album.is_empty() {
+        fields += &format!("&album_name={}", e(album));
+    }
+    out.push(fields);
+    if !artist.is_empty() {
+        out.push(free(&format!("{title} {artist}")));
+    }
+    out.push(free(title));
+    out
+}
+
+/// Adds the results not already there.
+fn merge(into: &mut Vec<Hit>, found: Vec<Hit>) {
+    for h in found {
+        if !into.iter().any(|x| x.id == h.id) {
+            into.push(h);
+        }
+    }
+}
+
+/// Searches LRCLIB for a song by its title, artist and album, loosening the search while it
+/// finds few results (see `search_urls`). Unranked: see `rank_hits`. Err only when LRCLIB
+/// couldn't be asked at all.
+pub fn search_song(title: &str, artist: &str, album: &str) -> Result<Vec<Hit>, String> {
+    let urls = search_urls(title, artist, album);
+    if urls.is_empty() {
+        return Ok(Vec::new());
+    }
+    let client = http()?;
+    let mut hits = Vec::new();
+    for (i, url) in urls.iter().enumerate() {
+        if i > 0 && hits.len() >= ENOUGH_HITS {
+            break;
+        }
+        match search_url(&client, url) {
+            Ok(found) => merge(&mut hits, found),
+            // Unreachable or busy: the next searches would fail the same way, slowly.
+            Err(e) if i == 0 => return Err(e),
+            Err(e) => {
+                log::info!("lyrics search: {e}");
+                break;
+            }
+        }
+    }
+    Ok(hits)
 }
 
 /// Downloads one LRCLIB entry.
@@ -690,24 +764,153 @@ fn album_core(album: &str) -> String {
     first.split(['(', '[']).next().unwrap_or(first).trim().to_lowercase()
 }
 
+/// Letters and digits, lower case, accents dropped ("Beyoncé" → "beyonce"). Only Latin letters
+/// lose their marks: kana keep their dakuten (か and が differ), Hangul isn't taken apart.
+fn fold(s: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    let mut out = String::new();
+    for c in s.chars() {
+        if (c as u32) < 0x250 {
+            out.extend(std::iter::once(c).nfkd().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase));
+        } else if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
+        }
+    }
+    out
+}
+
+/// A name's words in order, folded ("Yonezu, Kenshi" and "Kenshi Yonezu" give the same).
+fn word_set(s: &str) -> String {
+    let mut words: Vec<String> = s.split(|c: char| !c.is_alphanumeric()).map(fold).filter(|w| !w.is_empty()).collect();
+    words.sort();
+    words.join(" ")
+}
+
+/// How a result's name compares with ours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Fit {
+    Same,
+    /// Can't tell: written in other letters (米津玄師, Kenshi Yonezu), or one of them is unknown.
+    Unsure,
+    Different,
+}
+
+/// The names in a credit (see `names`), each also read in Latin letters when written in Chinese,
+/// Japanese or Korean ones (the lyrics view's reader, `romanize`): りりあ → "riria",
+/// 周杰伦 → "zhōu jié lún", compared without its tone marks.
+fn spellings(credit: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for n in names(credit) {
+        if crate::autotag::cjk(&n) {
+            let latin = crate::romanize::lines(std::slice::from_ref(&n));
+            if let Some(l) = latin.into_iter().next().filter(|l| !fold(l).is_empty()) {
+                out.push(l);
+            }
+        }
+        out.push(n);
+    }
+    out
+}
+
+fn unknown_artist(s: &str) -> bool {
+    let f = fold(s);
+    f.is_empty() || f == "unknownartist" || f == "variousartists" || f == "unknown"
+}
+
+/// Whether a result's artist is ours: a shared name (also an alias, a name in other words'
+/// order, without accents, or read in Latin letters: りりあ。 and Riria.). Names in other letters
+/// that can't be read alike are `Unsure`, so a song tagged 米津玄師 and listed as Kenshi Yonezu
+/// isn't taken for another artist's.
+pub fn artist_fit(ours: &str, theirs: &str) -> Fit {
+    if unknown_artist(ours) || unknown_artist(theirs) {
+        return Fit::Unsure;
+    }
+    let (a, b) = (spellings(ours), spellings(theirs));
+    let shared = a.iter().any(|x| {
+        b.iter().any(|y| {
+            let (fx, fy) = (fold(x), fold(y));
+            // One name inside the other ("Wuthering Waves" in "Wuthering Waves Official"), but
+            // not "AI" inside "Aimer": four letters, or two Chinese / Japanese ones.
+            let short = fx.chars().count().min(fy.chars().count());
+            let long_enough = short >= 4 || (short >= 2 && crate::autotag::cjk(x) && crate::autotag::cjk(y));
+            !fx.is_empty() && (fx == fy || (long_enough && (fx.contains(&fy) || fy.contains(&fx))) || word_set(x) == word_set(y))
+        })
+    });
+    if shared {
+        Fit::Same
+    } else if crate::autotag::cjk(ours) != crate::autotag::cjk(theirs) {
+        Fit::Unsure
+    } else {
+        Fit::Different
+    }
+}
+
+/// Whether a result is our song's title: the same core title (or its Latin or other half), or
+/// `Unsure` when written in other letters.
+fn title_fit(ours: &str, theirs: &str) -> Fit {
+    let theirs_core = fold(theirs.split(['(', '[', '（', '【']).next().unwrap_or(theirs));
+    if fold(ours).is_empty() || theirs_core.is_empty() {
+        return Fit::Unsure;
+    }
+    let same = title_queries(ours).iter().map(|q| fold(q)).filter(|q| !q.is_empty()).any(|q| q == theirs_core || q.contains(&theirs_core) || theirs_core.contains(&q));
+    if same {
+        Fit::Same
+    } else if crate::autotag::cjk(ours) != crate::autotag::cjk(theirs) {
+        Fit::Unsure
+    } else {
+        Fit::Different
+    }
+}
+
+/// The same album, ignoring " - EP", "(Deluxe)" and the like.
+fn album_matches(ours: &str, theirs: &str) -> bool {
+    let (a, b) = (fold(&album_core(ours)), fold(&album_core(theirs)));
+    a.chars().count() >= 4 && b.chars().count() >= 4 && (a.contains(&b) || b.contains(&a))
+}
+
+/// How far a result's length is from the song's: 0 within 2 s (LRCLIB's own tolerance, almost
+/// surely this recording, and timed lyrics fit it), 1 within 5 s or unknown, 2 further.
+fn length_fit(ours: f64, theirs: f64) -> u8 {
+    if ours <= 0.0 || theirs <= 0.0 {
+        return 1;
+    }
+    match (ours - theirs).abs() {
+        d if d <= 2.0 => 0,
+        d if d <= 5.0 => 1,
+        _ => 2,
+    }
+}
+
+/// Orders search results, best first: our artist (then the unsure ones, other artists last),
+/// our title, length within 2 s (then 5 s), our album, timed over plain text over
+/// instrumental, then the closest length. Nothing is dropped: tags can be wrong.
+pub fn rank_hits(hits: &mut [Hit], w: &Wanted) {
+    hits.sort_by_cached_key(|h| {
+        (
+            artist_fit(w.artist, &h.artist),
+            title_fit(w.title, &h.title),
+            length_fit(w.duration, h.duration),
+            !album_matches(w.album, &h.album),
+            if h.synced { 0u8 } else if h.instrumental { 2 } else { 1 },
+            if w.duration > 0.0 { ((h.duration - w.duration).abs() * 1000.0) as u64 } else { 0 },
+        )
+    });
+}
+
 /// Whether a search result is credited like our song: a shared artist or the same album.
 /// Common titles ("Paper Plane") have many songs of the same length, so length alone isn't enough.
 pub fn credits_match(w: &Wanted, h: &Hit) -> bool {
-    let ours = names(w.artist);
-    let theirs = names(&h.artist);
-    let artist = ours.iter().any(|a| theirs.iter().any(|b| a == b || a.contains(b.as_str()) || b.contains(a.as_str())));
-    let (a, b) = (album_core(w.album), album_core(&h.album));
-    let album = a.chars().count() >= 4 && b.chars().count() >= 4 && (a.contains(&b) || b.contains(&a));
-    artist || album
+    artist_fit(w.artist, &h.artist) == Fit::Same || album_matches(w.album, &h.album)
 }
 
-/// Finds a song on LRCLIB by searching its title and picking the result of the same length and credits.
+/// Finds a song on LRCLIB by searching its title with its credits (see `search_song`) and
+/// picking the result of the same length and credits.
 /// Err when LRCLIB couldn't be asked properly (so "not found" isn't remembered).
 pub fn search_best(w: &Wanted) -> Result<Option<Lyrics>, ()> {
     let title = w.title;
     let mut failed = false;
     for q in title_queries(title) {
-        let Ok(hits) = search(&q) else {
+        let Ok(hits) = search_song(&q, w.artist, w.album) else {
             failed = true;
             continue;
         };
@@ -721,14 +924,20 @@ pub fn search_best(w: &Wanted) -> Result<Option<Lyrics>, ()> {
     if failed { Err(()) } else { Ok(None) }
 }
 
-/// The best search result for a song: close in length, same credits, in the title's language,
-/// synced preferred.
+/// The best search result for a song, taken without asking: within 4 s of its length, credited
+/// like it, in the title's language; of those, the first as `rank_hits` orders them (the same
+/// order the search dialog shows).
 pub fn best_hit<'a>(hits: &'a [Hit], w: &Wanted) -> Option<&'a Hit> {
     let duration = w.duration;
-    hits.iter()
+    let mut ok: Vec<Hit> = hits
+        .iter()
         .filter(|h| !h.instrumental && (duration <= 0.0 || (h.duration - duration).abs() <= 4.0))
         .filter(|h| fits(w.title, &h.preview) && credits_match(w, h))
-        .max_by_key(|h| (h.synced, -((h.duration - duration).abs() * 10.0) as i64))
+        .cloned()
+        .collect();
+    rank_hits(&mut ok, w);
+    let first = ok.first()?.id;
+    hits.iter().find(|h| h.id == first)
 }
 
 /// Asks LRCLIB (with a local cache). Err("missing") when it has nothing for this song,
@@ -959,5 +1168,106 @@ mod tests {
         assert!(!credits_match(&w, &hit("Some Pop Band", "Summer")), "same title and length isn't enough");
         assert!(credits_match(&w, &hit("Wuthering Waves", "Wuthering Waves")), "game alias");
         assert!(credits_match(&w, &hit("Someone", "Fleet Snowfluff")), "same album");
+    }
+
+    fn found(id: u64, title: &str, artist: &str, album: &str, duration: f64, synced: bool) -> Hit {
+        Hit { id, title: title.into(), artist: artist.into(), album: album.into(), duration, instrumental: false, synced, preview: String::new() }
+    }
+
+    fn order(hits: &[Hit]) -> Vec<u64> {
+        hits.iter().map(|h| h.id).collect()
+    }
+
+    #[test]
+    fn same_title_other_artists_sink() {
+        let w = Wanted { title: "The Kids From Yesterday", artist: "My Chemical Romance", album: "Danger Days: The True Lives of the Fabulous Killjoys", duration: 334.0 };
+        let mut hits = vec![
+            found(1, "The Kids From Yesterday", "Some Cover Band", "Covers", 334.0, true),
+            found(2, "The Kids from Yesterday", "Another Singer", "Live", 290.0, true),
+            found(3, "The Kids From Yesterday", "My Chemical Romance", "Danger Days: The True Lives of the Fabulous Killjoys", 335.0, false),
+            found(4, "The Kids From Yesterday", "My Chemical Romance", "May Death Never Stop You", 334.5, true),
+        ];
+        rank_hits(&mut hits, &w);
+        // Our artist first (both within 2 s, so the one on our album leads, though only it is
+        // plain text), then other artists, none dropped.
+        assert_eq!(order(&hits), [3, 4, 1, 2]);
+        // Without the album, the timed one of the same length leads.
+        let w = Wanted { album: "", ..w };
+        rank_hits(&mut hits, &w);
+        assert_eq!(order(&hits), [4, 3, 1, 2]);
+    }
+
+    #[test]
+    fn closest_length_of_our_artist_first() {
+        let w = Wanted { title: "Centuries", artist: "Fall Out Boy", album: "Greatest Hits: Believers Never Die", duration: 228.0 };
+        let mut hits = vec![
+            found(1, "Centuries", "Fall Out Boy", "American Beauty/American Psycho", 252.0, true),
+            found(2, "Centuries (Remix)", "Fall Out Boy", "Make America Psycho Again", 231.0, true),
+            found(3, "Centuries", "Fall Out Boy", "American Beauty/American Psycho", 228.4, true),
+            found(4, "Centuries", "Fall Out Boy", "American Beauty/American Psycho", 228.0, false),
+        ];
+        rank_hits(&mut hits, &w);
+        // Within 2 s first (timed over plain), then within 5 s, then further.
+        assert_eq!(order(&hits), [3, 4, 2, 1]);
+        // The automatic lookup agrees, and leaves out the one 24 s off.
+        assert_eq!(best_hit(&hits, &w).map(|h| h.id), Some(3));
+    }
+
+    #[test]
+    fn names_in_other_letters_are_unsure_not_wrong() {
+        assert_eq!(artist_fit("米津玄師", "Kenshi Yonezu"), Fit::Unsure);
+        assert_eq!(artist_fit("Kenshi Yonezu", "米津玄師"), Fit::Unsure);
+        assert_eq!(artist_fit("Kenshi Yonezu", "Yonezu Kenshi"), Fit::Same, "word order");
+        assert_eq!(artist_fit("Beyoncé", "BEYONCE"), Fit::Same, "accents and case");
+        assert_eq!(artist_fit("周杰伦", "Zhou Jielun"), Fit::Same, "read in Latin letters");
+        assert_eq!(artist_fit("Aimer", "milet"), Fit::Different);
+        assert_eq!(artist_fit("AI", "Aimer"), Fit::Different, "too short to be inside another name");
+        assert_eq!(artist_fit("", "Anyone"), Fit::Unsure);
+        // Tagged in kanji: every Latin-letter artist is unsure (米津玄師 can't be read as "Kenshi
+        // Yonezu" on the device), so among them the length decides; the same spelling leads.
+        let w = Wanted { title: "Lemon", artist: "米津玄師", album: "BOOTLEG", duration: 255.0 };
+        let mut hits = vec![
+            found(1, "Lemon", "Some Pop Band", "Citrus", 262.0, true),
+            found(2, "Lemon", "Kenshi Yonezu", "Lemon", 255.5, true),
+            found(3, "Lemon", "米津玄師", "Lemon", 255.0, false),
+        ];
+        rank_hits(&mut hits, &w);
+        assert_eq!(order(&hits), [3, 2, 1]);
+        // Tagged in Latin letters: the kanji spelling is unsure, so it stays above another
+        // Latin-letter artist even when that one is exactly as long.
+        let w = Wanted { title: "Lemon", artist: "Kenshi Yonezu", album: "", duration: 255.0 };
+        let mut hits = vec![found(1, "Lemon", "Some Pop Band", "Citrus", 255.0, true), found(2, "Lemon", "米津玄師", "Lemon", 256.0, true)];
+        rank_hits(&mut hits, &w);
+        assert_eq!(order(&hits), [2, 1]);
+    }
+
+    #[test]
+    fn missing_album_and_length_still_rank() {
+        let w = Wanted { title: "Hello", artist: "Adele", album: "", duration: 0.0 };
+        let mut hits = vec![
+            found(1, "Hello", "Lionel Richie", "", 0.0, true),
+            found(2, "Hello", "Adele", "", 0.0, false),
+            found(3, "Hello", "Adele", "25", 295.0, true),
+        ];
+        rank_hits(&mut hits, &w);
+        assert_eq!(order(&hits), [3, 2, 1]);
+    }
+
+    #[test]
+    fn searches_loosen_from_fields_to_title() {
+        assert_eq!(
+            search_urls("Lemon", "米津玄師", "BOOTLEG"),
+            [
+                "https://lrclib.net/api/search?track_name=Lemon&artist_name=%E7%B1%B3%E6%B4%A5%E7%8E%84%E5%B8%AB&album_name=BOOTLEG",
+                "https://lrclib.net/api/search?q=Lemon%20%E7%B1%B3%E6%B4%A5%E7%8E%84%E5%B8%AB",
+                "https://lrclib.net/api/search?q=Lemon",
+            ]
+        );
+        assert_eq!(search_urls(" Hello ", "", ""), ["https://lrclib.net/api/search?track_name=Hello", "https://lrclib.net/api/search?q=Hello"]);
+        assert_eq!(search_urls("", "Adele", ""), ["https://lrclib.net/api/search?q=Adele"]);
+        assert!(search_urls("", " ", "").is_empty());
+        let mut hits = vec![found(1, "A", "B", "", 1.0, true)];
+        merge(&mut hits, vec![found(1, "A", "B", "", 1.0, true), found(2, "A", "C", "", 1.0, true)]);
+        assert_eq!(order(&hits), [1, 2]);
     }
 }

@@ -11,6 +11,8 @@
   const songs = $derived(album?.trackIds.length ?? 0);
   /** Folder-made albums of untagged downloads: one cover for all of them is rarely wanted. */
   const folderAlbum = $derived(album?.artist === "Unknown Artist");
+  /** Songs cut from one file by a CUE sheet share that file, so they share its cover. */
+  const cueAlbum = $derived(!!album && app.albumTracks(album).some((t) => t.cue));
   const isAndroid = navigator.userAgent.includes("Android");
 
   let query = $state("");
@@ -73,6 +75,9 @@
         <span>{album.artist}, used for {songs === 1 ? "its song" : `all ${songs} songs`}</span>
       </span>
     </div>
+    {#if cueAlbum}
+      <p class="warn">These songs are cut from one file by a CUE sheet. A new cover is written into that whole file, so it changes the cover of every song cut from it.</p>
+    {/if}
     {#if folderAlbum}
       <p class="warn">
         These are untagged songs grouped by their folder. To give one song its own album and cover, use <b>Fix Song Info</b> in its menu

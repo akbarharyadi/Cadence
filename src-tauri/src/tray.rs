@@ -1,5 +1,6 @@
 //! Tray icon, the mini player window, and showing/hiding the main window.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -10,7 +11,15 @@ use crate::audio::Cmd;
 const TRAY_ID: &str = "cadence";
 pub const MINI_LABEL: &str = "mini";
 
+/// Whether the tray icon is there (closing the window hides it there only when it is).
+static AVAILABLE: AtomicBool = AtomicBool::new(false);
+
+pub fn available() -> bool {
+    AVAILABLE.load(Ordering::SeqCst)
+}
+
 pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let icon = app.default_window_icon().cloned().ok_or_else(|| tauri::Error::AssetNotFound("app icon".into()))?;
     let toggle = MenuItem::with_id(app, "toggle", "Play / pause", true, None::<&str>)?;
     let next = MenuItem::with_id(app, "next", "Next", true, None::<&str>)?;
     let prev = MenuItem::with_id(app, "prev", "Previous", true, None::<&str>)?;
@@ -24,7 +33,7 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     )?;
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(app.default_window_icon().cloned().expect("app icon"))
+        .icon(icon)
         .tooltip("Cadence")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -51,6 +60,7 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+    AVAILABLE.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -80,6 +90,7 @@ pub fn toggle_mini<R: Runtime>(app: &AppHandle<R>) {
         return;
     }
     let (w, h) = (420.0, 140.0);
+    // Made hidden, put in place, then shown: no jump from where the system would put it.
     let built = WebviewWindowBuilder::new(app, MINI_LABEL, WebviewUrl::App("mini".into()))
         .title("Cadence mini player")
         .inner_size(w, h)
@@ -89,17 +100,30 @@ pub fn toggle_mini<R: Runtime>(app: &AppHandle<R>) {
         .skip_taskbar(true)
         .transparent(true)
         .shadow(true)
+        .visible(false)
         .build();
     match built {
         Ok(win) => {
-            // Bottom-right of the screen the main window is on, above the taskbar.
-            if let Ok(Some(monitor)) = win.current_monitor() {
+            // Bottom-right of the screen the main window is on (the main screen when it's hidden
+            // in the tray), above the taskbar.
+            let main = app.get_webview_window("main");
+            let monitor = main
+                .as_ref()
+                .filter(|m| m.is_visible().unwrap_or(false))
+                .and_then(|m| m.current_monitor().ok().flatten())
+                .or_else(|| app.primary_monitor().ok().flatten())
+                .or_else(|| win.current_monitor().ok().flatten());
+            if let Some(monitor) = monitor {
                 let scale = monitor.scale_factor();
                 let area = monitor.work_area();
                 let x = area.position.x as f64 + area.size.width as f64 - (w + 20.0) * scale;
                 let y = area.position.y as f64 + area.size.height as f64 - (h + 20.0) * scale;
                 let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+                // Its size in that screen's pixels (it was made at the size of the screen it opened on).
+                let _ = win.set_size(tauri::LogicalSize::new(w, h));
             }
+            let _ = win.show();
+            let _ = win.set_focus();
         }
         Err(e) => log::warn!("can't open the mini player: {e}"),
     }

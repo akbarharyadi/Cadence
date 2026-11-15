@@ -318,6 +318,20 @@ input[type="checkbox"] {
     font-size: 30px !important;
   }
 }
+/* Android always has the phone layout (tab bar, docked player), also wider than 720 px
+   (landscape, tablets): the same rules by the class +page.svelte sets. */
+html.phone .titlebar {
+  display: none !important;
+}
+html.phone .content > :not(.topbar, .page-in),
+html.phone .content > .page-in > * {
+  padding-left: 16px !important;
+  padding-right: 16px !important;
+  padding-top: calc(52px + env(safe-area-inset-top)) !important;
+}
+html.phone .content {
+  padding-bottom: calc(150px + env(safe-area-inset-bottom)) !important;
+}
 
 /* ---------- Page transitions (view transitions; see `animate` in store.svelte.ts) ---------- */
 /* Only the page area moves; the sidebar, player and tab bar stay put. The names are set only

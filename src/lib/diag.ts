@@ -40,9 +40,58 @@ function text(v: unknown): string {
   }
 }
 
+/** Takes out what looks like a place on the disk (folder and file names say a lot about a
+ *  person's music): "D:\Music\Artist\01 Song.flac" becomes "<path>.flac". */
+// Folders (names may have spaces), then the last part: up to its extension, or the next space.
+const REST = String.raw`(?:[^\\/\r\n"'“”<>|]*[\\/])*(?:[^\\/\r\n"'“”<>|]*?\.[A-Za-z0-9]{2,5}\b|[^\\/\r\n"'“”<>|:;,()]*)`;
+const WINDOWS_PATH = new RegExp(String.raw`(?:\b[A-Za-z]:[\\/]|\\\\[^\\\s]+\\)` + REST, "g");
+const UNIX_PATH = new RegExp(String.raw`(?<![:/\w])/(?:storage|sdcard|home|Users|mnt|media|Volumes|run|data|tmp|var)/` + REST, "g");
+
+export function scrubPaths(s: string): string {
+  const ext = (p: string) => p.match(/\.[A-Za-z0-9]{2,5}$/)?.[0] ?? "";
+  return (
+    s
+      // Files shown through Tauri's asset protocol (the path is in the URL, encoded).
+      .replace(/\b(?:https?:\/\/asset\.localhost|asset:\/\/localhost)\/[^\s"')]+/gi, "<file>")
+      // Windows: C:\…, C:/…, \\server\share\…
+      .replace(WINDOWS_PATH, (p) => `<path>${ext(p)}`)
+      // Android, Linux, macOS: the usual places music is kept.
+      .replace(UNIX_PATH, (p) => `<path>${ext(p)}`)
+  );
+}
+
+/** Words a button's label may keep in the log: what Cadence's own buttons say. Anything else (a
+ *  song, an album, a folder's name) is left out. */
+const UI_WORDS = new Set(
+  `play pause next previous prev shuffle repeat back forward close cancel save done ok undo redo report reload retry try again update
+  restart later open remove delete add new edit fix change choose find search settings sound listen now discover your stats albums
+  album artists artist songs song favorites favorite library recently added needs attention health playlists playlist smart queue
+  up lyrics mini player volume mute unmute rescan look check ignore keep allow access skip skipping stop rating rate sleep timer
+  more menu scroll clear apply import sort filter show hide expand collapse select all yes no start radio mix mixes picture cover
+  info tags copy copies move recycle bin go to from for on off the a an of and in with as this these that it everything restore
+  yesterday today ask dj buy test key details sure use instead turn enable disable reset run`.split(/\s+/),
+);
+
+/** A clicked control, without what it's about: its `data-diag` name if it has one, else its role
+ *  and the first words of its label that are Cadence's own ("button Remove …", not the folder). */
+function tapLabel(el: Element): string {
+  const named = el.closest("[data-diag]")?.getAttribute("data-diag");
+  if (named) return clip(scrubPaths(named), 60);
+  const role = el.getAttribute("role") || el.tagName.toLowerCase();
+  const raw = (el.getAttribute("aria-label") || el.getAttribute("title") || el.textContent || "").replace(/\s+/g, " ").trim();
+  const words = raw.split(" ").filter(Boolean);
+  const kept: string[] = [];
+  for (const w of words) {
+    if (kept.length >= 4 || !UI_WORDS.has(w.toLowerCase().replace(/[…,.:!?]+$/, ""))) break;
+    kept.push(w);
+  }
+  const label = kept.join(" ") + (kept.length < words.length ? (kept.length ? " …" : "…") : "");
+  return label ? `${role} ${label}` : role;
+}
+
 /** Adds a step to the log. */
 export function note(kind: string, what: string) {
-  steps.push({ t: Date.now(), kind, text: clip(what, 160) });
+  steps.push({ t: Date.now(), kind, text: clip(scrubPaths(what), 160) });
   if (steps.length > MAX_STEPS) steps.splice(0, steps.length - MAX_STEPS);
   // Written in one go a moment later: a burst of logging costs one write.
   clearTimeout(saveTimer);
@@ -78,10 +127,9 @@ export function install() {
   document.addEventListener(
     "click",
     (e) => {
-      const el = (e.target as HTMLElement | null)?.closest?.("button, a, [role=button], [role=tab]");
+      const el = (e.target as HTMLElement | null)?.closest?.("button, a, [role=button], [role=tab], [role=option], [role=menuitem], [role=radio]");
       if (!el) return;
-      const label = el.getAttribute("aria-label") || el.getAttribute("title") || el.textContent || el.tagName;
-      note("tap", label);
+      note("tap", tapLabel(el));
     },
     true,
   );
@@ -144,20 +192,23 @@ export async function reportCrash(crash: Crash) {
   } catch {
     /* ignore */
   }
-  const title = `[Error] ${clip(crash.message, 90)}`;
+  // (The steps were cleaned when they were logged; the error itself is cleaned here.)
+  const message = scrubPaths(crash.message);
+  const title = `[Error] ${clip(message, 90)}`;
   const head = [
     "**What happened:** _(what were you doing? e.g. turned the screen off and on again)_",
     "",
-    `**Error:** ${crash.message}${crash.where ? ` (in ${crash.where})` : ""}`,
+    `**Error:** ${message}${crash.where ? ` (in ${crash.where})` : ""}`,
     `**Cadence:** ${version}`,
     `**Device:** ${navigator.userAgent}`,
     `**Screen:** ${screen.width}×${screen.height} @${devicePixelRatio}x`,
     `**When:** ${new Date(crash.at).toString()}`,
     "",
   ];
-  const stack = crash.stack ? ["<details><summary>Stack</summary>", "", "```", clip(crash.stack, 1500).replace(/ at /g, "\n at "), "```", "</details>", ""] : [];
+  const stack = crash.stack ? ["<details><summary>Stack</summary>", "", "```", clip(scrubPaths(crash.stack), 1500).replace(/ at /g, "\n at "), "```", "</details>", ""] : [];
   // GitHub refuses very long URLs (~8 KB): drop the oldest steps until it fits.
-  let log = crash.steps.map((s) => `${time(s.t)} ${s.kind.padEnd(6)} ${s.text}`);
+  // Steps saved by an older version weren't cleaned: clean them again.
+  let log = crash.steps.map((s) => `${time(s.t)} ${s.kind.padEnd(6)} ${scrubPaths(s.text)}`);
   let url = "";
   for (;;) {
     const body = [...head, ...stack, "<details open><summary>Steps before the error (newest last)</summary>", "", "```", ...log, "```", "</details>"].join("\n");

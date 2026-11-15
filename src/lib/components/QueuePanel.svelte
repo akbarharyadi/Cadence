@@ -1,19 +1,33 @@
 <script lang="ts">
-  import { api, artUrl, formatTime } from "#lib/api.js";
+  import { api, artUrl, formatTime, type Track } from "#lib/api.js";
   import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
 
   const s = $derived(app.status);
+  // The lists depend on the queue and the current index only (not the whole status, which is
+  // replaced four times a second), and only the part of the queue that is listed is walked.
+  const queue = $derived(app.status?.queue);
+  const index = $derived(app.status?.index ?? null);
+  const SHOWN = 200;
+  /** Songs waiting after the current one: the real number, whatever is listed. */
+  const upNextTotal = $derived(queue && index != null ? Math.max(0, queue.length - index - 1) : 0);
   const upNext = $derived.by(() => {
-    if (!s || s.index == null) return [];
-    return s.queue
-      .map((id, i) => ({ track: app.trackById.get(id), i }))
-      .filter((x) => x.i > s.index! && x.track)
-      .slice(0, 200);
+    if (!queue || index == null) return [];
+    const out: { track: Track | undefined; i: number }[] = [];
+    for (let i = index + 1; i < queue.length && out.length < SHOWN; i++) {
+      const track = app.trackById.get(queue[i]);
+      if (track) out.push({ track, i });
+    }
+    return out;
   });
   const history = $derived.by(() => {
-    if (!s || s.index == null) return [];
-    return s.queue.slice(0, s.index).map((id, i) => ({ track: app.trackById.get(id), i })).filter((x) => x.track).slice(-20);
+    if (!queue || index == null) return [];
+    const out: { track: Track | undefined; i: number }[] = [];
+    for (let i = Math.max(0, index - 20); i < index; i++) {
+      const track = app.trackById.get(queue[i]);
+      if (track) out.push({ track, i });
+    }
+    return out;
   });
 
   // Dragging a waiting song to another place (queue positions).
@@ -33,7 +47,7 @@
       <button class="icon-btn" onclick={() => app.saveQueueAsPlaylist()} disabled={!s?.queue.length} aria-label="Save the queue as a playlist" title="Save the queue as a playlist">
         <Icon name="playlist" size={16} />
       </button>
-      <button class="icon-btn" onclick={() => app.clearUpNext()} disabled={!upNext.length} aria-label="Clear Up Next" title="Clear Up Next (the playing song stays)">
+      <button class="icon-btn" onclick={() => app.clearUpNext()} disabled={!upNextTotal} aria-label="Clear Up Next" title="Clear Up Next (the playing song stays)">
         <Icon name="trash" size={16} />
       </button>
       <button class="icon-btn" onclick={() => (app.queueOpen = false)} aria-label="Close"><Icon name="close" size={16} /></button>
@@ -49,7 +63,9 @@
     {/if}
 
     {#if upNext.length}
-      <div class="label">Next, {s?.repeat === "all" ? "then repeating" : `${upNext.length} ${upNext.length === 1 ? "song" : "songs"}`}</div>
+      <div class="label">
+        Next, {s?.repeat === "all" ? "then repeating" : `${upNextTotal} ${upNextTotal === 1 ? "song" : "songs"}`}{upNextTotal > upNext.length && upNext.length >= SHOWN ? ` (first ${SHOWN} shown)` : ""}
+      </div>
       {#each upNext as { track, i } (i)}
         <div
           class="item"

@@ -21,12 +21,22 @@
   }
 
   $effect(() => {
-    if (!track) return;
+    const el = track;
+    if (!el) return;
     update();
     const ro = new ResizeObserver(update);
-    ro.observe(track);
-    for (const c of track.children) ro.observe(c);
-    return () => ro.disconnect();
+    ro.observe(el);
+    for (const c of el.children) ro.observe(c);
+    // Cards that come later (mixes made, picks found): watch them too, and look again.
+    const mo = new MutationObserver((changes) => {
+      for (const c of changes) for (const n of c.addedNodes) if (n instanceof Element) ro.observe(n);
+      update();
+    });
+    mo.observe(el, { childList: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+    };
   });
 </script>
 
@@ -107,5 +117,8 @@
     .arrows {
       display: none;
     }
+  }
+  :global(html.phone) .arrows {
+    display: none;
   }
 </style>

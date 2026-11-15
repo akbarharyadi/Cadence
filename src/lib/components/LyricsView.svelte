@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, formatTime, type LyricLine, type Lyrics, type LyricsHit } from "#lib/api.js";
-  import { app, livePosition } from "#lib/store.svelte.js";
+  import { app } from "#lib/store.svelte.js";
   import { untrack } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
   import Icon from "./Icon.svelte";
@@ -85,9 +85,29 @@
     else delete all[offsetKey];
     localStorage.setItem(OFFSETS, JSON.stringify(all));
   }
-  /** Where the song is, as the lyrics see it (30 times a second, for the sweep). */
-  const live = livePosition();
-  const pos = $derived(live.value - offset);
+  /**
+   * Where the song is, as the lyrics see it (30 times a second, for the sweep). The timer runs only
+   * while timed lyrics are on screen, the song is playing and the window is visible; otherwise the
+   * position follows the player's own four updates a second.
+   */
+  let live = $state(app.position);
+  let visible = $state(typeof document === "undefined" || document.visibilityState === "visible");
+  const playing = $derived(!!app.status?.playing);
+  $effect(() => {
+    const onVis = () => (visible = document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  });
+  $effect(() => {
+    if (!(lyrics?.synced.length && panel === null && playing && visible)) {
+      live = app.position;
+      return;
+    }
+    live = untrack(() => app.exactPosition()); // untracked: it reads the status, which is replaced four times a second
+    const timer = setInterval(() => (live = app.exactPosition()), 33);
+    return () => clearInterval(timer);
+  });
+  const pos = $derived(live - offset);
 
   /** Index of the line being sung (slightly early, so the eye gets there in time). */
   const active = $derived.by(() => {
@@ -98,13 +118,29 @@
     return i;
   });
 
+  // The user is reading ahead: wheel, touch, keyboard, or any other scroll that isn't our own.
+  // Our own scrolls (below) are marked for as long as they can last, so their `scroll` events
+  // aren't taken for the user's.
+  let ownScrollUntil = 0;
+  const markUser = () => (userScrolledAt = Date.now());
+  function onScroll() {
+    if (Date.now() > ownScrollUntil) markUser();
+  }
+  function onKey(e: KeyboardEvent) {
+    if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) markUser();
+  }
+  function centre(el: HTMLElement | undefined, smooth: boolean) {
+    if (!el) return;
+    ownScrollUntil = Date.now() + (smooth ? 1200 : 150);
+    el.scrollIntoView({ behavior: smooth ? "smooth" : "instant", block: "center" });
+  }
+
   // Keep the current line in the middle, unless the user has just scrolled to read ahead.
   $effect(() => {
     const i = active;
     void roman; // pronunciation lines change the layout: centre again
     if (i < 0 || !box || Date.now() - userScrolledAt < 4000) return;
-    const el = box.querySelectorAll<HTMLElement>(".line")[i];
-    el?.scrollIntoView({ behavior: reducedMotion() ? "instant" : "smooth", block: "center" });
+    centre(box.querySelectorAll<HTMLElement>(".line")[i], !reducedMotion());
   });
 
   // The window (or the lyrics' column) changed size: the lines wrap differently, so the current
@@ -118,8 +154,7 @@
       if (now === last) return;
       last = now;
       if (Date.now() - userScrolledAt < 4000) return;
-      const line = el.querySelectorAll<HTMLElement>(".line")[untrack(() => active)];
-      line?.scrollIntoView({ behavior: "instant", block: "center" });
+      centre(el.querySelectorAll<HTMLElement>(".line")[untrack(() => active)], false);
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -197,7 +232,10 @@
   // ---------- find / fix lyrics ----------
 
   let panel = $state<"search" | "paste" | "voice" | null>(null);
-  let query = $state("");
+  // What's searched for, prefilled from the song's tags (editable: tags can be wrong).
+  let query = $state({ title: "", artist: "", album: "" });
+  // The song the search fields and results are for (they're filled again for another song).
+  let searchedFor = "";
   let hits = $state<LyricsHit[] | null>(null);
   let busy = $state<"" | "search" | "ai" | "use">("");
   let error = $state("");
@@ -206,22 +244,31 @@
   function openSearch() {
     panel = "search";
     error = "";
-    if (!query && track) {
+    if (searchedFor !== trackId && track) {
+      searchedFor = trackId;
+      hits = null;
       const title = track.title.split(/[(\[（【]/)[0].trim();
       const latin = title.replace(/[^\x00-\x7F]/g, "").trim();
-      query = latin.replace(/[^A-Za-z0-9]/g, "").length >= 2 ? latin : title;
+      query = {
+        title: latin.replace(/[^A-Za-z0-9]/g, "").length >= 2 ? latin : title,
+        artist: track.artist ?? "",
+        album: track.album ?? "",
+      };
     }
     if (!hits) runSearch();
   }
 
   async function runSearch() {
-    if (!query.trim()) return;
+    const { title, artist, album } = query;
+    if (!title.trim() && !artist.trim()) return;
+    const id = trackId;
     busy = "search";
     error = "";
     try {
-      hits = await api.searchLyrics(query);
+      const found = await api.searchLyrics(id, title, artist, album);
+      if (id === trackId) hits = found;
     } catch (e) {
-      error = String(e);
+      if (id === trackId) error = String(e);
     } finally {
       busy = "";
     }
@@ -467,10 +514,16 @@
         <h3>Search lyrics</h3>
         <button class="icon-btn" aria-label="Close" onclick={() => (panel = null)}><Icon name="close" size={16} /></button>
       </div>
-      <form class="search" onsubmit={(e) => { e.preventDefault(); runSearch(); }}>
-        <Icon name="search" size={16} />
-        <input bind:value={query} placeholder="Title, artist or a line from the song" aria-label="Search lyrics" />
-        <button class="pill" type="submit" disabled={busy === "search"}>{busy === "search" ? "Searching…" : "Search"}</button>
+      <form class="query" onsubmit={(e) => { e.preventDefault(); runSearch(); }}>
+        <div class="search">
+          <Icon name="search" size={16} />
+          <input bind:value={query.title} placeholder="Title" aria-label="Title" />
+          <button class="pill" type="submit" disabled={busy === "search"}>{busy === "search" ? "Searching…" : "Search"}</button>
+        </div>
+        <div class="credits">
+          <label class="search small-field"><span>Artist</span><input bind:value={query.artist} placeholder="Any" /></label>
+          <label class="search small-field"><span>Album</span><input bind:value={query.album} placeholder="Any" /></label>
+        </div>
       </form>
       {#if app.aiReady}
         <button class="ai" onclick={findWithAi} disabled={busy === "ai"}>
@@ -495,7 +548,7 @@
             </button>
           </li>
         {:else}
-          {#if hits && busy !== "search"}<li class="none">Nothing found. Try fewer words, or the title in another language.</li>{/if}
+          {#if hits && busy !== "search"}<li class="none">Nothing found. Try fewer words, no album, or the title in another language.</li>{/if}
         {/each}
       </ul>
       <button class="link small" onclick={() => (panel = "paste")}>Paste lyrics instead</button>
@@ -538,7 +591,7 @@
       {/if}
     </div>
   {:else}
-    <div class="lyrics" bind:this={box} onwheel={() => (userScrolledAt = Date.now())}>
+    <div class="lyrics" role="presentation" bind:this={box} onwheel={markUser} ontouchmove={markUser} onkeydown={onKey} onscroll={onScroll}>
       {#if loading}
         <p class="status">Looking for lyrics…</p>
       {:else if lyrics?.instrumental}
@@ -546,7 +599,7 @@
       {:else if lyrics?.synced.length}
         <div class="pad"></div>
         {#each lyrics.synced as line, i}
-          <button class="line" class:active={i === active} class:past={i < active} class:gap={!line.text} style="--c: {singerColor(line)}; --ct: {tint(singerColor(line))}" onclick={() => app.seek(line.time)}>
+          <button class="line" class:active={i === active} class:past={i < active} class:gap={!line.text} style="--c: {singerColor(line)}; --ct: {tint(singerColor(line))}" onclick={() => app.seek(Math.max(0, line.time + offset))}>
             {#if singerLabels[i]}<span class="who"><i></i>{singerLabels[i]}</span>{/if}
             {#if i === active && line.text}
               {#each sweep as p}<span class="w" style="--p: {progress(p) * 100}%">{p.text}</span>{/each}
@@ -958,6 +1011,31 @@
     font-size: 14.5px;
     color: white;
     user-select: text;
+  }
+  .query {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  /* Artist and album: smaller fields under the title, in the same glass. */
+  .credits {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .search.small-field {
+    flex: 1 1 180px;
+    min-width: 0;
+    padding: 6px 14px;
+    gap: 8px;
+  }
+  .small-field span {
+    flex: none;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.5);
+  }
+  .small-field input {
+    font-size: 13.5px;
   }
   .ai {
     align-self: flex-start;

@@ -52,8 +52,47 @@
     document.getElementById(`sound-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  // Turning Sound Check off stores mode "off", so the mode the listener chose is remembered here
+  // (and across launches) to come back to when it's turned on again.
+  type Matching = "auto" | "album" | "track";
+  const LAST_KEY = "cadence-leveling-last";
+  const savedMode = (): Matching => {
+    try {
+      const v = localStorage.getItem(LAST_KEY);
+      return v === "album" || v === "track" ? v : "auto";
+    } catch {
+      return "auto";
+    }
+  };
+  let lastMode: Matching = savedMode();
+  const remember = (m: Matching) => {
+    lastMode = m;
+    try {
+      localStorage.setItem(LAST_KEY, m);
+    } catch {}
+  };
+
   function setLeveling(on: boolean) {
-    app.updateDsp((d) => (d.leveling.mode = on ? (d.leveling.mode === "off" ? "auto" : d.leveling.mode) : "off"));
+    app.updateDsp((d) => {
+      if (on) d.leveling.mode = d.leveling.mode === "off" ? lastMode : d.leveling.mode;
+      else {
+        if (d.leveling.mode !== "off") remember(d.leveling.mode);
+        d.leveling.mode = "off";
+      }
+    });
+  }
+
+  // The Boost slider is applied when it's let go (one drag, one change); the number follows the drag.
+  let boostDraft = $state<number | null>(null);
+  const boost = $derived(boostDraft ?? dsp?.leveling.preamp ?? 0);
+
+  /** A number box: clamped to its range, and the box shows the value that was used. */
+  function numberField(e: Event & { currentTarget: HTMLInputElement }, current: number, min: number, max: number, apply: (v: number) => void) {
+    const input = e.currentTarget;
+    const raw = parseFloat(input.value);
+    const v = Number.isFinite(raw) ? Math.min(max, Math.max(min, raw)) : current;
+    input.value = String(v);
+    if (v !== current) apply(v);
   }
 
   function applyPreset(p: Preset) {
@@ -185,6 +224,7 @@
         <div>
           <h2 class="section-title">Sound Check</h2>
           <p class="desc">Plays every song at the same loudness, and gives loud masters the headroom they need to stay clean.</p>
+          <p class="hint">Changing Sound Check, Boost, Smart EQ or “Keep it full when quieter” restarts the song that’s playing.</p>
         </div>
         <Toggle checked={dsp.leveling.mode !== "off"} label="Sound Check" onchange={setLeveling} />
       </div>
@@ -200,16 +240,24 @@
                 label="Leveling mode"
                 options={[{ value: "auto", label: "Automatic" }, { value: "album", label: "By album" }, { value: "track", label: "By song" }]}
                 value={dsp.leveling.mode as "auto" | "album" | "track"}
-                onchange={(v) => app.updateDsp((d) => (d.leveling.mode = v))}
+                onchange={(v) => {
+                  remember(v);
+                  app.updateDsp((d) => (d.leveling.mode = v));
+                }}
               />
             </div>
             <p class="hint">{levelingHelp[dsp.leveling.mode as "auto" | "album" | "track"]}</p>
             <div class="opt">
               <span class="opt-label">Boost</span>
-              <input type="range" class="slider" min="-6" max="6" step="0.5" value={dsp.leveling.preamp}
-                style="--pct: {((dsp.leveling.preamp + 6) / 12) * 100}%; width: 260px"
-                oninput={(e) => app.updateDsp((d) => (d.leveling.preamp = +e.currentTarget.value))} aria-label="Loudness boost" />
-              <span class="num">{db(dsp.leveling.preamp)}</span>
+              <input type="range" class="slider" min="-6" max="6" step="0.5" value={boost}
+                style="--pct: {((boost + 6) / 12) * 100}%; width: 260px"
+                oninput={(e) => (boostDraft = +e.currentTarget.value)}
+                onchange={(e) => {
+                  const v = +e.currentTarget.value;
+                  boostDraft = null;
+                  app.updateDsp((d) => (d.leveling.preamp = v));
+                }} aria-label="Loudness boost" />
+              <span class="num">{db(boost)}</span>
             </div>
             <p class="hint">
               Reference level −18 LUFS (ReplayGain 2.0). Boosts never push a song past full scale.
@@ -225,6 +273,7 @@
     <section id="sound-tone">
       <h2 class="section-title">Tone per song</h2>
       <p class="desc">Automatic adjustments made for each song, before your own equalizer.</p>
+      <p class="hint">Turning these on or off restarts the song that’s playing.</p>
       <div class="tone-rows">
         <div class="tone-row">
           <div>
@@ -328,9 +377,9 @@
           <div class="editor">
             <span class="editor-title">Point {selected + 1}</span>
             <Select label="Filter shape" options={kinds} value={sel.kind} onchange={(v) => editFilter(selected, { kind: v })} width="140px" />
-            <label class="numfield"><span>Frequency</span><input class="field" type="number" min="20" max="20000" value={sel.freq} onchange={(e) => editFilter(selected, { freq: +e.currentTarget.value })} /><em>Hz</em></label>
-            <label class="numfield"><span>Gain</span><input class="field" type="number" min="-24" max="24" step="0.1" value={sel.gain} disabled={sel.kind === "lowpass" || sel.kind === "highpass"} onchange={(e) => editFilter(selected, { gain: +e.currentTarget.value })} /><em>dB</em></label>
-            <label class="numfield"><span>Width (Q)</span><input class="field" type="number" min="0.1" max="20" step="0.05" value={sel.q} onchange={(e) => editFilter(selected, { q: +e.currentTarget.value })} /></label>
+            <label class="numfield"><span>Frequency</span><input class="field" type="number" min="20" max="20000" value={sel.freq} onchange={(e) => numberField(e, sel.freq, 20, 20000, (v) => editFilter(selected, { freq: Math.round(v) }))} /><em>Hz</em></label>
+            <label class="numfield"><span>Gain</span><input class="field" type="number" min="-24" max="24" step="0.1" value={sel.gain} disabled={sel.kind === "lowpass" || sel.kind === "highpass"} onchange={(e) => numberField(e, sel.gain, -24, 24, (v) => editFilter(selected, { gain: v }))} /><em>dB</em></label>
+            <label class="numfield"><span>Width (Q)</span><input class="field" type="number" min="0.1" max="30" step="0.05" value={sel.q} onchange={(e) => numberField(e, sel.q, 0.1, 30, (v) => editFilter(selected, { q: v }))} /></label>
             <label class="check"><input type="checkbox" checked={sel.enabled} onchange={(e) => editFilter(selected, { enabled: e.currentTarget.checked })} />On</label>
             <button class="icon-btn" aria-label="Delete point {selected + 1}" title="Delete point" onclick={() => removeFilter(selected)}><Icon name="trash" size={16} /></button>
           </div>

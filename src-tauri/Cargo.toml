@@ -58,6 +58,8 @@ kakasi = "0.1"
 lindera = { version = "6.2", default-features = false, features = ["embed-ipadic"] }
 pinyin = "0.11"
 unicode-normalization = "0.1"
+# Saves: a unique temporary file beside the real one, synced, then put in its place in one step.
+tempfile = "3"
 
 # Desktop only: one running window at a time (phones manage that themselves).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

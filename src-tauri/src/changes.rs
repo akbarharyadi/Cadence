@@ -34,6 +34,9 @@ pub struct Before {
     pub album_artist: Option<String>,
     pub genre: Option<String>,
     pub year: Option<u32>,
+    /// The whole date when the file has more than a year ("2019-05-01"), so Undo keeps it.
+    #[serde(default)]
+    pub date: Option<String>,
     pub track_no: Option<u32>,
     pub disc_no: Option<u32>,
     pub subtitle: Option<String>,
@@ -54,6 +57,18 @@ struct Batch {
     /// Files the change moved to the Recycle Bin (their paths), brought back by Undo.
     #[serde(default)]
     removed: Vec<String>,
+    /// Favourites and ratings of removed files that went to the copy that stayed, given back
+    /// with the file.
+    #[serde(default)]
+    marks: Vec<RemovedMark>,
+}
+
+/// A removed file's mark, handed to the copy that stayed.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemovedMark {
+    path: String,
+    mark: crate::marks::PassedOn,
 }
 
 /// A change that can be undone, for the list in Needs Attention.
@@ -73,14 +88,15 @@ fn list_file(dir: &Path) -> PathBuf {
     dir.join("changes.json")
 }
 fn load(dir: &Path) -> Vec<Batch> {
-    std::fs::read(list_file(dir)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    crate::state::read_json(&list_file(dir))
 }
 fn save(dir: &Path, list: &[Batch]) {
-    let _ = std::fs::create_dir_all(dir);
-    if let Ok(b) = serde_json::to_vec(list) {
-        let _ = std::fs::write(list_file(dir), b);
-    }
+    crate::state::write_json(&list_file(dir), &list);
 }
+
+/// One change to the list at a time (load, change, save): a change kept while another is undone
+/// can't be lost.
+static LIST: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -92,17 +108,23 @@ pub struct Recorder {
     dir: PathBuf,
     songs: Vec<Before>,
     removed: Vec<String>,
+    marks: Vec<RemovedMark>,
 }
 
 impl Recorder {
     pub fn new(ctx: &Ctx, label: impl Into<String>) -> Self {
         let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-        Recorder { id: format!("c{at}"), label: label.into(), dir: dir(ctx), songs: Vec::new(), removed: Vec::new() }
+        Recorder { id: format!("c{at}"), label: label.into(), dir: dir(ctx), songs: Vec::new(), removed: Vec::new(), marks: Vec::new() }
     }
 
     /// Notes a file the change moved to the Recycle Bin.
     pub fn removed(&mut self, path: &str) {
         self.removed.push(path.to_string());
+    }
+
+    /// Notes that a removed file's mark went to the copy that stayed (given back by Undo).
+    pub fn passed_on(&mut self, path: &str, mark: crate::marks::PassedOn) {
+        self.marks.push(RemovedMark { path: path.to_string(), mark });
     }
 
     /// Notes the file's info before it's written (`cover`: the change replaces its cover).
@@ -122,20 +144,23 @@ impl Recorder {
         if self.songs.is_empty() && self.removed.is_empty() {
             return None;
         }
-        let mut list = load(&self.dir);
-        list.push(Batch { id: self.id.clone(), at: now(), label: self.label, songs: self.songs, removed: self.removed });
-        while list.len() > KEEP {
-            forget(&self.dir, &list.remove(0));
+        {
+            let _one = LIST.lock();
+            let mut list = load(&self.dir);
+            list.push(Batch { id: self.id.clone(), at: now(), label: self.label, songs: self.songs, removed: self.removed, marks: self.marks });
+            while list.len() > KEEP {
+                forget(&self.dir, &list.remove(0).songs);
+            }
+            save(&self.dir, &list);
         }
-        save(&self.dir, &list);
         ctx.emit("changes-changed", ());
         Some(self.id)
     }
 }
 
-/// Lets go of a change's saved covers.
-fn forget(dir: &Path, batch: &Batch) {
-    for b in &batch.songs {
+/// Lets go of the saved covers of a change's songs.
+fn forget(dir: &Path, songs: &[Before]) {
+    for b in songs {
         if let Some(c) = &b.cover {
             let _ = std::fs::remove_file(dir.join(c));
         }
@@ -155,13 +180,18 @@ fn snapshot(path: &Path, cover_to: Option<(&Path, String)>) -> Option<Before> {
     b.genre = text(ItemKey::Genre);
     b.subtitle = text(ItemKey::TrackSubtitle);
     b.year = tag.date().map(|d| d.year as u32);
+    b.date = tag.date().filter(|d| d.month.is_some()).map(|d| match (d.month, d.day) {
+        (Some(m), Some(day)) => format!("{:04}-{m:02}-{day:02}", d.year),
+        (Some(m), None) => format!("{:04}-{m:02}", d.year),
+        _ => d.year.to_string(),
+    });
     b.track_no = tag.track();
     b.disc_no = tag.disk();
     if let Some(front) = tag.pictures().iter().find(|p| p.pic_type() == PictureType::CoverFront) {
         b.no_cover = false;
         if let Some((dir, name)) = cover_to {
             let _ = std::fs::create_dir_all(dir);
-            if std::fs::write(dir.join(&name), front.data()).is_ok() {
+            if crate::state::write_file(&dir.join(&name), front.data(), false).is_ok() {
                 b.cover = Some(name);
             }
         }
@@ -182,7 +212,7 @@ fn restore(dir: &Path, b: &Before) -> Result<(), String> {
             album: text(&b.album),
             album_artist: text(&b.album_artist),
             genre: text(&b.genre),
-            year: num(b.year),
+            year: b.date.clone().or_else(|| num(b.year)),
             track_no: num(b.track_no),
             disc_no: num(b.disc_no),
         },
@@ -216,13 +246,52 @@ pub fn recent(ctx: &Ctx) -> Vec<ChangeInfo> {
         .collect()
 }
 
-/// Undoes a change: its files get their earlier info back (the playing song's when it ends).
-/// Returns how many songs.
+/// What's left of a change after an undo that didn't all work: the songs not written back, the
+/// files not back yet and their marks. None when everything was undone.
+fn left_over(batch: &Batch, failed_songs: &[String], missing: &[String]) -> Option<Batch> {
+    let left = Batch {
+        id: batch.id.clone(),
+        at: batch.at,
+        label: batch.label.clone(),
+        songs: batch.songs.iter().filter(|b| failed_songs.contains(&b.path)).cloned().collect(),
+        removed: batch.removed.iter().filter(|p| missing.contains(p)).cloned().collect(),
+        marks: batch.marks.iter().filter(|m| missing.contains(&m.path)).cloned().collect(),
+    };
+    (!left.songs.is_empty() || !left.removed.is_empty()).then_some(left)
+}
+
+/// What to tell the listener when part of an undo failed (`done` of `total` undone).
+fn partly_undone(done: usize, total: usize, failed_songs: &[String], missing: usize) -> String {
+    let mut why = Vec::new();
+    if missing > 0 {
+        why.push(format!(
+            "{missing} {} not in the Recycle Bin any more",
+            if missing == 1 { "file is" } else { "files are" }
+        ));
+    }
+    if !failed_songs.is_empty() {
+        let names: Vec<String> = failed_songs.iter().take(3).map(|p| file_name(p)).collect();
+        let more = if failed_songs.len() > 3 { format!(" and {} more", failed_songs.len() - 3) } else { String::new() };
+        why.push(format!("couldn't write {}{more} back (open in another app?)", names.join(", ")));
+    }
+    let start = if done == 0 { "Nothing was undone".to_string() } else { format!("Undid {done} of {total}") };
+    format!("{start}: {}. Try Undo again to retry the rest.", why.join("; "))
+}
+
+fn file_name(p: &str) -> String {
+    Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.to_string())
+}
+
+/// Undoes a change: its files get their earlier info back (the playing song's when it ends),
+/// removed files come back from the Recycle Bin with their favourites and ratings. Returns how
+/// many songs. When part of it fails, what failed stays in the list to try again, and the error
+/// says what was and wasn't undone.
 pub fn undo(ctx: &Ctx, id: &str) -> Result<usize, String> {
+    // One undo at a time (two clicks mustn't both bring the same files back).
+    static UNDOING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    let _one = UNDOING.lock();
     let dir = dir(ctx);
-    let mut list = load(&dir);
-    let i = list.iter().position(|b| b.id == id).ok_or("This change can't be undone any more.")?;
-    let batch = list.remove(i);
+    let batch = load(&dir).into_iter().find(|b| b.id == id).ok_or("This change can't be undone any more.")?;
     let (playing_id, playing_path) = {
         let s = ctx.state.engine.status();
         let id = s.index.and_then(|i| s.queue.get(i).cloned());
@@ -232,12 +301,24 @@ pub fn undo(ctx: &Ctx, id: &str) -> Result<usize, String> {
     };
     let art_dir = ctx.state.art_dir();
     let mut written = 0;
-    let mut failed = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
+    // Removed files that aren't back (checked on the disk: one already put back by hand counts).
+    let mut missing: Vec<String> = Vec::new();
     if !batch.removed.is_empty() {
-        let back = bring_back(&batch.removed);
-        written += back;
-        if back < batch.removed.len() {
-            failed.push(format!("{} files not in the Recycle Bin any more", batch.removed.len() - back));
+        bring_back(&batch.removed);
+        missing = batch.removed.iter().filter(|p| !Path::new(p.as_str()).exists()).cloned().collect();
+        written += batch.removed.len() - missing.len();
+        // Their favourites and ratings come back with them.
+        let back: Vec<&RemovedMark> = batch.marks.iter().filter(|m| !missing.contains(&m.path)).collect();
+        if !back.is_empty() {
+            {
+                let mut marks = ctx.state.marks.lock();
+                for m in back {
+                    marks.take_back(&m.mark);
+                }
+            }
+            ctx.state.save_marks();
+            ctx.emit("marks-changed", ());
         }
     }
     for b in &batch.songs {
@@ -282,22 +363,39 @@ pub fn undo(ctx: &Ctx, id: &str) -> Result<usize, String> {
             }
         }
     }
-    // The playing song's cover file is still needed until it ends.
-    if playing_path.is_none_or(|p| !batch.songs.iter().any(|b| b.path == p)) {
-        forget(&dir, &batch);
+    // Only now is the change taken off the list (or cut down to what failed, to try again).
+    let left = left_over(&batch, &failed, &missing);
+    {
+        let _one = LIST.lock();
+        let mut list = load(&dir);
+        if let Some(i) = list.iter().position(|b| b.id == batch.id) {
+            match &left {
+                Some(l) => list[i] = l.clone(),
+                None => {
+                    list.remove(i);
+                }
+            }
+            save(&dir, &list);
+        }
     }
-    save(&dir, &list);
+    // Covers of songs written back are let go; the playing song's is still needed until it ends,
+    // and those of songs to try again stay with them.
+    let done_songs: Vec<Before> = batch
+        .songs
+        .iter()
+        .filter(|b| !failed.contains(&b.path) && playing_path.as_deref() != Some(b.path.as_str()))
+        .cloned()
+        .collect();
+    forget(&dir, &done_songs);
     ctx.emit("changes-changed", ());
     if written > 0 {
         crate::jobs::start_scan(ctx.clone());
     }
-    if !failed.is_empty() && written == 0 {
-        if batch.songs.is_empty() {
-            return Err("Those files aren't in the Recycle Bin any more.".into());
-        }
-        return Err(format!("Couldn't write {} of the songs back (are they open in another app?).", failed.len()));
+    let total = batch.songs.len() + batch.removed.len();
+    if left.is_some() {
+        return Err(partly_undone(total - failed.len() - missing.len(), total, &failed, missing.len()));
     }
-    Ok(batch.songs.len() + batch.removed.len())
+    Ok(total)
 }
 
 /// Moves a file to the Recycle Bin (Trash). Phones have none: there it's deleted.
@@ -353,6 +451,47 @@ fn bring_back(paths: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn song(path: &str) -> Before {
+        Before { path: path.into(), ..Default::default() }
+    }
+
+    fn mark(from: &str) -> crate::marks::PassedOn {
+        let mut m = crate::marks::Marks::default();
+        let t = |id: &str| crate::library::Track { id: id.into(), title: "T".into(), duration: 100.0, ..Default::default() };
+        m.set_loved(&t(from), true);
+        m.pass_on(from, &t("kept")).unwrap()
+    }
+
+    #[test]
+    fn what_failed_stays_to_try_again() {
+        let batch = Batch {
+            id: "c1".into(),
+            at: 5,
+            label: "Removed 2 copies".into(),
+            songs: vec![song("a.flac"), song("b.flac")],
+            removed: vec!["x.mp3".into(), "y.mp3".into()],
+            marks: vec![RemovedMark { path: "x.mp3".into(), mark: mark("x") }, RemovedMark { path: "y.mp3".into(), mark: mark("y") }],
+        };
+        assert!(left_over(&batch, &[], &[]).is_none(), "all undone: the change goes");
+        let left = left_over(&batch, &["b.flac".into()], &["y.mp3".into()]).expect("some failed");
+        assert_eq!((left.id.as_str(), left.label.as_str()), ("c1", "Removed 2 copies"));
+        assert_eq!(left.songs.iter().map(|b| b.path.as_str()).collect::<Vec<_>>(), ["b.flac"]);
+        assert_eq!(left.removed, ["y.mp3"]);
+        assert_eq!(left.marks.len(), 1);
+        assert_eq!(left.marks[0].path, "y.mp3");
+        // Saved and read back by an older list that had no marks: still read.
+        let old: Vec<Batch> = serde_json::from_str(r#"[{"id":"c0","at":1,"label":"Edited song info","songs":[]}]"#).unwrap();
+        assert!(old[0].marks.is_empty() && old[0].removed.is_empty());
+    }
+
+    #[test]
+    fn says_what_was_and_wasnt_undone() {
+        let msg = partly_undone(3, 5, &["D:/Music/a.flac".into()], 1);
+        assert!(msg.starts_with("Undid 3 of 5"), "{msg}");
+        assert!(msg.contains("1 file is not in the Recycle Bin") && msg.contains("a.flac"), "{msg}");
+        assert!(partly_undone(0, 2, &[], 2).starts_with("Nothing was undone: 2 files are"));
+    }
 
     /// On a copy of a tagged song with a cover: a change and its undo leave the file as it was.
     /// `CADENCE_TAGGED_FILE=path cargo test --lib changes::tests -- --ignored`.

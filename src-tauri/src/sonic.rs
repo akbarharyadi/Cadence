@@ -119,6 +119,11 @@ pub fn analyze(path: &Path) -> Result<(Vec<f32>, Vec<f32>)> {
         if out.len() >= LONGEST {
             break;
         }
+        // (A file that says it has no channels would make chunks_exact panic, which closes the app.)
+        let ch = ch.max(1);
+        if rate == 0 {
+            return Err(anyhow!("the file gives no sample rate"));
+        }
         mono.clear();
         mono.extend(
             buf.chunks_exact(ch)

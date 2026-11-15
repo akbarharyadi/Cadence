@@ -9,13 +9,25 @@
   const album = $derived(seed ? app.albumById.get(seed.albumId) : undefined);
 
   let ids = $state<string[] | null>(null);
+  let error = $state("");
   $effect(() => {
     const current = id;
     // Look again when analysis finishes, in case this song wasn't analysed yet.
     void app.sonic?.analyzed;
-    api.similarTracks(current, 40).then((r) => {
-      if (current === id) ids = r;
-    });
+    if (!app.trackById.has(current)) return;
+    api
+      .similarTracks(current, 40)
+      .then((r) => {
+        if (current !== id) return;
+        ids = r;
+        error = "";
+      })
+      .catch((e) => {
+        if (current !== id) return;
+        error = String(e);
+        // What was found before stays; without it, the message shows in its place.
+        if (!ids) ids = [];
+      });
   });
   const tracks = $derived((ids ?? []).map((t) => app.trackById.get(t)).filter((t): t is Track => !!t));
 </script>
@@ -39,9 +51,15 @@
       </div>
     </header>
 
+    {#if error}<p class="error">Couldn't find songs that sound like this one: {error}</p>{/if}
     {#if tracks.length}
       <TrackList {tracks} showArt showAlbum />
-    {:else if ids}
+    {:else if !ids}
+      <div class="empty loading" aria-busy="true">
+        <Icon name="wave" size={28} />
+        <p>Finding songs that sound like this one…</p>
+      </div>
+    {:else if !error}
       <div class="empty">
         <Icon name="wave" size={28} />
         {#if app.sonic?.running}
@@ -51,6 +69,19 @@
         {/if}
       </div>
     {/if}
+  </div>
+{:else if app.loaded}
+  <div class="similar">
+    <div class="empty gone">
+      <Icon name="song" size={28} />
+      <div>
+        <p>This song is no longer in your library. It may have been moved, renamed or removed.</p>
+        <div class="actions">
+          {#if app.history.length}<button class="pill ghost" onclick={() => app.back()}><Icon name="back" size={15} />Go back</button>{/if}
+          <button class="pill ghost" onclick={() => app.go({ name: "songs" })}><Icon name="song" size={15} />Songs</button>
+        </div>
+      </div>
+    </div>
   </div>
 {/if}
 
@@ -142,6 +173,20 @@
   }
   .empty p {
     margin: 0;
+  }
+  .empty.loading {
+    color: var(--text-3);
+  }
+  .empty.gone {
+    align-items: flex-start;
+  }
+  .empty.gone .actions {
+    margin-top: 14px;
+  }
+  .error {
+    margin: 0 0 18px;
+    color: var(--warn);
+    font-size: 13px;
   }
   /* Phones: cover on top, text below. */
   @media (max-width: 720px) {

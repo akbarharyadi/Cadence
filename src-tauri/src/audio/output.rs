@@ -15,10 +15,15 @@ use ringbuf::{HeapCons, HeapProd, HeapRb};
 
 /// Length of the fade on pause/resume, seek and skip.
 const FADE_MS: f32 = 12.0;
+/// How long a volume change takes to glide to its new level (a jump per buffer is heard as
+/// "zipper" noise while the slider is dragged).
+const VOLUME_RAMP_MS: f32 = 10.0;
 
 pub struct Shared {
     pub playing: AtomicBool,
     pub volume: AtomicU32,
+    /// The sleep timer's fade-out (f32 bits, 1 = none), on top of `volume` and without moving it.
+    pub fade_gain: AtomicU32,
     /// Device frames handed to the device since the last flush.
     pub consumed: AtomicU64,
     /// Set by the worker to ask the renderer to drop everything buffered; cleared by the renderer.
@@ -40,6 +45,7 @@ impl Shared {
         Self {
             playing: AtomicBool::new(false),
             volume: AtomicU32::new(volume.to_bits()),
+            fade_gain: AtomicU32::new(1f32.to_bits()),
             consumed: AtomicU64::new(0),
             flush: AtomicBool::new(false),
             failed: AtomicBool::new(false),
@@ -63,7 +69,16 @@ pub struct Renderer {
     /// Current fade gain (0 = silent, 1 = full) and how much it moves per frame.
     fade: f32,
     fade_step: f32,
+    /// The level applied (volume × sleep fade) as it glides to `gain_target`, `gain_step` per frame.
+    gain: f32,
+    gain_target: f32,
+    gain_step: f32,
+    gain_frames: f32,
+    /// The level was picked up at least once (a new stream starts at it, without a glide).
+    gain_set: bool,
     clamp: bool,
+    /// The signal that keeps an exclusive-mode DAC awake in gaps (one LSB of the device's format).
+    lsb: f32,
     /// Open while recording (see `Shared::tap`).
     tap: Option<std::io::BufWriter<std::fs::File>>,
     /// Frames still to play before a dry ring counts as a dropout (the pause right after a skip or
@@ -87,10 +102,23 @@ impl Renderer {
             channels,
             fade: 0.0,
             fade_step,
+            gain: 1.0,
+            gain_target: 1.0,
+            gain_step: 0.0,
+            gain_frames: (rate as f32 * VOLUME_RAMP_MS / 1000.0).max(1.0),
+            gain_set: false,
             clamp,
+            lsb: 1.0 / 8_388_608.0,
             tap: None,
             settle: rate as usize / 5,
         }
+    }
+
+    /// The device takes `bits`-bit integers: the gap signal is one of its LSBs (24-bit at most,
+    /// ≈ −138 dBFS; a 16-bit device would round a 24-bit LSB away).
+    pub fn with_bits(mut self, bits: u32) -> Self {
+        self.lsb = 1.0 / (1u32 << (bits.clamp(8, 24) - 1)) as f32;
+        self
     }
 
     /// Fills `out` (interleaved f32) with the next audio.
@@ -100,7 +128,7 @@ impl Renderer {
         // sound returns (heard on every skip). Gaps get a ±1-LSB (24-bit, ≈ −138 dBFS) signal instead,
         // which keeps them awake and is far below hearing. The music itself is never touched.
         if self.clamp {
-            let lsb = 1.0 / 8_388_608.0;
+            let lsb = self.lsb;
             for (i, s) in out[music..].iter_mut().enumerate() {
                 if *s == 0.0 {
                     *s = if (i / self.channels).is_multiple_of(2) { lsb } else { -lsb };
@@ -131,6 +159,9 @@ impl Renderer {
         let playing = self.shared.playing.load(Ordering::Relaxed);
         if !playing && self.fade == 0.0 {
             out.fill(0.0);
+            // Silent: a volume change meanwhile needs no glide.
+            self.gain = self.target_gain();
+            self.gain_target = self.gain;
             self.record(out);
             return 0;
         }
@@ -151,12 +182,48 @@ impl Renderer {
         n
     }
 
-    /// The volume slider. Every path to the device must go through this: in exclusive mode it's the
-    /// only volume control, so a missed buffer plays at full level (heard as a burst on every skip).
-    fn apply_volume(&self, samples: &mut [f32]) {
-        let volume = f32::from_bits(self.shared.volume.load(Ordering::Relaxed));
-        if volume != 1.0 {
-            samples.iter_mut().for_each(|s| *s *= volume);
+    /// Volume × the sleep timer's fade, as the worker last set them.
+    fn target_gain(&self) -> f32 {
+        f32::from_bits(self.shared.volume.load(Ordering::Relaxed))
+            * f32::from_bits(self.shared.fade_gain.load(Ordering::Relaxed))
+    }
+
+    /// The volume slider (and the sleep fade). Every path to the device must go through this: in
+    /// exclusive mode it's the only volume control, so a missed buffer plays at full level (heard
+    /// as a burst on every skip). Changes glide over [`VOLUME_RAMP_MS`]; at exactly 1 (full volume,
+    /// no fade) the samples are left untouched.
+    fn apply_volume(&mut self, samples: &mut [f32]) {
+        let target = self.target_gain();
+        if !self.gain_set {
+            self.gain_set = true;
+            self.gain = target;
+            self.gain_target = target;
+        }
+        if target != self.gain_target {
+            self.gain_target = target;
+            self.gain_step = (target - self.gain) / self.gain_frames;
+        }
+        if self.gain == self.gain_target {
+            let g = self.gain;
+            if g != 1.0 {
+                samples.iter_mut().for_each(|s| *s *= g);
+            }
+            return;
+        }
+        for frame in samples.chunks_exact_mut(self.channels) {
+            if self.gain != self.gain_target {
+                self.gain += self.gain_step;
+                let past = if self.gain_step > 0.0 {
+                    self.gain >= self.gain_target
+                } else {
+                    self.gain <= self.gain_target
+                };
+                if past {
+                    self.gain = self.gain_target;
+                }
+            }
+            let g = self.gain;
+            frame.iter_mut().for_each(|s| *s *= g);
         }
     }
 
@@ -434,16 +501,26 @@ fn start(
     let config: StreamConfig = supported.into();
     let (rate, channels) = (config.sample_rate, config.channels as usize);
     let float = matches!(format, SampleFormat::F32 | SampleFormat::F64);
+    // Integer formats that hold fewer bits than a float carries get dither where it's needed (a
+    // 32-bit integer holds every bit of the f32 samples already).
+    let bits = match format {
+        SampleFormat::I16 | SampleFormat::U16 => Some(16),
+        SampleFormat::I24 => Some(24),
+        _ => None,
+    };
     // Half a second of buffer: plenty to ride out hiccups, short enough that EQ changes are heard quickly.
     let (prod, cons) = HeapRb::<f32>::new((rate as usize / 2) * channels).split();
-    let renderer = Renderer::new(cons, shared.clone(), channels, rate, !float);
+    let mut renderer = Renderer::new(cons, shared.clone(), channels, rate, !float);
+    if let Some(b) = bits {
+        renderer = renderer.with_bits(b);
+    }
     let stream = match format {
-        SampleFormat::F32 => build_stream::<f32>(device, config, renderer, shared),
-        SampleFormat::F64 => build_stream::<f64>(device, config, renderer, shared),
-        SampleFormat::I16 => build_stream::<i16>(device, config, renderer, shared),
-        SampleFormat::I32 => build_stream::<i32>(device, config, renderer, shared),
-        SampleFormat::I24 => build_stream::<cpal::I24>(device, config, renderer, shared),
-        SampleFormat::U16 => build_stream::<u16>(device, config, renderer, shared),
+        SampleFormat::F32 => build_stream::<f32>(device, config, renderer, shared, bits),
+        SampleFormat::F64 => build_stream::<f64>(device, config, renderer, shared, bits),
+        SampleFormat::I16 => build_stream::<i16>(device, config, renderer, shared, bits),
+        SampleFormat::I32 => build_stream::<i32>(device, config, renderer, shared, bits),
+        SampleFormat::I24 => build_stream::<cpal::I24>(device, config, renderer, shared, bits),
+        SampleFormat::U16 => build_stream::<u16>(device, config, renderer, shared, bits),
         other => return Err(anyhow!("unsupported device sample format {other}")),
     }?;
     stream.play()?;
@@ -455,17 +532,24 @@ fn build_stream<T>(
     config: StreamConfig,
     mut renderer: Renderer,
     shared: Arc<Shared>,
+    bits: Option<u32>,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32>,
 {
     let mut scratch = vec![0f32; 16_384];
+    let mut dither = super::pcm::Dither::default();
     let stream = device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             for chunk in data.chunks_mut(scratch.len()) {
                 let buf = &mut scratch[..chunk.len()];
                 renderer.render(buf);
+                // Whole steps of the device's format (cpal's conversion truncates), dithered
+                // only where the audio was changed: untouched music stays bit-exact.
+                if let Some(b) = bits {
+                    super::pcm::requantize(buf, b, &mut dither);
+                }
                 for (d, s) in chunk.iter_mut().zip(buf.iter()) {
                     *d = T::from_sample(*s);
                 }
@@ -568,6 +652,65 @@ mod tests {
             let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
             assert!(peak <= 0.05 + 1e-6, "fade-out got louder than the volume allows: {peak}");
         }
+    }
+
+    /// Renders `frames` frames of a steady 0.5 signal; returns the left channel.
+    fn steady(prod: &mut HeapProd<f32>, r: &mut Renderer, frames: usize) -> Vec<f32> {
+        prod.push_slice(&vec![0.5f32; frames * 2]);
+        let mut out = vec![0.0f32; frames * 2];
+        r.render(&mut out);
+        out.iter().step_by(2).copied().collect()
+    }
+
+    #[test]
+    fn volume_changes_glide_and_full_volume_stays_exact() {
+        let (mut prod, mut r, shared) = setup(false);
+        shared.playing.store(true, Ordering::Relaxed);
+        r.fade = 1.0;
+        assert!(steady(&mut prod, &mut r, 64).iter().all(|s| *s == 0.5));
+        shared.volume.store(0.5f32.to_bits(), Ordering::Relaxed);
+        // 10 ms at 48 kHz = 480 frames, rendered in small device buffers.
+        let mut left = Vec::new();
+        for _ in 0..10 {
+            left.extend(steady(&mut prod, &mut r, 64));
+        }
+        let mut last = 0.5f32;
+        for s in &left {
+            assert!((last - s).abs() < 0.001, "step from {last} to {s}");
+            last = *s;
+        }
+        assert!(left[0] > 0.49, "starts from the old level: {}", left[0]);
+        assert_eq!(*left.last().unwrap(), 0.25, "ends exactly at the new level");
+        // Back to full volume: exactly the samples again, not 0.99999.
+        shared.volume.store(1f32.to_bits(), Ordering::Relaxed);
+        for _ in 0..10 {
+            steady(&mut prod, &mut r, 64);
+        }
+        assert!(steady(&mut prod, &mut r, 64).iter().all(|s| *s == 0.5));
+    }
+
+    #[test]
+    fn sleep_fade_is_its_own_gain() {
+        let (mut prod, mut r, shared) = setup(false);
+        shared.playing.store(true, Ordering::Relaxed);
+        r.fade = 1.0;
+        shared.volume.store(0.5f32.to_bits(), Ordering::Relaxed);
+        steady(&mut prod, &mut r, 64);
+        shared.fade_gain.store(0.5f32.to_bits(), Ordering::Relaxed);
+        for _ in 0..10 {
+            steady(&mut prod, &mut r, 64);
+        }
+        assert_eq!(*steady(&mut prod, &mut r, 64).last().unwrap(), 0.125);
+        assert_eq!(f32::from_bits(shared.volume.load(Ordering::Relaxed)), 0.5, "the volume is left alone");
+    }
+
+    #[test]
+    fn a_new_stream_starts_at_the_volume() {
+        let (mut prod, mut r, shared) = setup(false);
+        shared.volume.store(0.2f32.to_bits(), Ordering::Relaxed);
+        shared.playing.store(true, Ordering::Relaxed);
+        r.fade = 1.0;
+        assert!(steady(&mut prod, &mut r, 64).iter().all(|s| *s == 0.1));
     }
 
     #[test]

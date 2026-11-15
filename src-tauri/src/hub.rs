@@ -65,11 +65,84 @@ pub fn open(data_dir: PathBuf, local_dir: &Path, host: Arc<dyn Host>) -> (Ctx, R
 pub fn start_status_hub(ctx: Ctx, rx: Receiver<Status>, hwnd: isize, on_song: impl Fn(Option<String>) + Send + 'static) {
     let media_state = ctx.state.clone();
     let media = media::start(hwnd, move |cmd| media_state.engine.send(cmd));
-    let scrobbler = scrobble::start(ctx.state.data_dir.join("scrobble-queue.json"));
-    let _ = scrobbler.send(scrobble::Job::Flush);
+    let scrobbler = start_scrobbler(&ctx);
     let _ = std::thread::Builder::new()
         .name("cadence-status".into())
         .spawn(move || status_hub(ctx, rx, media, scrobbler, on_song));
+}
+
+fn start_scrobbler(ctx: &Ctx) -> &'static scrobble::Scrobbler {
+    let (account, out) = (ctx.state.clone(), ctx.clone());
+    scrobble::start(
+        ctx.state.data_dir.join("scrobble-queue.json"),
+        move || account.settings.lock().listenbrainz_user.clone(),
+        // The token stopped working: Settings shows ListenBrainz as not connected, to connect again.
+        move || {
+            out.state.settings.lock().listenbrainz_user.clear();
+            out.state.save_settings();
+            out.emit("listenbrainz-signed-out", ());
+        },
+    )
+}
+
+/// The play being listened to now, shared with `shutdown` (which closes it when Cadence quits).
+static TRACKER: Mutex<Option<Tracker>> = Mutex::new(None);
+
+fn with_tracker<R>(f: impl FnOnce(&mut Tracker) -> R) -> R {
+    f(TRACKER.lock().get_or_insert_with(Tracker::default))
+}
+
+/// A finished play: into the history (and to ListenBrainz when it counts as a listen).
+fn record_play(ctx: &Ctx, scrobbler: Option<&scrobble::Scrobbler>, event: history::PlayEvent) {
+    let state = &ctx.state;
+    if let Some(s) = scrobbler
+        && scrobble::counts(event.listened, event.duration)
+        && let Some(l) = listen_of(state, &event.track_id, event.at) {
+            let user = state.settings.lock().listenbrainz_user.clone();
+            s.listened(l, &user);
+        }
+    history::push(&mut state.history.lock(), event, &history::archive_dir(&state.data_dir));
+    state.save_history();
+    ctx.emit("history-changed", ());
+}
+
+fn listen_of(state: &AppState, id: &str, at: u64) -> Option<scrobble::Listen> {
+    let lib = state.library.lock();
+    let t = &lib.snapshot.tracks[*lib.by_id.get(id)?];
+    Some(scrobble::Listen {
+        artist: t.artist.clone(),
+        title: t.title.clone(),
+        album: t.album.clone(),
+        duration: t.duration,
+        at,
+        user: String::new(),
+    })
+}
+
+fn album_of(state: &AppState, id: &str) -> String {
+    let lib = state.library.lock();
+    lib.by_id.get(id).map(|&i| lib.snapshot.tracks[i].album_id.clone()).unwrap_or_default()
+}
+
+/// Cadence is quitting: the song playing now goes into the history (and to ListenBrainz) as far
+/// as it was heard, the session keeps the exact position, and settings waiting to be saved are.
+pub fn shutdown(ctx: &Ctx) {
+    let state = &ctx.state;
+    let s = state.engine.status();
+    // (An empty player, before the last session was put back, mustn't overwrite it.)
+    if !s.queue.is_empty() {
+        state.save_session(&s);
+    }
+    let finished = with_tracker(|t| {
+        // The last stretch since the previous update counts too.
+        let _ = t.observe(&s, |id| album_of(state, id));
+        t.finish()
+    });
+    match finished {
+        Some(event) => record_play(ctx, scrobble::running(), event),
+        None => state.save_history(),
+    }
+    state.save_settings_now();
 }
 
 /// Background work at startup: carry on following the singer, then rescan and watch the folders.
@@ -85,22 +158,12 @@ fn status_hub(
     ctx: Ctx,
     rx: Receiver<Status>,
     media: crossbeam_channel::Sender<media::Update>,
-    scrobbler: crossbeam_channel::Sender<scrobble::Job>,
+    scrobbler: &'static scrobble::Scrobbler,
     on_song: impl Fn(Option<String>),
 ) {
     let state = ctx.state.clone();
-    let listen_for = |id: &str, at: u64| {
-        let lib = state.library.lock();
-        let t = &lib.snapshot.tracks[*lib.by_id.get(id)?];
-        Some(scrobble::Listen {
-            artist: t.artist.clone(),
-            title: t.title.clone(),
-            album: t.album.clone(),
-            duration: t.duration,
-            at,
-        })
-    };
-    let mut tracker = Tracker::default();
+    // The song ListenBrainz was told is playing: a session put back paused tells it once play starts.
+    let mut told_playing: Option<String> = None;
     // The session is saved when the song, the queue or play/pause changes, and every 10 s while
     // playing. Nothing is saved until there has been a queue, so the empty player of a fresh
     // start never overwrites the session it's about to restore.
@@ -136,24 +199,17 @@ fn status_hub(
             saved_pos = s.position;
         }
 
-        let album_of = |id: &str| {
-            let lib = state.library.lock();
-            lib.by_id
-                .get(id)
-                .map(|&i| lib.snapshot.tracks[i].album_id.clone())
-                .unwrap_or_default()
-        };
-        if let Some(event) = tracker.observe(&s, album_of) {
-            if scrobble::counts(event.listened, event.duration)
-                && let Some(l) = listen_for(&event.track_id, event.at) {
-                    let _ = scrobbler.send(scrobble::Job::Listened(l));
-                }
-            history::push(&mut state.history.lock(), event);
-            state.save_history();
-            ctx.emit("history-changed", ());
+        if let Some(event) = with_tracker(|t| t.observe(&s, |id| album_of(&state, id))) {
+            record_play(&ctx, Some(scrobbler), event);
         }
 
         let current = s.index.and_then(|i| s.queue.get(i)).cloned();
+        if s.playing && current.is_some() && current != told_playing {
+            if let Some(l) = current.as_deref().and_then(|id| listen_of(&state, id, 0)) {
+                scrobbler.now_playing(l);
+            }
+            told_playing = current.clone();
+        }
         if current != shown_track {
             let now_playing = current.as_ref().and_then(|id| {
                 let lib = state.library.lock();
@@ -174,10 +230,6 @@ fn status_hub(
             });
             on_song(now_playing.as_ref().map(|n| format!("{} — {}", n.title, n.artist)));
             let _ = media.send(media::Update::Track(now_playing));
-            if let Some(l) = current.as_deref().and_then(|id| listen_for(id, 0))
-                && s.playing {
-                    let _ = scrobbler.send(scrobble::Job::NowPlaying(l));
-                }
             autotag::on_track_change(&ctx, shown_track.as_deref(), current.as_deref());
             shown_track = current;
             shown_at = std::time::Instant::now() - std::time::Duration::from_secs(60);

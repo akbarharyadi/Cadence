@@ -9,7 +9,7 @@
   import { updates } from "#lib/updates.svelte.js";
   import Icon from "#lib/components/Icon.svelte";
   import Guard from "#lib/components/Guard.svelte";
-  import { forgetCrash, note, recentCrash, reportCrash } from "#lib/diag.js";
+  import { errorMessage, forgetCrash, note, recentCrash, recordCrash, reportCrash, type Crash } from "#lib/diag.js";
   import NowPlaying from "#lib/components/NowPlaying.svelte";
   import PlaylistPicker from "#lib/components/PlaylistPicker.svelte";
   import SmartEditor from "#lib/components/SmartEditor.svelte";
@@ -42,6 +42,7 @@
   import Stats from "#lib/views/Stats.svelte";
   import Sound from "#lib/views/Sound.svelte";
   import Welcome from "#lib/views/Welcome.svelte";
+  import Library from "#lib/views/Library.svelte";
 
 
   let dropping = $state(false);
@@ -115,8 +116,36 @@
     );
   });
 
+  /** Cadence couldn't start (the library or the player didn't answer): shown instead of a blank window. */
+  let initError = $state<{ message: string; crash: Crash } | null>(null);
+  function start() {
+    initError = null;
+    app.init().catch((e) => {
+      console.error("[Cadence] starting failed:", e);
+      initError = { message: errorMessage(e), crash: recordCrash(e, "Starting Cadence") };
+    });
+  }
+
+  // A promise nobody waited for failed. diag.ts already logs it for bug reports; when it came
+  // right after a click or a key press, the user is waiting for something to happen, so say it
+  // didn't (once, not for every failure of a burst). Background failures stay quiet.
+  let lastInput = 0;
+  let lastFailToast = { at: 0, message: "" };
+  function onUnhandled(e: PromiseRejectionEvent) {
+    const now = Date.now();
+    if (now - lastInput > 3000) return;
+    const message = errorMessage(e.reason).replace(/\s+/g, " ").trim().slice(0, 160) || "Unknown error";
+    if (now - lastFailToast.at < 3000 || (message === lastFailToast.message && now - lastFailToast.at < 30_000)) return;
+    lastFailToast = { at: now, message };
+    app.showToast(`That didn't work: ${message}`);
+  }
+
   onMount(() => {
-    app.init();
+    start();
+    const userInput = () => (lastInput = Date.now());
+    window.addEventListener("pointerdown", userInput, true);
+    window.addEventListener("keydown", userInput, true);
+    window.addEventListener("unhandledrejection", onUnhandled);
     // Cadence just reloaded itself after an error (see +error.svelte): say so, and offer to report it.
     const crash = recentCrash(2 * 60_000);
     if (crash) {
@@ -164,6 +193,9 @@
     });
     return () => {
       unlisten.then((f) => f());
+      window.removeEventListener("pointerdown", userInput, true);
+      window.removeEventListener("keydown", userInput, true);
+      window.removeEventListener("unhandledrejection", onUnhandled);
     };
   });
 
@@ -181,22 +213,38 @@
   function onKey(e: KeyboardEvent) {
     // A page used the key itself (Needs Attention's rows: Space ticks).
     if (e.defaultPrevented) return;
-    const target = e.target as HTMLElement;
-    const typing = (target.tagName === "INPUT" && (target as HTMLInputElement).type !== "range") || target.tagName === "TEXTAREA";
+    const target = (e.target instanceof HTMLElement ? e.target : document.body) as HTMLElement;
+    const typing =
+      (target.tagName === "INPUT" && !["range", "checkbox", "radio", "button"].includes((target as HTMLInputElement).type)) ||
+      target.tagName === "TEXTAREA" ||
+      target.tagName === "SELECT" ||
+      target.isContentEditable;
     if (typing) return;
-    // Space on a focused button already clicks it; don't also toggle playback.
-    const pressable = target.tagName === "BUTTON" || target.getAttribute("role") === "option" || !!target.closest("[data-row]");
+    // An open dialog or menu has the keyboard (Escape, arrows, Space in its own controls).
+    if (app.menu || target.closest("[aria-modal='true'], [role=menu]")) return;
+    if (e.altKey && !e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      e.preventDefault();
+      if (e.key === "ArrowLeft") app.back();
+      else app.forward();
+      return;
+    }
+    // Controls that use the arrow keys themselves: sliders, choices, lists of options, tabs.
+    const arrowsOwned = !!target.closest("input[type=range], [role=slider], [role=radio], [role=radiogroup], [role=option], [role=tab], [role=tablist], [role=spinbutton]");
+    // Space on a focused button (or card, row, choice) already presses it; don't also toggle playback.
+    const pressable = !!target.closest(
+      "button, a[href], input, [role=button], [role=checkbox], [role=switch], [role=radio], [role=option], [role=menuitem], [role=tab], summary, [data-row]",
+    );
     if (e.key === " " && !pressable) {
       e.preventDefault();
       api.player("toggle");
+    } else if (arrowsOwned && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {
+      return;
     } else if (e.ctrlKey && e.key === "ArrowRight") {
       api.player("next");
     } else if (e.ctrlKey && e.key === "ArrowLeft") {
       api.player("prev");
-    } else if (!e.ctrlKey && !e.altKey && (e.key === "ArrowRight" || e.key === "ArrowLeft") && app.current && target.tagName !== "INPUT") {
+    } else if (!e.ctrlKey && !e.altKey && (e.key === "ArrowRight" || e.key === "ArrowLeft") && app.current) {
       app.seek(Math.max(0, app.position + (e.key === "ArrowRight" ? 10 : -10)));
-    } else if (e.altKey && e.key === "ArrowLeft") {
-      app.back();
     } else if (e.ctrlKey && !e.shiftKey && !e.altKey && ["s", "r", "u", "l"].includes(e.key.toLowerCase())) {
       // The player's toggles: Shuffle, Repeat, Up Next, Lyrics (and no browser Save or Reload).
       e.preventDefault();
@@ -240,14 +288,29 @@
 <svelte:window onkeydown={onKey} />
 <!-- No browser menu (Back, Refresh, Print…) on right-click; text fields keep theirs for copy and paste. -->
 <svelte:document
-  onmouseup={(e) => e.button === 3 && app.back()}
+  onmouseup={(e) => {
+    // The mouse's side buttons: Back and Forward.
+    if (e.button === 3) app.back();
+    else if (e.button === 4) app.forward();
+  }}
   oncontextmenu={(e) => !(e.target as HTMLElement).closest("input, textarea, [contenteditable]") && e.preventDefault()}
 />
 
 {#snippet pageView()}
 <Guard label="This page">
 {#if !app.loaded}
-  <div></div>
+  {#if initError}
+    <div class="start-failed" role="alert">
+      <h2>Cadence couldn't start</h2>
+      <p>{initError.message}</p>
+      <div class="start-actions">
+        <button class="pill" onclick={() => location.reload()}><Icon name="refresh" size={15} />Reload</button>
+        <button class="pill ghost" onclick={() => initError && reportCrash(initError.crash)}>Report on GitHub</button>
+      </div>
+    </div>
+  {:else}
+    <div></div>
+  {/if}
 {:else if app.view.name === "sound"}
   <Sound />
 {:else if app.view.name === "settings"}
@@ -284,6 +347,8 @@
   <Discover />
 {:else if app.view.name === "stats"}
   <Stats />
+{:else if app.view.name === "library"}
+  <Library />
 {/if}
 </Guard>
 {/snippet}
@@ -317,7 +382,8 @@
           <div class="page-in" data-kind={app.navKind}>{@render pageView()}</div>
         {/key}
       {:else}
-        {@render pageView()}
+        <!-- Keyed like the phone's, so a page that failed (Guard) is a fresh page after navigating. -->
+        {#key app.navSeq}{@render pageView()}{/key}
       {/if}
     </main>
     {#if gutter > 0}<div class="bar-cap" class:on={scrolled} style="width: {gutter}px" aria-hidden="true" data-tauri-drag-region></div>{/if}
@@ -536,5 +602,39 @@
     .toast {
       bottom: calc(150px + env(safe-area-inset-bottom));
     }
+  }
+  /* Android wider than a phone (landscape, tablets) still has the phone's layout. */
+  :global(html.phone) .toast {
+    bottom: calc(150px + env(safe-area-inset-bottom));
+  }
+  :global(html.phone) .bar-title {
+    left: 64px;
+    right: 64px;
+  }
+  .start-failed {
+    min-height: 70vh;
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: 10px;
+    padding: 80px 24px 24px;
+    text-align: center;
+  }
+  .start-failed h2 {
+    margin: 0;
+    font-family: var(--display);
+    font-size: 22px;
+  }
+  .start-failed p {
+    margin: 0 0 8px;
+    max-width: 480px;
+    color: var(--text-2);
+    font-size: 13px;
+    word-break: break-word;
+    user-select: text;
+  }
+  .start-actions {
+    display: flex;
+    gap: 10px;
   }
 </style>

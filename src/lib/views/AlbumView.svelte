@@ -10,6 +10,26 @@
   const tracks = $derived(album ? app.albumTracks(album) : []);
   const playing = $derived(app.currentAlbum?.id === id);
   const facts = $derived(album ? [album.genre, album.year?.toString()].filter(Boolean) : []);
+
+  // An album's id comes from its title and album artist, so editing either (Edit Info, Fix Album
+  // Info) gives it a new id. While the album is here, its songs are remembered; if it vanishes, the
+  // page follows those songs to the album they are in now (replacing this page, so Back skips it).
+  let remembered: { id: string; songs: string[] } = { id: "", songs: [] };
+  $effect(() => {
+    const a = album;
+    if (a) {
+      remembered = { id, songs: a.trackIds.slice(0, 200) };
+      return;
+    }
+    if (remembered.id !== id || app.view.name !== "album" || app.view.id !== id) return;
+    for (const songId of remembered.songs) {
+      const t = app.trackById.get(songId);
+      if (t && t.albumId !== id) {
+        app.view = { name: "album", id: t.albumId };
+        return;
+      }
+    }
+  });
 </script>
 
 {#if album}

@@ -38,6 +38,7 @@
   });
 
   async function save() {
+    if (saving) return;
     const changes: Record<string, string> = {};
     for (const f of fields) if (touched[f.key]) changes[f.key] = values[f.key];
     if (!Object.keys(changes).length) return close();
@@ -49,7 +50,8 @@
       app.showToast(later ? `${what}. The playing song’s file is updated when it finishes.` : what, app.undoAction(change));
       close();
     } catch (e) {
-      error = String(e);
+      // Tauri errors are plain strings; keep the text whole and the dialog open.
+      error = (typeof e === "string" ? e : e instanceof Error ? e.message : String(e)).trim();
     } finally {
       saving = false;
     }
@@ -75,7 +77,7 @@
     <button type="submit" hidden aria-hidden="true"></button>
   </form>
   {#if single}<p class="path" title={tracks[0].path}>{tracks[0].path}</p>{/if}
-  {#if error}<p class="error">{error}</p>{/if}
+  {#if error}<p class="error" role="alert">{error}</p>{/if}
 
   {#snippet footer()}
     <span class="note">Changes are written into the music {single ? "file" : "files"}.</span>
@@ -119,6 +121,12 @@
     margin: 12px 0 0;
     color: var(--warn);
     font-size: 13px;
+    /* A save can report several files, one per line: show them all, selectable, scrolling if long. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 30vh;
+    overflow-y: auto;
+    user-select: text;
   }
   .note {
     margin-right: auto;

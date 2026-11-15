@@ -38,6 +38,11 @@
   ];
 
   const droid = android();
+  // What happens to a removed copy here: Windows and Linux move it to the bin and Undo brings it back;
+  // macOS moves it to the Trash (put back by hand, no Undo); phones delete it for good.
+  const mac = !droid && typeof navigator !== "undefined" && navigator.userAgent.includes("Mac OS");
+  const canBringBack = !droid && !mac;
+  const bin = mac ? "Trash" : "Recycle Bin";
   const issues = $derived(app.issues);
   const songs = (n: number) => `${n} ${n === 1 ? "song" : "songs"}`;
   const albumsN = (n: number) => `${n} ${n === 1 ? "album" : "albums"}`;
@@ -91,15 +96,18 @@
     });
   });
 
-  // Copies to remove: the sure ones ticked.
+  // Copies to remove: the sure ones ticked, but only where Undo can bring them back. Where removal
+  // is final, nothing is ticked for the listener.
   let copiesOn = $state<Set<string>>(new Set());
   let copiesSeen = new Set<string>();
   $effect(() => {
     const fresh = issues.copies.filter((g) => !copiesSeen.has(loser(g)));
     if (!fresh.length) return;
     for (const g of fresh) copiesSeen.add(loser(g));
+    if (!canBringBack) return;
     untrack(() => (copiesOn = new Set([...copiesOn, ...fresh.filter((g) => g.sure).map(loser)])));
   });
+  let confirmingCopies = $state(false);
   const loser = (g: DupGroup) => g.songs.find((s) => !s.keep)?.id ?? g.songs[0].id;
   const keeper = (g: DupGroup) => g.songs.find((s) => s.keep)?.id ?? g.songs[0].id;
 
@@ -163,7 +171,14 @@
 
   // ---------- fixes ----------
 
+  /** Where removal can't be undone the listener confirms first. */
+  function askRemoveCopies() {
+    if (canBringBack) removeCopies();
+    else confirmingCopies = true;
+  }
+
   async function removeCopies() {
+    confirmingCopies = false;
     const ids = [...copiesOn].filter((id) => issues.copies.some((g) => loser(g) === id));
     if (!ids.length) return;
     busy = "copies";
@@ -172,7 +187,7 @@
       copiesOn = new Set([...copiesOn].filter((id) => !ids.includes(id)));
       const left = r.skipped.length ? `; ${r.skipped.length} left alone (${r.skipped[0]}${r.skipped.length > 1 ? ", …" : ""})` : "";
       app.showToast(
-        `${r.recycled ? "Moved" : "Deleted"} ${r.deleted} ${r.deleted === 1 ? "copy" : "copies"}${r.recycled ? " to the Recycle Bin" : ""}, ${mb(r.freed)} freed${left}`,
+        `${r.recycled ? "Moved" : "Deleted"} ${r.deleted} ${r.deleted === 1 ? "copy" : "copies"}${r.recycled ? ` to the ${bin}` : ""}, ${mb(r.freed)} freed${left}`,
         app.undoAction(r.change),
         8000,
       );
@@ -441,12 +456,12 @@
         <div class="head">
           <p class="secondary about">
             Songs you have twice, where one copy is better: lossless over lossy, a tagged file over a download named “Artist – Title”. The better copy
-            stays and keeps the favourite and rating; the other goes to the Recycle Bin. <b>Check</b> ones may be another cut (a clip, a music
+            stays and keeps the favourite and rating; {droid ? "the other is deleted for good" : `the other goes to the ${bin}`}{canBringBack ? "" : droid ? ", so nothing is ticked for you" : ", and Undo can’t bring it back, so nothing is ticked for you"}. <b>Check</b> ones may be another cut (a clip, a music
             video’s intro): compare the lengths before ticking.
           </p>
           <div class="batch">
-            <button class="pill small" disabled={busy !== null || !copiesOn.size} onclick={removeCopies} data-batch>
-              <Icon name="trash" size={14} />{droid ? "Delete" : "Move"} {copiesOn.size} {copiesOn.size === 1 ? "copy" : "copies"}{droid ? "" : " to the Recycle Bin"}
+            <button class="pill small" disabled={busy !== null || !copiesOn.size} onclick={askRemoveCopies} data-batch>
+              <Icon name="trash" size={14} />{droid ? "Delete" : "Move"} {copiesOn.size} {copiesOn.size === 1 ? "copy" : "copies"}{droid ? "" : ` to the ${bin}`}
             </button>
           </div>
         </div>
@@ -752,9 +767,26 @@
   </div>
 {/snippet}
 
+{#if confirmingCopies}
+  <Modal title="{droid ? 'Delete' : 'Remove'} {copiesOn.size} {copiesOn.size === 1 ? 'copy' : 'copies'}?" onclose={() => (confirmingCopies = false)} width="440px">
+    <p>
+      {#if droid}
+        This deletes the {copiesOn.size === 1 ? "file" : "files"} from your phone for good. Android has no recycle bin, so they can’t be brought back.
+      {:else}
+        This moves the {copiesOn.size === 1 ? "file" : "files"} to the {bin}. Undo can’t bring {copiesOn.size === 1 ? "it" : "them"} back here; put {copiesOn.size === 1 ? "it" : "them"} back from the {bin} yourself.
+      {/if}
+    </p>
+    <p class="secondary">The copy marked Keep stays, and Cadence checks again that it is still there before removing anything. Favorites and ratings move to it.</p>
+    {#snippet footer()}
+      <button class="pill ghost" onclick={() => (confirmingCopies = false)}>Cancel</button>
+      <button class="pill danger" onclick={removeCopies}>{droid ? "Delete" : "Move"} {copiesOn.size === 1 ? "copy" : "copies"}</button>
+    {/snippet}
+  </Modal>
+{/if}
+
 {#if changesOpen}
   <Modal title="Recent changes" onclose={() => (changesOpen = false)} width="560px">
-    <p class="secondary about">What Cadence changed in your songs’ files, newest first. Undo puts them back as they were (covers too); removed copies come back from the Recycle Bin.</p>
+    <p class="secondary about">What Cadence changed in your songs’ files, newest first. Undo puts them back as they were (covers too){canBringBack ? "; removed copies come back from the Recycle Bin" : mac ? ". Removed copies are in the Trash; Undo can’t bring them back" : ". Deleted copies can’t be brought back"}.</p>
     {#each changes as c (c.id)}
       <div class="row">
         <Icon name="clock" size={18} />
@@ -771,6 +803,10 @@
 {/if}
 
 <style>
+  .pill.danger {
+    background: #c9485b;
+    color: white;
+  }
   header {
     display: flex;
     justify-content: space-between;
@@ -1107,5 +1143,9 @@
     .keys {
       display: none;
     }
+  }
+  /* Keyboard hints mean nothing on Android, however wide. */
+  :global(html.phone) .keys {
+    display: none;
   }
 </style>

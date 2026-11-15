@@ -10,7 +10,7 @@
     // The mini window is transparent so its rounded corners show.
     document.documentElement.style.background = "transparent";
     document.body.style.background = "transparent";
-    app.init();
+    app.initMini();
   });
 
   $effect(() => app.paintTheme(app.currentAlbum));
@@ -31,11 +31,35 @@
     lyrics = null;
     if (id) api.lyrics(id).then((l) => id === songId && (lyrics = l));
   });
+  // The timing nudge set in the main window's lyrics view (same localStorage key and per-song
+  // layout as LyricsView.svelte; lyrics placed on the singing have a separate one).
+  const OFFSETS = "cadence-lyric-offsets";
+  let offsets = $state<Record<string, number>>({});
+  function readOffsets() {
+    try {
+      const o = JSON.parse(localStorage.getItem(OFFSETS) ?? "{}");
+      offsets = o && typeof o === "object" ? o : {};
+    } catch {
+      offsets = {};
+    }
+  }
+  onMount(() => {
+    readOffsets();
+    // Another window (the main one) changed it.
+    const changed = (e: StorageEvent) => (e.key === OFFSETS || e.key === null) && readOffsets();
+    window.addEventListener("storage", changed);
+    return () => window.removeEventListener("storage", changed);
+  });
+  const offset = $derived.by(() => {
+    if (!songId) return 0;
+    const v = offsets[lyrics?.voice === "on" ? `${songId}:voice` : songId];
+    return typeof v === "number" && isFinite(v) ? v : 0;
+  });
   const line = $derived.by(() => {
     const lines = lyrics?.synced ?? [];
     let text = "";
     for (const l of lines) {
-      if (l.time > app.position + 0.25) break;
+      if (l.time > app.position - offset + 0.25) break;
       text = l.text;
     }
     return text;
@@ -84,7 +108,7 @@
   </div>
 
   <div class="progress" role="slider" tabindex="-1" aria-label="Seek" aria-valuemin={0} aria-valuemax={duration} aria-valuenow={app.position} onclick={seek} onkeydown={() => {}}>
-    <div class="fill" style="width: {pct}%"></div>
+    <div class="fill" style="transform: scaleX({Math.min(100, pct) / 100})"></div>
   </div>
 </div>
 
@@ -107,14 +131,11 @@
     inset: -50%;
     background-size: cover;
     background-position: center;
+    /* Still: this window stays open for hours, and a drifting layer under a blur is re-blurred on
+       every frame, even while paused. Blurred once instead. */
     filter: blur(36px) saturate(1.6);
     opacity: 0.75;
-    animation: drift 24s ease-in-out infinite alternate;
-  }
-  @keyframes drift {
-    to {
-      transform: scale(1.15) rotate(8deg);
-    }
+    transform: scale(1.07) rotate(4deg);
   }
   .veil {
     position: absolute;
@@ -293,7 +314,9 @@
   }
   .fill {
     position: relative;
+    width: 100%;
     height: 3px;
+    transform-origin: left;
     background: var(--accent);
     box-shadow: 0 0 10px var(--accent);
     transition: height 0.15s;
@@ -303,7 +326,6 @@
     height: 5px;
   }
   @media (prefers-reduced-motion: reduce) {
-    .wash,
     .eq.on i {
       animation: none;
     }

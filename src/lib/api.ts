@@ -570,7 +570,9 @@ export const api = {
   aiSettings: () => invoke<{ settings: AiSettings; hasKey: boolean }>("get_ai_settings"),
   setAiSettings: (settings: AiSettings) => invoke<void>("set_ai_settings", { settings }),
   setAiKey: (text: string) => invoke<{ settings: AiSettings; hasKey: boolean }>("set_ai_key", { text }),
-  searchLyrics: (query: string) => invoke<LyricsHit[]>("search_lyrics", { query }),
+  /** Results best first: the artist, then closeness to the song's length, album, timed. */
+  searchLyrics: (trackId: string, title: string, artist: string, album: string) =>
+    invoke<LyricsHit[]>("search_lyrics", { trackId, title, artist, album }),
   useLyrics: (trackId: string, hitId: number) => invoke<Lyrics>("use_lyrics", { trackId, hitId }),
   pasteLyrics: (trackId: string, text: string) => invoke<Lyrics>("paste_lyrics", { trackId, text }),
   hideLyrics: (trackId: string) => invoke<void>("hide_lyrics", { trackId }),

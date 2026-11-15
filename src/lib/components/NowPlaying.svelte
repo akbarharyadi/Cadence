@@ -45,6 +45,24 @@
   let dragging = $state(false);
   let dragValue = $state(0);
   const pos = $derived(dragging ? dragValue : app.position);
+  // `change` only fires when the value moved, so a press on the thumb without moving would leave
+  // the slider "dragging" (frozen) for good: the release itself ends the drag.
+  let releasedAt = 0;
+  function seekRelease(e: PointerEvent & { currentTarget: HTMLInputElement }) {
+    if (!dragging) return;
+    app.seek(+e.currentTarget.value);
+    dragging = false;
+    releasedAt = performance.now();
+  }
+  /** The pointer was taken away, or focus left: drop the drag without seeking. */
+  function seekAbort() {
+    dragging = false;
+  }
+  /** Keyboard (and anything else that changes the value): seek. The `change` that follows a pointer release is already handled. */
+  function seekChange(e: Event & { currentTarget: HTMLInputElement }) {
+    if (performance.now() - releasedAt > 150) app.seek(+e.currentTarget.value);
+    dragging = false;
+  }
   const duration = $derived(s?.duration ?? 0);
 
   const src = $derived(s?.source);
@@ -189,7 +207,10 @@
             style="--pct: {duration ? (pos / duration) * 100 : 0}%"
             onpointerdown={() => { dragging = true; dragValue = app.position; }}
             oninput={(e) => (dragValue = +e.currentTarget.value)}
-            onchange={(e) => { app.seek(+e.currentTarget.value); dragging = false; }}
+            onpointerup={seekRelease}
+            onpointercancel={seekAbort}
+            onblur={seekAbort}
+            onchange={seekChange}
             aria-label="Seek"
           />
           <div class="times"><span>{formatTime(pos)}</span><span>-{formatTime(Math.max(0, duration - pos))}</span></div>
@@ -326,17 +347,9 @@
     background-size: cover;
     background-position: center;
     filter: blur(90px) saturate(1.6) brightness(0.7);
-    transform: scale(1.1);
-    animation: drift 40s ease-in-out infinite alternate;
-  }
-  @keyframes drift {
-    to {
-      transform: scale(1.25) rotate(4deg);
-    }
-  }
-  /* Phones can't redraw a cover blurred this much at 120 Hz while it drifts: keep it still there. */
-  :global(html.phone) .bg {
-    animation: none;
+    /* Still: a backdrop blurred this much is rendered once. (It used to drift, which re-blurred it
+       every frame for as long as Now Playing was open.) */
+    transform: scale(1.18);
   }
   /* Black over the backdrop, as much as this cover needs (`--shade`, see coverLight.ts), with a
      soft vignette so the edges recede. */
@@ -565,9 +578,6 @@
   /* ---------- Less motion when the system asks for it ---------- */
   @media (prefers-reduced-motion: reduce) {
     .np {
-      animation: none;
-    }
-    .bg {
       animation: none;
     }
     .cover,

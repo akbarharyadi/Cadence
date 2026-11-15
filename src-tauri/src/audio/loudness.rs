@@ -1,7 +1,9 @@
 //! Loudness leveling (ReplayGain 2.0 / EBU R128).
 //!
-//! Every song is measured once (integrated loudness + sample peak). During playback, each song gets a
-//! gain that brings it to the −18 LUFS reference, capped so its peak stays 1 dB below full scale.
+//! Every song is measured once (integrated loudness + true peak). During playback, each song gets a
+//! gain that brings it to the −18 LUFS reference, capped so its peak stays 1 dB below full scale
+//! (−1 dBTP). Songs measured before true peak was used have their sample peak stored, which can
+//! sit a little below the true peak; they keep working and get the true peak when re-measured.
 //! Besides matching levels between songs, the reduction gives modern "hot" masters the headroom they
 //! need: without it, resampling and EQ push their peaks over full scale and they clip.
 
@@ -25,7 +27,8 @@ const PEAK_MARGIN_DB: f32 = 1.0;
 pub struct GainInfo {
     /// Gain to the reference level, in dB.
     pub gain: f32,
-    /// Highest sample magnitude (1.0 = full scale).
+    /// Highest magnitude (1.0 = full scale): the true (inter-sample) peak for songs Cadence
+    /// measures, the sample peak for older measurements and most ReplayGain tags.
     pub peak: f32,
 }
 
@@ -108,7 +111,9 @@ pub fn parse_tag_number(s: &str) -> Option<f32> {
 pub fn measure(path: &Path) -> Result<(GainInfo, EbuR128)> {
     let mut src = Source::open(path)?;
     let (rate, channels) = (src.rate, src.channels);
-    let mut meter = EbuR128::new(channels as u32, rate, Mode::I | Mode::SAMPLE_PEAK)?;
+    // True peak (4× oversampled, BS.1770): the peaks between samples that a DAC's reconstruction
+    // filter (or resampling) actually produces, often above the highest sample of a loud master.
+    let mut meter = EbuR128::new(channels as u32, rate, Mode::I | Mode::SAMPLE_PEAK | Mode::TRUE_PEAK)?;
     while let Some((samples, r, c)) = src.next_chunk()? {
         if r != rate || c != channels {
             // Format changed mid-stream (rare); measure what we have.
@@ -120,9 +125,7 @@ pub fn measure(path: &Path) -> Result<(GainInfo, EbuR128)> {
     if !lufs.is_finite() {
         return Err(anyhow!("silent or too short to measure"));
     }
-    let peak = (0..channels as u32)
-        .filter_map(|c| meter.sample_peak(c).ok())
-        .fold(0.0f64, f64::max);
+    let peak = true_peak(&meter, channels);
     Ok((
         GainInfo {
             gain: (REFERENCE_LUFS - lufs) as f32,
@@ -130,6 +133,14 @@ pub fn measure(path: &Path) -> Result<(GainInfo, EbuR128)> {
         },
         meter,
     ))
+}
+
+/// The highest peak over all channels: the true peak, never below the sample peak.
+fn true_peak(meter: &EbuR128, channels: usize) -> f64 {
+    (0..channels as u32)
+        .flat_map(|c| [meter.true_peak(c).ok(), meter.sample_peak(c).ok()])
+        .flatten()
+        .fold(0.0f64, f64::max)
 }
 
 /// Measures every song of an album; returns per-song track gains and the album gain.
@@ -168,6 +179,22 @@ mod tests {
         assert_eq!(parse_tag_number("+1.5 dB"), Some(1.5));
         assert_eq!(parse_tag_number("0.988525"), Some(0.988525));
         assert_eq!(parse_tag_number("abc"), None);
+    }
+
+    #[test]
+    fn true_peak_sees_between_the_samples() {
+        // A sine at a quarter of the rate, sampled 45° off its crests: every sample is at
+        // 0.707 of the real peak (−3 dB).
+        let rate = 48_000u32;
+        let mut meter = EbuR128::new(1, rate, Mode::I | Mode::SAMPLE_PEAK | Mode::TRUE_PEAK).unwrap();
+        let x: Vec<f32> = (0..rate)
+            .map(|i| (0.9 * (std::f64::consts::FRAC_PI_2 * i as f64 + std::f64::consts::FRAC_PI_4).sin()) as f32)
+            .collect();
+        meter.add_frames_f32(&x).unwrap();
+        let sample = meter.sample_peak(0).unwrap();
+        let tp = true_peak(&meter, 1);
+        assert!((sample - 0.9 * std::f64::consts::FRAC_1_SQRT_2).abs() < 0.01, "{sample}");
+        assert!(tp > 0.85, "true peak {tp} should be near 0.9");
     }
 
     #[test]

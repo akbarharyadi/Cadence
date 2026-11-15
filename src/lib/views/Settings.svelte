@@ -73,6 +73,12 @@
     typeof navigator !== "undefined" && navigator.userAgent.includes("Windows")
       ? "well under a minute per song with a graphics card (2–3 minutes without)"
       : "about 2–3 minutes per song";
+  const os = (() => {
+    const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+    return ua.includes("Windows") ? "windows" : ua.includes("Android") ? "android" : ua.includes("Mac OS") ? "mac" : "linux";
+  })();
+  /** Where the system keeps the ListenBrainz token. */
+  const tokenStore = { windows: "Windows Credential Manager", android: "this device’s private storage", mac: "your Keychain", linux: "your system keyring" }[os];
   const isSong = (path: string) => /\.(flac|alac|wav|aiff?|mp3|m4a|aac|ogg|opus)$/i.test(path);
 
   async function remove(path: string) {
@@ -171,7 +177,15 @@
           <Icon name="wave" size={18} />
           <p>
             Your device runs at {khz(out.sampleRate)}, so this {khz(src.sampleRate)} music is converted on the way (with a high-quality resampler).
-            To play it at its own rate, open Windows Sound settings, choose {out.device}, and set its format to <b>{khz(src.sampleRate)}</b>.
+            {#if os === "windows"}
+              To play it at its own rate, open Windows Sound settings, choose {out.device}, and set its format to <b>{khz(src.sampleRate)}</b>.
+            {:else if os === "mac"}
+              To play it at its own rate, open Audio MIDI Setup, choose {out.device}, and set its format to <b>{khz(src.sampleRate)}</b>.
+            {:else if os === "android"}
+              To play it at its own rate, use a USB DAC and turn on Direct output on the Sound page.
+            {:else}
+              To play it at its own rate, set the format of {out.device} to <b>{khz(src.sampleRate)}</b> in your system’s sound settings, or turn on Direct output on the Sound page.
+            {/if}
           </p>
         </div>
       {/if}
@@ -393,7 +407,7 @@
         <input class="field" type="password" bind:value={lbToken} placeholder="Paste your ListenBrainz user token" aria-label="ListenBrainz user token" autocomplete="off" />
         <button class="pill" type="submit" disabled={!lbToken.trim() || lbBusy}>{lbBusy ? "Checking…" : "Connect"}</button>
       </form>
-      <p class="hint">Find your token at listenbrainz.org, under your account settings. It’s stored in Windows Credential Manager, not in Cadence’s files.</p>
+      <p class="hint">Find your token at listenbrainz.org, under your account settings. It’s stored in {tokenStore}, not in Cadence’s files.</p>
       {#if lbError}<p class="error">{lbError}</p>{/if}
     {/if}
   </section>
@@ -417,13 +431,13 @@
           {#if updates.phase === "checking"}Checking…
           {:else if updates.phase === "current"}You have the latest version.
           {:else if updates.phase === "downloading"}Downloading {updates.next}… {Math.round(updates.progress * 100)}%
-          {:else if updates.phase === "ready"}Version {updates.next} is downloaded: restart Cadence to finish.
+          {:else if updates.phase === "ready"}Version {updates.next} is downloaded: restart Cadence to finish.{#if updates.message} {updates.message}{/if}
           {:else if updates.phase === "available"}Version {updates.next} is available.
           {:else if updates.phase === "error"}{updates.message}{/if}
         </p>
         <div class="update-actions">
           {#if updates.phase === "ready" || updates.phase === "available"}
-            <button class="pill" onclick={() => updates.apply()}>{updates.phase === "ready" ? "Restart to update" : "Update"}</button>
+            <button class="pill" disabled={updates.installing} onclick={() => updates.apply()}>{updates.phase === "ready" ? "Restart to update" : "Update"}</button>
           {:else}
             <button class="pill ghost" disabled={updates.phase === "checking" || updates.phase === "downloading"} onclick={() => updates.check()}>Check now</button>
           {/if}

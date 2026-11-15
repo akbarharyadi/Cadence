@@ -38,13 +38,23 @@
   }
 
   async function chooseFile() {
-    const path = await open({ title: `Picture for ${name}`, filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png", "webp", "gif", "bmp"] }] });
-    if (typeof path === "string") await use({ kind: "file", path }, "file");
+    try {
+      const path = await open({ title: `Picture for ${name}`, filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png", "webp", "gif", "bmp"] }] });
+      if (typeof path === "string") await use({ kind: "file", path }, "file");
+    } catch (e) {
+      error = String(e);
+    }
   }
 
   async function reset() {
-    await app.resetArtistImage(name);
-    close();
+    error = "";
+    try {
+      await app.resetArtistImage(name);
+      close();
+    } catch (e) {
+      error = String(e);
+      app.showToast(`Couldn't change the picture back: ${e}`);
+    }
   }
 
   const close = () => (app.artistEditing = null);

@@ -93,10 +93,9 @@
           : null,
   );
 
-  const isActive = (v: View) =>
-    app.view.name === v.name ||
-    (v.name === "albums" && app.view.name === "album") ||
-    (v.name === "artists" && app.view.name === "artist");
+  /** Lit: the page on screen, or for a page inside a section (an album, an artist), the section it
+   *  was opened from (`app.section`). */
+  const isActive = (key: string) => app.section === key;
 
   function onSearch(e: Event) {
     const q = (e.target as HTMLInputElement).value;
@@ -107,14 +106,20 @@
     } else if (app.view.name === "search") app.back();
   }
 
-  async function newPlaylist() {
-    const p = await app.createPlaylist(`Playlist ${app.playlists.filter((x) => !x.smart).length + 1}`);
-    app.go({ name: "playlist", id: p.id });
+  /** Escape in the search box: empty it, and leave the results for the page before them. */
+  function onSearchKey(e: KeyboardEvent) {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    const wasSearching = app.view.name === "search";
+    app.search = "";
+    if (wasSearching) app.back();
+    searchInput?.blur();
   }
 
   function newPlaylistMenu(e: MouseEvent) {
     app.openMenu(e, [
-      { label: "New playlist", icon: "playlist", action: newPlaylist },
+      { label: "New playlist", icon: "playlist", action: () => app.newPlaylist() },
       {
         label: "New smart playlist…",
         icon: "smart",
@@ -146,24 +151,24 @@
 
   <label class="search">
     <Icon name="search" size={15} />
-    <input bind:this={searchInput} placeholder="Search your music" value={app.search} oninput={onSearch} spellcheck="false" />
+    <input bind:this={searchInput} placeholder="Search your music" value={app.search} oninput={onSearch} onkeydown={onSearchKey} spellcheck="false" />
     <kbd>Ctrl K</kbd>
   </label>
 
   <nav>
-    <button class="item" class:active={app.view.name === "home"} onclick={() => app.go({ name: "home" })}>
+    <button class="item" class:active={isActive("home")} onclick={() => app.go({ name: "home" })}>
       <Icon name="home" size={18} />Listen Now
     </button>
-    <button class="item" class:active={app.view.name === "discover"} onclick={() => app.go({ name: "discover" })}>
+    <button class="item" class:active={isActive("discover")} onclick={() => app.go({ name: "discover" })}>
       <Icon name="sparkle" size={18} />Discover
     </button>
-    <button class="item" class:active={app.view.name === "stats"} onclick={() => app.go({ name: "stats" })}>
+    <button class="item" class:active={isActive("stats")} onclick={() => app.go({ name: "stats" })}>
       <Icon name="gauge" size={18} />Your Stats
     </button>
 
     <div class="group">Library</div>
     {#each library as item}
-      <button class="item" class:active={isActive(item.view)} onclick={() => app.go(item.view)}>
+      <button class="item" class:active={isActive(item.view.name)} onclick={() => app.go(item.view)}>
         <Icon name={item.icon} size={18} />{item.label}
         {#if item.view.name === "attention" && app.attentionCount > 0}
           <span class="badge" aria-label="{app.attentionCount} to fix">{app.attentionCount > 999 ? "999+" : app.attentionCount}</span>
@@ -176,7 +181,7 @@
       <button class="add" onclick={newPlaylistMenu} aria-label="New playlist" title="New playlist"><Icon name="plus" size={15} /></button>
     </div>
     {#each app.playlists as p (p.id)}
-      <button class="item" class:active={app.view.name === "playlist" && app.view.id === p.id} onclick={() => app.go({ name: "playlist", id: p.id })}>
+      <button class="item" class:active={isActive(`playlist:${p.id}`)} onclick={() => app.go({ name: "playlist", id: p.id })}>
         <Icon name={p.smart ? "smart" : "playlist"} size={18} /><span class="label">{p.name}</span>
       </button>
     {:else}
@@ -197,11 +202,11 @@
         </span>
       </div>
     {/if}
-    <button class="item" class:active={app.view.name === "sound"} onclick={() => app.go({ name: "sound" })}>
+    <button class="item" class:active={isActive("sound")} onclick={() => app.go({ name: "sound" })}>
       <Icon name="eq" size={18} />Sound
       {#if app.dsp?.eq.enabled || app.dsp?.crossfeed.enabled}<span class="dot" title="Equalizer or crossfeed is on"></span>{/if}
     </button>
-    <button class="item" class:active={app.view.name === "settings"} onclick={() => app.go({ name: "settings" })}>
+    <button class="item" class:active={isActive("settings")} onclick={() => app.go({ name: "settings" })}>
       <Icon name="settings" size={18} />Settings
     </button>
   </div>

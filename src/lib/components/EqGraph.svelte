@@ -99,7 +99,7 @@
 </script>
 
 <div class="wrap" class:off={!eq.enabled} bind:clientWidth={W}>
-  <svg bind:this={svg} viewBox="0 0 {W} {H}" style="height: {H}px" onpointermove={move} onpointerup={() => (drag = null)} role="group" aria-label="Equalizer curve">
+  <svg bind:this={svg} viewBox="0 0 {W} {H}" style="height: {H}px" onpointermove={move} onpointerup={() => (drag = null)} onpointercancel={() => (drag = null)} onlostpointercapture={() => (drag = null)} role="group" aria-label="Equalizer curve">
     <defs>
       <linearGradient id="eqfill" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0" stop-color="var(--accent)" stop-opacity="0.35" />

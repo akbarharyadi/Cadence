@@ -113,8 +113,12 @@ pub fn run() {
                 let _ = (&handle, song);
             });
 
+            // No tray (Linux without AppIndicator, say): Cadence runs without one; closing the
+            // window then quits instead of hiding it where it couldn't be reached.
             #[cfg(desktop)]
-            tray::create(app.handle())?;
+            if let Err(e) = tray::create(app.handle()) {
+                log::warn!("no tray icon: {e}");
+            }
             #[cfg(desktop)]
             hotkeys::set(app.handle(), ctx.state.settings.lock().global_hotkeys);
             // On a phone the music lives in the shared Music folder; start with it.
@@ -132,7 +136,7 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event
                 && window.label() == "main" {
                     let ctx = window.app_handle().state::<Ctx>();
-                    if ctx.state.settings.lock().close_to_tray {
+                    if ctx.state.settings.lock().close_to_tray && tray::available() {
                         api.prevent_close();
                         let _ = window.hide();
                     }
@@ -265,8 +269,9 @@ pub fn run() {
         .expect("error while building Cadence")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
-                // Make sure the listening history is on disk.
-                app.state::<Ctx>().state.save_history();
+                // The song playing now is recorded (and scrobbled), and the history, the session's
+                // position and the settings are on disk.
+                hub::shutdown(&app.state::<Ctx>());
             }
         });
 }

@@ -1,10 +1,12 @@
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { flushSync } from "svelte";
+import { flushSync, tick } from "svelte";
 import { eqSync } from "./eq";
 
 /** Top-level places (tabs and sidebar): switching between them crossfades instead of sliding. */
-const TOP_LEVEL = new Set(["home", "discover", "stats", "albums", "artists", "songs", "favorites", "health", "recent", "search", "sound", "settings"]);
+const TOP_LEVEL = new Set(["home", "discover", "stats", "albums", "artists", "songs", "favorites", "health", "recent", "search", "sound", "settings", "library"]);
+/** Pages with their own place in the sidebar (see `section`). */
+const SECTIONS = new Set([...TOP_LEVEL, "attention"]);
 
 let transitions = 0;
 
@@ -52,19 +54,47 @@ export function android(): AndroidBridge | undefined {
   return typeof window === "undefined" ? undefined : (window as unknown as { CadenceAndroid?: AndroidBridge }).CadenceAndroid;
 }
 
-/** Runs a view change inside a view transition (see app.css), when the system allows motion. */
-function animate(kind: "forward" | "back" | "tab", change: () => void) {
+/** How many pages Back (and Forward) remember. */
+const MAX_HISTORY = 100;
+
+/** A page left behind: where it was scrolled to, and the sidebar section it belonged to. */
+interface HistoryEntry {
+  view: View;
+  scroll: number;
+  section: string;
+}
+
+function sameView(a: View, b: View): boolean {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
+/** The page area's scroll offset. */
+function contentScroll(): number {
+  return (typeof document !== "undefined" && document.querySelector<HTMLElement>(".content")?.scrollTop) || 0;
+}
+
+/** Runs a view change inside a view transition (see app.css), when the system allows motion.
+ *  `after` runs once the new page is in the document. */
+function animate(kind: "forward" | "back" | "tab", change: () => void, after?: () => void) {
   const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
   // Phones skip view transitions: snapshotting both pages stalls a frame for ~50 ms there. The
   // new page animates in by itself instead (.page-in in app.css), which costs nothing.
   if (!doc.startViewTransition || matchMedia("(prefers-reduced-motion: reduce)").matches || document.documentElement.classList.contains("phone")) {
     change();
+    if (after) tick().then(after);
     return;
   }
   const root = document.documentElement;
   root.dataset.nav = kind;
   const run = ++transitions;
-  const t = doc.startViewTransition(() => flushSync(change)) as { finished?: Promise<void> } | undefined;
+  const t = doc.startViewTransition(() => {
+    flushSync(change);
+    after?.();
+  }) as { finished?: Promise<void> } | undefined;
   // The page's transition names (app.css) are only needed while it animates.
   t?.finished?.finally(() => {
     if (run === transitions) delete root.dataset.nav;
@@ -98,7 +128,9 @@ export type View =
   | { name: "similar"; id: string }
   | { name: "discover" }
   | { name: "stats" }
-  | { name: "settings" };
+  | { name: "settings" }
+  /** Phones: every place in the library on one page (the tab bar's Library). */
+  | { name: "library" };
 
 export interface MenuItem {
   label: string;
@@ -121,6 +153,16 @@ class AppState {
   status = $state.raw<Status | null>(null);
   folders = $state<string[]>([]);
   scan = $state<{ done: number; total: number } | null>(null);
+  /** Folders were just added (or looked at again) and the scan hasn't reported yet: Welcome says
+   *  it's looking instead of "No music found". */
+  adding = $state(false);
+  private addingTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Marks the wait for a scan's first report (cleared by it, or after a minute at most). */
+  startedAdding(on = true) {
+    this.adding = on;
+    clearTimeout(this.addingTimer);
+    if (on) this.addingTimer = setTimeout(() => (this.adding = false), 60_000);
+  }
   loaded = $state(false);
 
   view = $state<View>({ name: "home" });
@@ -128,6 +170,15 @@ class AppState {
   navSeq = $state(0);
   navKind = $state<"forward" | "back" | "tab">("tab");
   history = $state<View[]>([]);
+  /** Pages Back went past, newest last: Forward (Alt+Right, mouse button 5) opens them again.
+   *  Cleared when a new page is opened. */
+  forwardHistory = $state<View[]>([]);
+  /** The sidebar / tab bar place the page on screen belongs to: the top-level page (or playlist)
+   *  it was opened from, so an album opened from Recently Added keeps Recently Added lit. */
+  section = $state<string>("home");
+  /** Scroll offsets and sections of the pages in `history` and `forwardHistory`, kept beside them. */
+  private backMeta: Omit<HistoryEntry, "view">[] = [];
+  private forwardMeta: Omit<HistoryEntry, "view">[] = [];
   nowPlayingOpen = $state(false);
   /** A song opened from another app: Now Playing opens when it starts. */
   opening = $state<string | null>(null);
@@ -578,6 +629,8 @@ class AppState {
   removeFromQueue(index: number) {
     const id = this.status?.queue[index];
     if (!id) return;
+    // The player keeps the song that's playing (it may have just started): nothing is removed.
+    if (index === this.status?.index) return;
     const t = this.trackById.get(id);
     api.removeFromQueue(index);
     this.showToast(`Removed ${t ? `“${t.title}”` : "a song"} from Up Next`, {
@@ -626,8 +679,7 @@ class AppState {
   /**
    * Where playback is, as of the player's last update (four times a second while playing). Not
    * every frame: that made the window redraw up to 160 times a second (about 15% of a core) and
-   * left garbage behind. Seek lines glide between updates with CSS; what has to move smoothly
-   * (the karaoke sweep) uses `livePosition()`.
+   * left garbage behind. Seek lines glide between updates with CSS.
    */
   position = $state(0);
   private posBase = { pos: 0, at: 0, playing: false };
@@ -652,6 +704,7 @@ class AppState {
       listen("library-changed", async () => {
         await Promise.all([this.loadLibrary(), this.loadMarks()]);
         this.scan = null;
+        this.startedAdding(false);
         await this.dropOwnedSuggestions();
         await Promise.all([this.loadDuplicates(), this.loadHealth(), this.loadArtistPairsCount()]);
       }),
@@ -667,9 +720,15 @@ class AppState {
           else this.showToast("No covers found for those albums");
         }
       }),
-      listen<{ done: number; total: number }>("library-progress", (e) => (this.scan = e.payload)),
+      listen<{ done: number; total: number }>("library-progress", (e) => {
+        this.scan = e.payload;
+        if (this.adding) this.startedAdding(false);
+      }),
       // A rescan that found nothing new: nothing to reload.
-      listen("library-scanned", () => (this.scan = null)),
+      listen("library-scanned", () => {
+        this.scan = null;
+        this.startedAdding(false);
+      }),
       listen("history-changed", async () => (this.listening = await api.history())),
       listen("marks-changed", () => this.loadMarks()),
       listen<HealthProgress>("health-progress", (e) => (this.healthJob = e.payload.running ? e.payload : null)),
@@ -761,6 +820,26 @@ class AppState {
     }, 1500);
   }
 
+  /**
+   * For the mini player window: only what it shows (the player's status, the song and album
+   * playing, the theme). The library comes once (the playing song is looked up in it) and again
+   * when it changes; none of the main window's lists, history, sonic data or AI mixes are loaded.
+   */
+  async initMini() {
+    await Promise.all([
+      listen<Omit<Status, "queue"> & { queue?: string[] }>("player-status", (e) => {
+        const queue = e.payload.queue ?? this.status?.queue;
+        if (queue) this.applyStatus({ ...e.payload, queue });
+      }),
+      listen("library-changed", () => this.loadLibrary().catch(() => {})),
+    ]);
+    window.addEventListener("storage", (e) => e.key === "cadence-theme" && (this.theme = savedTheme()));
+    const [lib, status] = await Promise.all([api.library(), api.status()]);
+    this.setLibrary(lib);
+    if (!this.status) this.applyStatus(status);
+    this.loaded = true;
+  }
+
   private applyStatus(s: Status) {
     this.status = s;
     const albumId = s.index != null ? this.trackById.get(s.queue[s.index])?.albumId : undefined;
@@ -806,16 +885,21 @@ class AppState {
 
   /** Today's picks: from the day's cache, or found now (once a day; `refresh` for new ones). */
   async loadDaily(refresh: boolean) {
-    if (!this.aiReady || this.dailyState === "loading") return;
+    if (!this.aiReady || this.dailyState === "loading" || this.aiNewState === "loading") return;
     this.dailyState = "loading";
     this.dailyError = "";
+    // Home's "New music for you" shows the same list (see loadAiNew).
+    this.aiNewState = "loading";
     try {
       this.daily = await api.aiDailyPicks(refresh);
       this.aiNew = this.daily.picks;
       this.dailyState = "idle";
+      this.aiNewState = "idle";
     } catch (e) {
       this.dailyError = String(e);
       this.dailyState = "error";
+      this.aiNewError = String(e);
+      this.aiNewState = "error";
     }
   }
 
@@ -849,14 +933,24 @@ class AppState {
   }
 
   async loadAiNew(refresh: boolean) {
-    if (!this.aiReady || this.aiNewState === "loading") return;
+    if (!this.aiReady || this.aiNewState === "loading" || this.dailyState === "loading") return;
     this.aiNewState = "loading";
+    // Home's "New music for you" and Discover's "Today's picks" are the same list (the engine's
+    // ai_discover is ai_daily_picks without the details): both are set from one answer, so new
+    // ones found here show on Discover too.
+    this.dailyState = "loading";
+    this.dailyError = "";
     try {
-      this.aiNew = await api.aiDiscover(refresh);
+      const daily = await api.aiDailyPicks(refresh);
+      this.daily = daily;
+      this.aiNew = daily.picks;
       this.aiNewState = "idle";
+      this.dailyState = "idle";
     } catch (e) {
       this.aiNewError = String(e);
       this.aiNewState = "error";
+      this.dailyError = String(e);
+      this.dailyState = "error";
     }
   }
 
@@ -885,18 +979,68 @@ class AppState {
     this.albums = lib.albums;
   }
 
+  /** The section a page starts: top-level pages and playlists are their own, others keep the
+   *  one they were opened from. */
+  private sectionOf(view: View): string {
+    if (SECTIONS.has(view.name)) return view.name;
+    if (view.name === "playlist") return `playlist:${view.id}`;
+    return this.section;
+  }
+
+  /** Shows a page; the sidebar's search box only keeps its text on the search page. */
+  private setView(view: View) {
+    this.view = view;
+    const q = view.name === "search" ? view.query : "";
+    if (this.search !== q) this.search = q;
+  }
+
+  private remember(stack: View[], meta: Omit<HistoryEntry, "view">[], entry: HistoryEntry) {
+    stack.push(entry.view);
+    meta.push({ scroll: entry.scroll, section: entry.section });
+    if (stack.length > MAX_HISTORY) {
+      stack.splice(0, stack.length - MAX_HISTORY);
+      meta.splice(0, meta.length - MAX_HISTORY);
+    }
+  }
+
+  /** Puts a page back where it was scrolled to once it has rendered (its lists can take a moment
+   *  to reach that height; gives up after half a second, or when another page is opened). */
+  private restoreScroll(top: number) {
+    if (top <= 0) return;
+    const seq = this.navSeq;
+    let tries = 0;
+    const attempt = () => {
+      if (seq !== this.navSeq) return;
+      const el = document.querySelector<HTMLElement>(".content");
+      if (!el) return;
+      el.scrollTop = top;
+      if (Math.abs(el.scrollTop - top) > 2 && ++tries < 10) setTimeout(attempt, 50);
+    };
+    attempt();
+  }
+
   go(view: View) {
     // Background listening (lyrics follow the singer) gives way while the page changes.
     api.uiBusy().catch(() => {});
     // Typing in the search box updates the same page: no animation for that.
     if (view.name === "search" && this.view.name === "search") {
-      this.view = view;
+      this.setView(view);
+      return;
+    }
+    // The page that's already open (Albums pressed again): back to its top, nothing to go back to.
+    if (sameView(view, this.view)) {
+      this.nowPlayingOpen = false;
+      document.querySelector(".content")?.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
     const kind = TOP_LEVEL.has(view.name) ? "tab" : "forward";
+    const here: HistoryEntry = { view: this.view, scroll: contentScroll(), section: this.section };
     animate(kind, () => {
-      this.history.push(this.view);
-      this.view = view;
+      this.remember(this.history, this.backMeta, here);
+      this.forwardHistory = [];
+      this.forwardMeta = [];
+      this.section = this.sectionOf(view);
+      this.setView(view);
       this.navKind = kind;
       this.navSeq++;
       this.nowPlayingOpen = false;
@@ -905,13 +1049,43 @@ class AppState {
   }
 
   back() {
-    const prev = this.history.pop();
-    if (prev)
-      animate("back", () => {
-        this.view = prev;
+    if (!this.history.length) return;
+    const prev = this.history.pop()!;
+    const meta = this.backMeta.pop() ?? { scroll: 0, section: this.sectionOf(prev) };
+    const here: HistoryEntry = { view: this.view, scroll: contentScroll(), section: this.section };
+    animate(
+      "back",
+      () => {
+        this.remember(this.forwardHistory, this.forwardMeta, here);
+        this.section = meta.section;
+        this.setView(prev);
         this.navKind = "back";
         this.navSeq++;
-      });
+        this.nowPlayingOpen = false;
+      },
+      () => this.restoreScroll(meta.scroll),
+    );
+  }
+
+  /** Opens again the page Back left (Alt+Right, the mouse's forward button). */
+  forward() {
+    if (!this.forwardHistory.length) return;
+    const next = this.forwardHistory.pop()!;
+    const meta = this.forwardMeta.pop() ?? { scroll: 0, section: this.sectionOf(next) };
+    const here: HistoryEntry = { view: this.view, scroll: contentScroll(), section: this.section };
+    const kind = TOP_LEVEL.has(next.name) ? "tab" : "forward";
+    animate(
+      kind,
+      () => {
+        this.remember(this.history, this.backMeta, here);
+        this.section = meta.section;
+        this.setView(next);
+        this.navKind = kind;
+        this.navSeq++;
+        this.nowPlayingOpen = false;
+      },
+      () => this.restoreScroll(meta.scroll),
+    );
   }
 
   /** Puts the files of one of Cadence's changes back as they were. */
@@ -1017,7 +1191,13 @@ class AppState {
 
   async addFolders(paths: string[]) {
     if (paths.length === 0) return;
-    this.folders = await api.addFolders(paths);
+    this.startedAdding();
+    try {
+      this.folders = await api.addFolders(paths);
+    } catch (e) {
+      this.startedAdding(false);
+      throw e;
+    }
     this.showToast("Importing your music…");
   }
 
@@ -1052,6 +1232,7 @@ class AppState {
     else if (this.picker) this.picker = null;
     else if (this.tagEditing) this.tagEditing = null;
     else if (this.fixing) this.fixing = null;
+    else if (this.fixingAlbum) this.fixingAlbum = null;
     else if (this.artistEditing) this.artistEditing = null;
     else if (this.skippedOpen) this.skippedOpen = false;
     else if (this.coverEditing) this.coverEditing = null;
@@ -1082,9 +1263,25 @@ class AppState {
   }
 
   async addToPlaylist(p: Playlist, tracks: Track[]) {
-    const ids = tracks.map((t) => t.id).filter((id) => !p.trackIds.includes(id));
+    const ids = [...new Set(tracks.map((t) => t.id).filter((id) => !p.trackIds.includes(id)))];
+    // Nothing new: the playlist isn't saved (or moved up as just changed).
+    if (!ids.length) {
+      this.showToast(`Already in “${p.name}”`);
+      return;
+    }
     await this.savePlaylist({ ...p, trackIds: [...p.trackIds, ...ids] });
-    this.showToast(ids.length ? `Added ${ids.length === 1 ? `“${tracks[0].title}”` : `${ids.length} songs`} to “${p.name}”` : `Already in “${p.name}”`);
+    const one = ids.length === 1 ? tracks.find((t) => t.id === ids[0]) : undefined;
+    this.showToast(`Added ${one ? `“${one.title}”` : `${ids.length} songs`} to “${p.name}”`);
+  }
+
+  /** A new, empty playlist ("Playlist 3"), opened. */
+  async newPlaylist() {
+    try {
+      const p = await this.createPlaylist(`Playlist ${this.playlists.filter((x) => !x.smart).length + 1}`);
+      this.go({ name: "playlist", id: p.id });
+    } catch (e) {
+      this.showToast(`Couldn't make the playlist: ${e}`);
+    }
   }
 
   async deletePlaylist(p: Playlist) {
@@ -1131,31 +1328,6 @@ export function shuffled<T>(list: T[]): T[] {
 }
 
 export const app = new AppState();
-
-/**
- * The position 30 times a second while playing, for what has to move smoothly and can't glide
- * with CSS: the karaoke sweep. A timer, not `requestAnimationFrame`: a callback on every frame
- * (160 a second on some screens) makes the window redraw that often even when nothing changes,
- * about 15% of a processor core. Runs only while the component that called it (during its setup)
- * is shown.
- */
-export function livePosition(): { readonly value: number } {
-  let value = $state(app.position);
-  const playing = $derived(!!app.status?.playing);
-  $effect(() => {
-    if (!playing) {
-      value = app.position;
-      return;
-    }
-    const timer = setInterval(() => (value = app.exactPosition()), 33);
-    return () => clearInterval(timer);
-  });
-  return {
-    get value() {
-      return value;
-    },
-  };
-}
 
 export interface SignalPath {
   /** "bitperfect": untouched to the device; "lossless": untouched by Cadence; "enhanced": Cadence processes it. */

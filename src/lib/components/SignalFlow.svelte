@@ -101,7 +101,7 @@
     </ol>
     {#if o}
       <div class="meter" aria-label="Output level">
-        <div class="fill" class:hot={o.peakDb > -1} style="width: {Math.max(0, Math.min(100, ((o.peakDb + 48) / 48) * 100))}%"></div>
+        <div class="track"><div class="fill" class:hot={o.peakDb > -1} style="transform: translateX({Math.max(0, Math.min(100, ((o.peakDb + 48) / 48) * 100)) - 100}%)"></div></div>
         <span>{o.peakDb > -100 ? `Peak ${db(o.peakDb)}FS` : "Silent"}</span>
       </div>
     {/if}
@@ -214,6 +214,14 @@
       display: none;
     }
   }
+  @media (prefers-reduced-motion: reduce) {
+    .playing .wire.lit::after {
+      animation: none;
+    }
+    .meter .fill {
+      transition: none;
+    }
+  }
   @keyframes flow {
     from {
       transform: translateX(-50%);
@@ -277,11 +285,20 @@
     border-radius: 3px;
     background: var(--line);
   }
+  /* The level moves by transform only (no layout four times a second). The bar is always full
+     width and slid left by the unfilled part, so its gradient stays put instead of squeezing (a
+     scaleX would squeeze the colours); the track clips it. */
+  .meter .track {
+    position: absolute;
+    inset: 0;
+    border-radius: 3px;
+    overflow: hidden;
+  }
   .meter .fill {
     height: 100%;
     border-radius: 3px;
     background: linear-gradient(90deg, var(--good), var(--good) 75%, var(--warn));
-    transition: width 0.25s;
+    transition: transform 0.25s;
   }
   .meter .fill.hot {
     background: linear-gradient(90deg, var(--good), var(--warn) 70%, var(--bad));

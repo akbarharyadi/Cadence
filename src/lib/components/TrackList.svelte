@@ -28,6 +28,77 @@
 
   let dragFrom = $state<number | null>(null);
   let dropAt = $state<number | null>(null);
+
+  // A drag is ours only if it carries this type: a stale `dragFrom` must never accept someone else's drop.
+  const ROW_TYPE = "application/x-cadence-row";
+  const ours = (e: DragEvent) => !!e.dataTransfer?.types.includes(ROW_TYPE);
+
+  let edgeSpeed = 0;
+  let edgeFrame = 0;
+  /** Drag over: where the scrolling part of the page is, in the window. */
+  function scrollBox(): { el: HTMLElement; top: number; bottom: number } | null {
+    if (!listEl) return null;
+    const el = (listEl.closest(".content") as HTMLElement | null) ?? document.documentElement;
+    if (el === document.documentElement) return { el, top: 0, bottom: window.innerHeight };
+    const r = el.getBoundingClientRect();
+    return { el, top: r.top, bottom: r.bottom };
+  }
+  function edgeTick() {
+    edgeFrame = 0;
+    if (dragFrom === null || !edgeSpeed) return;
+    const box = scrollBox();
+    if (!box) return;
+    box.el.scrollTop += edgeSpeed;
+    edgeFrame = requestAnimationFrame(edgeTick);
+  }
+  /** Near the top or bottom edge of the page the list scrolls (faster the closer to the edge). */
+  function autoScroll(e: DragEvent) {
+    const box = scrollBox();
+    if (!box) return;
+    const ZONE = 80;
+    const up = e.clientY - box.top;
+    const down = box.bottom - e.clientY;
+    edgeSpeed = up < ZONE ? -Math.ceil(((ZONE - Math.max(0, up)) / ZONE) * 20) : down < ZONE ? Math.ceil(((ZONE - Math.max(0, down)) / ZONE) * 20) : 0;
+    if (edgeSpeed && !edgeFrame) edgeFrame = requestAnimationFrame(edgeTick);
+  }
+  function clearDrag() {
+    dragFrom = null;
+    dropAt = null;
+    edgeSpeed = 0;
+    if (edgeFrame) cancelAnimationFrame(edgeFrame);
+    edgeFrame = 0;
+  }
+
+  // The dragged row can leave the page (long lists build only the rows on screen) and then it never
+  // gets its own dragend, so the end of a drag is also watched on the window.
+  $effect(() => {
+    if (!onreorder) return;
+    const over = (e: DragEvent) => {
+      if (dragFrom !== null && ours(e)) autoScroll(e);
+    };
+    const leave = (e: DragEvent) => {
+      if (e.relatedTarget === null) {
+        dropAt = null;
+        edgeSpeed = 0;
+      }
+    };
+    const key = (e: KeyboardEvent) => e.key === "Escape" && clearDrag();
+    window.addEventListener("dragover", over);
+    window.addEventListener("dragleave", leave);
+    window.addEventListener("dragend", clearDrag);
+    window.addEventListener("drop", clearDrag);
+    window.addEventListener("pointerup", clearDrag);
+    window.addEventListener("keydown", key);
+    return () => {
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("dragleave", leave);
+      window.removeEventListener("dragend", clearDrag);
+      window.removeEventListener("drop", clearDrag);
+      window.removeEventListener("pointerup", clearDrag);
+      window.removeEventListener("keydown", key);
+      clearDrag();
+    };
+  });
   const menu = (e: MouseEvent, i: number) => app.trackMenu(e, tracks, i, extraMenu?.(tracks[i], i) ?? []);
 
   let selected = $state<string | null>(null);
@@ -66,8 +137,12 @@
       resize.disconnect();
     };
   });
-  const start = $derived(virtual ? first : 0);
-  const shown = $derived(virtual ? tracks.slice(first, last) : tracks);
+  // While a row is being dragged it stays built, even when scrolled far off: a removed row never
+  // gets its dragend.
+  const lo = $derived(virtual ? (dragFrom !== null ? Math.min(first, dragFrom) : first) : 0);
+  const hi = $derived(virtual ? (dragFrom !== null ? Math.max(last, dragFrom + 1) : last) : tracks.length);
+  const start = $derived(lo);
+  const shown = $derived(virtual ? tracks.slice(lo, hi) : tracks);
 </script>
 
 <div
@@ -76,7 +151,7 @@
   role="listbox"
   tabindex="-1"
   bind:this={listEl}
-  style={virtual ? `padding-top: ${first * ROW}px; padding-bottom: ${Math.max(0, tracks.length - last) * ROW}px` : undefined}
+  style={virtual ? `padding-top: ${lo * ROW}px; padding-bottom: ${Math.max(0, tracks.length - hi) * ROW}px` : undefined}
 >
   {#each shown as t, k (t.id + (k + start))}
     {@const i = k + start}
@@ -91,10 +166,21 @@
       class:drop-before={dropAt === i && dragFrom !== null && dragFrom > i}
       class:drop-after={dropAt === i && dragFrom !== null && dragFrom < i}
       draggable={!!onreorder}
-      ondragstart={(e) => { dragFrom = i; e.dataTransfer?.setData("text/plain", String(i)); }}
-      ondragover={(e) => { if (onreorder && dragFrom !== null) { e.preventDefault(); dropAt = i; } }}
-      ondragend={() => { dragFrom = null; dropAt = null; }}
-      ondrop={(e) => { e.preventDefault(); if (dragFrom !== null && dragFrom !== i) onreorder?.(dragFrom, i); dragFrom = null; dropAt = null; }}
+      ondragstart={(e) => {
+        dragFrom = i;
+        e.dataTransfer?.setData(ROW_TYPE, String(i));
+        e.dataTransfer?.setData("text/plain", String(i));
+        if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+      }}
+      ondragover={(e) => { if (onreorder && dragFrom !== null && ours(e)) { e.preventDefault(); dropAt = i; } }}
+      ondragend={clearDrag}
+      ondrop={(e) => {
+        if (!ours(e)) return;
+        e.preventDefault();
+        const from = dragFrom;
+        clearDrag();
+        if (from !== null && from !== i) onreorder?.(from, i);
+      }}
       role="option"
       aria-selected={selected === t.id}
       tabindex="0"
@@ -405,5 +491,19 @@
     .row {
       padding: 0 6px;
     }
+  }
+  /* Android wider than a phone: touch, so the same hover-free rules (the album column may stay
+     where there is room). */
+  :global(html.phone) .stars {
+    display: none;
+  }
+  :global(html.phone) .heart {
+    opacity: 1;
+  }
+  :global(html.phone) .heart:not(.loved) {
+    opacity: 0.5;
+  }
+  :global(html.phone) .row {
+    padding: 0 6px;
   }
 </style>

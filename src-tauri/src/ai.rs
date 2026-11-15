@@ -96,24 +96,74 @@ fn endpoint(s: &AiSettings) -> Result<Endpoint, String> {
     match s.provider {
         Provider::Off => Err("The AI DJ is off. Turn it on in Settings.".into()),
         Provider::Cloud => {
-            let key = crate::secrets::get(s.service.key_name()).ok_or(match s.service {
-                Service::Claude => "Add your Anthropic API key in Settings to use Claude.",
-                Service::Openai => "Add your API key in Settings to use the online AI DJ.",
-            })?;
+            let key = crate::secrets::get(s.service.key_name());
             Ok(match s.service {
                 Service::Claude => Endpoint {
                     url: "https://api.anthropic.com/v1/messages".into(),
                     model: if s.claude_model.trim().is_empty() { CLAUDE_MODEL.into() } else { s.claude_model.trim().to_string() },
-                    key: Some(key),
+                    key: Some(key.ok_or("Add your Anthropic API key in Settings to use Claude.")?),
                 },
-                Service::Openai => Endpoint {
-                    url: s.cloud_url.trim_end_matches('/').to_string(),
-                    model: s.cloud_model.clone(),
-                    key: Some(key),
-                },
+                Service::Openai => {
+                    let url = s.cloud_url.trim().trim_end_matches('/').to_string();
+                    check_url(&url)?;
+                    // A server on this computer or the home network (Ollama, LM Studio) may need no key.
+                    if key.is_none() && !is_local_url(&url) {
+                        return Err("Add your API key in Settings to use the online AI DJ.".into());
+                    }
+                    Endpoint { url, model: s.cloud_model.clone(), key }
+                }
             })
         }
     }
+}
+
+/// An AI server address the key may be sent to: https://, or plain http:// only to this computer
+/// or the home network (where a local server like Ollama usually has no https).
+pub fn check_url(url: &str) -> Result<(), String> {
+    let u = url.trim().to_ascii_lowercase();
+    if u.starts_with("https://") && host_of(&u).is_some_and(|h| !h.is_empty()) {
+        return Ok(());
+    }
+    if u.starts_with("http://") {
+        if is_local_url(&u) {
+            return Ok(());
+        }
+        return Err("The AI server's address must start with https:// (plain http:// is only for a server on this computer or your home network): your API key would be sent unencrypted.".into());
+    }
+    Err("The AI server's address should look like https://api.example.com/v1".into())
+}
+
+/// The host of an http(s) address, without user name or port ("[::1]" → "::1").
+fn host_of(url: &str) -> Option<&str> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    if let Some(v6) = host_port.strip_prefix('[') {
+        return v6.split_once(']').map(|(h, _)| h);
+    }
+    Some(host_port.split(':').next().unwrap_or(host_port))
+}
+
+/// This computer or the home network: localhost, loopback and private addresses, link-local ones,
+/// .local / .lan / .home.arpa names and one-word names (a computer on the network, "desktop").
+fn is_local_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    let Some(host) = host_of(&lower) else { return false };
+    if host.is_empty() {
+        return false;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+            std::net::IpAddr::V6(v6) => {
+                let first = v6.segments()[0];
+                v6.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+            }
+        };
+    }
+    host == "localhost"
+        || [".localhost", ".local", ".lan", ".home.arpa", ".internal"].iter().any(|s| host.ends_with(s))
+        || !host.contains('.')
 }
 
 /// Claude answers one request (Messages API). With `search`, Claude searches the web itself (its
@@ -738,7 +788,32 @@ Return JSON only: {{\"picks\":[{{\"artist\":\"\",\"title\":\"\",\"similarity\":0
         return Err("The DJ couldn’t find songs for that. Try again or ask another way.".into());
     }
     picks.sort_by(|a, b| b.score().cmp(&a.score()));
-    Ok(picks)
+    Ok(distinct_picks(picks))
+}
+
+/// Each song once (the window lists picks by artist and title): the first of the same artist and
+/// title, compared by letters and digits ("Lemon" and "LEMON!" are one song).
+pub fn distinct_picks(picks: Vec<Discovery>) -> Vec<Discovery> {
+    let mut seen = HashSet::new();
+    picks
+        .into_iter()
+        .filter(|d| seen.insert((crate::state::match_key(&d.artist), crate::state::match_key(&d.title))))
+        .collect()
+}
+
+/// Each mix title once (the window lists mixes by title): a repeated one gets " 2", " 3"…
+pub fn distinct_titles(mixes: &mut [AiMix]) {
+    let mut seen: HashSet<String> = HashSet::new();
+    for m in mixes.iter_mut() {
+        let base = m.title.trim().to_string();
+        let mut title = base.clone();
+        let mut n = 2;
+        while !seen.insert(title.to_lowercase()) {
+            title = format!("{base} {n}");
+            n += 1;
+        }
+        m.title = title;
+    }
 }
 
 fn to_mix(v: &Value, c: &[Candidate]) -> AiMix {
@@ -771,7 +846,7 @@ fn to_mix(v: &Value, c: &[Candidate]) -> AiMix {
         reason: text(v, "reason"),
         track_ids,
         lane: String::new(),
-        discover,
+        discover: distinct_picks(discover),
     }
 }
 
@@ -879,17 +954,20 @@ fn log_variety(mixes: &[AiMix], pools: &[Pool]) {
     log::info!("AI mixes: {}; artists shared between mixes: {shared}", summary.join(", "));
 }
 
-/// Keeps each song in the first mix that has it, then drops mixes left too short or untitled.
+/// Keeps each song in the first mix that has it, then drops mixes left too short or untitled, and
+/// gives each mix its own title.
 fn distinct_mixes(mixes: Vec<AiMix>) -> Vec<AiMix> {
     let mut used = HashSet::new();
-    mixes
+    let mut out: Vec<AiMix> = mixes
         .into_iter()
         .map(|mut m| {
             m.track_ids.retain(|id| used.insert(id.clone()));
             m
         })
-        .filter(|m| m.track_ids.len() >= 3 && !m.title.is_empty())
-        .collect()
+        .filter(|m| m.track_ids.len() >= 3 && !m.title.trim().is_empty())
+        .collect();
+    distinct_titles(&mut out);
+    out
 }
 
 /// A quick check that the key, server and model work.
@@ -1063,6 +1141,34 @@ pub fn today() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_pick_and_each_mix_title_once() {
+        let pick = |a: &str, t: &str, why: &str| Discovery { artist: a.into(), title: t.into(), why: why.into(), ..Default::default() };
+        let picks = distinct_picks(vec![pick("Kenshi Yonezu", "Lemon", "first"), pick("kenshi yonezu", "LEMON!", "again"), pick("Kenshi Yonezu", "Flamingo", "")]);
+        assert_eq!(picks.iter().map(|d| d.why.as_str()).collect::<Vec<_>>(), ["first", ""]);
+        let mix = |title: &str, ids: &[&str]| AiMix {
+            title: title.into(),
+            reason: String::new(),
+            track_ids: ids.iter().map(|s| s.to_string()).collect(),
+            lane: String::new(),
+            discover: Vec::new(),
+        };
+        let mixes = distinct_mixes(vec![mix("Night Drive", &["a", "b", "c"]), mix("night drive", &["d", "e", "f"]), mix("Night Drive", &["g", "h", "i"])]);
+        assert_eq!(mixes.iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), ["Night Drive", "night drive 2", "Night Drive 3"]);
+    }
+
+    #[test]
+    fn the_key_goes_only_to_safe_addresses() {
+        for ok in ["https://api.z.ai/api/coding/paas/v4", "http://localhost:11434/v1", "http://127.0.0.1:1234/v1", "http://192.168.1.4:11434/v1", "http://10.0.0.2/v1", "http://[::1]:11434/v1", "http://desktop:11434/v1", "http://nas.local/v1"] {
+            assert!(check_url(ok).is_ok(), "{ok}");
+        }
+        for bad in ["http://api.example.com/v1", "http://8.8.8.8/v1", "ftp://x", "api.example.com", "https://", "http://user@evil.com:80/v1"] {
+            assert!(check_url(bad).is_err(), "{bad}");
+        }
+        assert!(is_local_url("http://localhost:11434/v1") && !is_local_url("https://api.z.ai/v4"));
+        assert!(!is_local_url("http://172.32.0.1/v1") && is_local_url("http://172.16.5.1/v1"));
+    }
 
     #[test]
     fn shortlist_spreads_and_varies() {

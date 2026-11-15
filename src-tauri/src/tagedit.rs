@@ -61,9 +61,44 @@ fn number(v: &Option<String>) -> Result<Option<Option<u32>>, String> {
     }
 }
 
+/// The year box: a year ("2019") or a whole date ("2019-05", "2019-05-01", also with / or .;
+/// a time after it is ignored). `None`: unchanged; `Some(None)`: removed.
+fn date(v: &Option<String>) -> Result<Option<Option<Timestamp>>, String> {
+    match v.as_deref().map(str::trim) {
+        None => Ok(None),
+        Some("") => Ok(Some(None)),
+        Some(s) => parse_date(s)
+            .map(|d| Some(Some(d)))
+            .ok_or_else(|| format!("“{s}” isn’t a year or a date (like 2019 or 2019-05-01)")),
+    }
+}
+
+fn parse_date(s: &str) -> Option<Timestamp> {
+    let s = s.split(['T', ' ']).next()?;
+    let mut parts = s.split(['-', '/', '.']);
+    let digits = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit());
+    let year = parts.next().filter(|p| digits(p))?.parse::<u16>().ok()?;
+    let part = |p: Option<&str>, max: u8| -> Option<Option<u8>> {
+        match p {
+            None => Some(None),
+            Some(p) if digits(p) => p.parse::<u8>().ok().filter(|n| (1..=max).contains(n)).map(Some),
+            Some(_) => None,
+        }
+    };
+    let month = part(parts.next(), 12)?;
+    let day = match month {
+        Some(_) => part(parts.next(), 31)?,
+        None => None,
+    };
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(Timestamp { year, month, day, ..Default::default() })
+}
+
 /// Fails on numbers that can't be written (before anything is written or held).
 pub fn check(c: &TagChanges) -> Result<(), String> {
-    number(&c.year)?;
+    date(&c.year)?;
     number(&c.track_no)?;
     number(&c.disc_no)?;
     Ok(())
@@ -93,11 +128,12 @@ pub fn write(path: &Path, c: &TagChanges) -> Result<(), String> {
     text(tag, ItemKey::AlbumArtist, &c.album_artist);
     text(tag, ItemKey::Genre, &c.genre);
 
-    match number(&c.year)? {
-        Some(Some(y)) => tag.set_date(Timestamp {
-            year: y as u16,
-            ..Default::default()
-        }),
+    match date(&c.year)? {
+        // Only a year, the one the file has: its month and day stay.
+        Some(Some(d)) => {
+            let kept = tag.date().filter(|old| d.month.is_none() && old.year == d.year);
+            tag.set_date(kept.unwrap_or(d));
+        }
         Some(None) => tag.remove_date(),
         None => {}
     }
@@ -171,8 +207,8 @@ pub fn show(t: &mut Track, c: &TagChanges) {
     if let Some(v) = given(&c.genre) {
         t.genre = v;
     }
-    if let Ok(Some(y)) = number(&c.year) {
-        t.year = y;
+    if let Ok(Some(d)) = date(&c.year) {
+        t.year = d.map(|d| u32::from(d.year));
     }
     if let Ok(Some(n)) = number(&c.track_no) {
         t.track_no = n;
@@ -207,8 +243,16 @@ fn save_held(dir: &Path, map: &HashMap<String, TagChanges>) {
     let file = held_file(dir);
     if map.is_empty() {
         let _ = std::fs::remove_file(file);
-    } else if let Ok(b) = serde_json::to_vec(map) {
-        let _ = std::fs::write(file, b);
+    } else {
+        match serde_json::to_vec(map) {
+            // (No backup: the file is removed when nothing is held, and an old copy mustn't come back.)
+            Ok(b) => {
+                if let Err(e) = crate::state::write_file(&file, &b, false) {
+                    log::error!("can't save {}: {e}", file.display());
+                }
+            }
+            Err(e) => log::error!("can't save {}: {e}", file.display()),
+        }
     }
 }
 
@@ -333,6 +377,23 @@ mod tests {
             t.album_id,
             crate::library::album_id_for("SPYAIR", "YouTube")
         );
+    }
+
+    #[test]
+    fn the_year_box_takes_a_year_or_a_whole_date() {
+        let d = |s: &str| parse_date(s).map(|t| (t.year, t.month, t.day));
+        assert_eq!(d("2019"), Some((2019, None, None)));
+        assert_eq!(d("2019-05"), Some((2019, Some(5), None)));
+        assert_eq!(d("2019-05-01"), Some((2019, Some(5), Some(1))));
+        assert_eq!(d("2019/5/1"), Some((2019, Some(5), Some(1))));
+        assert_eq!(d("2019-05-01T10:00:00"), Some((2019, Some(5), Some(1))));
+        for bad in ["20x3", "2019-13-01", "2019-05-32", "2019-05-01-02", "-2019", "2019--01"] {
+            assert_eq!(d(bad), None, "{bad}");
+        }
+        assert!(check(&TagChanges { year: some("2019-05-01"), ..Default::default() }).is_ok());
+        let mut t = Track::default();
+        show(&mut t, &TagChanges { year: some("2019-05-01"), ..Default::default() });
+        assert_eq!(t.year, Some(2019));
     }
 
     #[test]

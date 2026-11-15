@@ -25,13 +25,11 @@ fn file(dir: &Path) -> PathBuf {
 }
 
 pub fn load(dir: &Path) -> Attention {
-    std::fs::read(file(dir)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    crate::state::read_json(&file(dir))
 }
 
 fn save(ctx: &Ctx, a: &Attention) {
-    if let Ok(b) = serde_json::to_vec(a) {
-        let _ = std::fs::write(file(&ctx.state.data_dir), b);
-    }
+    crate::state::write_json(&file(&ctx.state.data_dir), a);
     ctx.emit("attention-changed", ());
 }
 

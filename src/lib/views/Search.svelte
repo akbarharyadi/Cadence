@@ -1,3 +1,32 @@
+<script lang="ts" module>
+  import type { Album, Track } from "#lib/api.js";
+  import type { Artist } from "#lib/store.svelte.js";
+
+  // Case- and accent-insensitive matching, so "pokemon" finds "Pokémon".
+  const fold = (s: string) => s.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
+
+  // The library's names, folded once per library (the lists are replaced whole when it changes,
+  // so the list itself is the key), not on every key press.
+  const cache = new WeakMap<object, string[][]>();
+  function folded<T>(list: T[], fields: (x: T) => string[]): string[][] {
+    let f = cache.get(list);
+    if (!f) {
+      f = list.map((x) => fields(x).map(fold));
+      cache.set(list, f);
+    }
+    return f;
+  }
+  function matching<T>(list: T[], fields: (x: T) => string[], q: string, max: number): T[] {
+    const f = folded(list, fields);
+    const out: T[] = [];
+    for (let i = 0; i < list.length && out.length < max; i++) if (f[i].some((s) => s.includes(q))) out.push(list[i]);
+    return out;
+  }
+  const albumFields = (a: Album) => [a.title, a.artist];
+  const trackFields = (t: Track) => [t.title, t.subtitle ?? "", t.artist, t.album];
+  const artistFields = (a: Artist) => [a.name];
+</script>
+
 <script lang="ts">
   import AlbumCard from "#lib/components/AlbumCard.svelte";
   import TrackList from "#lib/components/TrackList.svelte";
@@ -5,22 +34,45 @@
 
   let { query }: { query: string } = $props();
 
-  // Case- and accent-insensitive matching, so "pokemon" finds "Pokémon".
-  const fold = (s: string) => s.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
-  const q = $derived(fold(query.trim()));
+  // What's searched for: the typed text a moment (120 ms) after the last key, so a fast typist
+  // doesn't search the library for every letter. Coming back to the page shows its results at once.
+  const typed = () => fold(query.trim());
+  let q = $state(typed());
+  $effect(() => {
+    const next = typed();
+    if (next === q) return;
+    // Emptied: straight away.
+    if (!next) {
+      q = "";
+      return;
+    }
+    const timer = setTimeout(() => (q = next), 120);
+    return () => clearTimeout(timer);
+  });
   // Nothing is listed until something is typed (an empty search would match the whole library).
-  const albums = $derived(!q ? [] : app.albums.filter((a) => fold(a.title).includes(q) || fold(a.artist).includes(q)).slice(0, 24));
-  const songs = $derived(
-    !q ? [] : app.tracks.filter((t) => fold(t.title).includes(q) || fold(t.subtitle ?? "").includes(q) || fold(t.artist).includes(q) || fold(t.album).includes(q))
-          .slice(0, 200),
-  );
-  const artists = $derived(!q ? [] : app.artists.filter((a) => fold(a.name).includes(q)).slice(0, 12));
+  const albums = $derived(!q ? [] : matching(app.albums, albumFields, q, 24));
+  const songs = $derived(!q ? [] : matching(app.tracks, trackFields, q, 200));
+  const artists = $derived(!q ? [] : matching(app.artists, artistFields, q, 12));
+
+  function onInput(value: string) {
+    app.search = value;
+    app.view = { name: "search", query: value };
+  }
+
+  /** Escape: empty the box and go back to the page before the search. */
+  function onKey(e: KeyboardEvent) {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    app.search = "";
+    if (query.trim()) app.back();
+    else (e.currentTarget as HTMLInputElement).blur();
+  }
 </script>
 
 <div class="page">
   <!-- Phones have no sidebar search box, so the page has its own. -->
   <input class="field page-search" type="search" placeholder="Search your music" value={query} aria-label="Search your music"
-    oninput={(e) => (app.view = { name: "search", query: e.currentTarget.value })} />
+    oninput={(e) => onInput(e.currentTarget.value)} onkeydown={onKey} />
   {#if query.trim()}<h1 class="page-title">“{query}”</h1>{/if}
 
   {#if !q}
@@ -69,6 +121,10 @@
     .page-search {
       display: block;
     }
+  }
+  /* Android wider than a phone has no sidebar either. */
+  :global(html.phone) .page-search {
+    display: block;
   }
   .section-title {
     margin: 34px 0 16px;

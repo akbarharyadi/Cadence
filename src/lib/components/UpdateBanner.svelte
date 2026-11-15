@@ -6,8 +6,12 @@
   import Icon from "./Icon.svelte";
 
   const isAndroid = navigator.userAgent.includes("Android");
+  // A failed update has its own dismissal (by message), so closing an old failure doesn't hide a new one.
+  let closedError = $state("");
+  const failed = $derived(updates.phase === "error" && !!updates.message && updates.message !== closedError);
   const show = $derived(
-    !updates.dismissed && (updates.phase === "ready" || updates.phase === "available" || (isAndroid && updates.phase === "downloading" && updates.next !== "")),
+    failed ||
+      (!updates.dismissed && (updates.phase === "ready" || updates.phase === "available" || (isAndroid && updates.phase === "downloading" && updates.next !== ""))),
   );
 </script>
 
@@ -15,16 +19,20 @@
   <div class="update" role="status" transition:fly={{ y: 16, duration: 280, easing: cubicOut }}>
     <span class="mark"><Icon name="download" size={18} /></span>
     <div class="text">
-      <strong>Cadence {updates.next}</strong>
+      <strong>{failed ? "The update didn’t work" : `Cadence ${updates.next}`}</strong>
       <span>
-        {#if updates.phase === "downloading"}Downloading… {Math.round(updates.progress * 100)}%
+        {#if failed}{updates.message}
+        {:else if updates.phase === "downloading"}Downloading… {Math.round(updates.progress * 100)}%
         {:else if updates.message}{updates.message}
         {:else if updates.phase === "ready"}Downloaded. Restart Cadence to finish updating.
         {:else}A new version is available.{/if}
       </span>
     </div>
-    {#if updates.phase !== "downloading"}
-      <button class="pill" onclick={() => updates.apply()}>{updates.phase === "ready" ? "Restart" : "Update"}</button>
+    {#if failed}
+      <button class="pill" onclick={() => updates.check()}>Try again</button>
+      <button class="icon-btn" onclick={() => (closedError = updates.message)} aria-label="Close" title="Close"><Icon name="close" size={15} /></button>
+    {:else if updates.phase !== "downloading"}
+      <button class="pill" disabled={updates.installing} onclick={() => updates.apply()}>{updates.phase === "ready" ? "Restart" : "Update"}</button>
       <button class="icon-btn" onclick={() => (updates.dismissed = true)} aria-label="Later" title="Later"><Icon name="close" size={15} /></button>
     {/if}
     {#if updates.phase === "downloading"}<div class="bar" style="transform: scaleX({updates.progress})"></div>{/if}
@@ -94,5 +102,13 @@
       max-width: none;
       bottom: calc(140px + env(safe-area-inset-bottom));
     }
+  }
+  /* Android wider than a phone (landscape, tablets): the banner sits above the player and tab
+     bar too, not behind them. Last, so it also wins over html.player-bottom. */
+  :global(html.phone) .update {
+    left: 8px;
+    right: 8px;
+    max-width: none;
+    bottom: calc(140px + env(safe-area-inset-bottom));
   }
 </style>

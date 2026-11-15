@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Playlist } from "#lib/api.js";
   import { app } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
   import Modal from "./Modal.svelte";
@@ -6,16 +7,42 @@
   const tracks = $derived(app.picker ?? []);
   const lists = $derived(app.playlists.filter((p) => !p.smart));
   let newName = $state("");
+  let busy = $state(false);
+  let error = $state("");
 
   const close = () => (app.picker = null);
 
   async function create() {
     const name = newName.trim();
     if (!name) return;
-    const p = await app.createPlaylist(name, tracks);
-    app.showToast(`Created “${p.name}” with ${tracks.length === 1 ? `“${tracks[0].title}”` : `${tracks.length} songs`}`);
-    close();
+    if (busy) return;
+    busy = true;
+    try {
+      const p = await app.createPlaylist(name, tracks);
+      app.showToast(`Created “${p.name}” with ${tracks.length === 1 ? `“${tracks[0].title}”` : `${tracks.length} songs`}`);
+      close();
+    } catch (e) {
+      error = `Couldn’t create the playlist: ${e}`;
+    } finally {
+      busy = false;
+    }
   }
+
+  async function add(p: Playlist) {
+    if (busy) return;
+    busy = true;
+    try {
+      await app.addToPlaylist(p, tracks);
+      close();
+    } catch (e) {
+      error = `Couldn’t add to “${p.name}”: ${e}`;
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Songs the library still has (ids of files that went away stay in the playlist but aren't songs). */
+  const countOf = (p: Playlist) => p.trackIds.filter((id) => app.trackById.has(id)).length;
 </script>
 
 <Modal title={tracks.length === 1 ? `Add “${tracks[0].title}” to a playlist` : `Add ${tracks.length} songs to a playlist`} onclose={close} width="460px">
@@ -23,14 +50,15 @@
     <input class="field" bind:value={newName} placeholder="New playlist name" aria-label="New playlist name" />
     <button class="pill" type="submit" disabled={!newName.trim()}><Icon name="plus" size={15} />Create</button>
   </form>
+  {#if error}<p class="error">{error}</p>{/if}
   {#if lists.length}
     <ul>
       {#each lists as p (p.id)}
         <li>
-          <button onclick={async () => { await app.addToPlaylist(p, tracks); close(); }}>
+          <button onclick={() => add(p)} disabled={busy}>
             <Icon name="playlist" size={18} />
             <span class="name">{p.name}</span>
-            <span class="count">{p.trackIds.length} songs</span>
+            <span class="count">{countOf(p)} {countOf(p) === 1 ? "song" : "songs"}</span>
           </button>
         </li>
       {/each}
@@ -80,6 +108,11 @@
   .count {
     font-size: 12px;
     color: var(--text-3);
+  }
+  .error {
+    margin: 0 0 12px;
+    color: var(--warn);
+    font-size: 13px;
   }
   .empty {
     color: var(--text-2);

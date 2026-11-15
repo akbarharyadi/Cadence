@@ -1,9 +1,31 @@
+<script lang="ts" module>
+  /** The dialogs open now, the newest (top-most) last: Escape closes only that one. */
+  const open: symbol[] = [];
+</script>
+
 <script lang="ts">
-  import type { Snippet } from "svelte";
+  import { onMount, type Snippet } from "svelte";
   import Icon from "./Icon.svelte";
 
   let { title, onclose, children, footer, width = "520px" }: { title: string; onclose: () => void; children: Snippet; footer?: Snippet; width?: string } =
     $props();
+
+  const me = Symbol("dialog");
+  onMount(() => {
+    open.push(me);
+    return () => {
+      const i = open.indexOf(me);
+      if (i >= 0) open.splice(i, 1);
+    };
+  });
+
+  /** Escape closes the dialog, unless something inside it (an open dropdown, a menu) already
+   *  used the key, or another dialog is open on top of it. */
+  function onKey(e: KeyboardEvent) {
+    if (e.key !== "Escape" || e.defaultPrevented || open[open.length - 1] !== me) return;
+    e.preventDefault();
+    onclose();
+  }
 
   let panel = $state<HTMLDivElement>();
   $effect(() => {
@@ -12,7 +34,7 @@
   });
 </script>
 
-<svelte:window onkeydown={(e) => e.key === "Escape" && onclose()} />
+<svelte:window onkeydown={onKey} />
 
 <div class="overlay" role="presentation" onmousedown={(e) => e.target === e.currentTarget && onclose()}>
   <div class="panel" bind:this={panel} role="dialog" aria-modal="true" aria-label={title} style="width: {width}">

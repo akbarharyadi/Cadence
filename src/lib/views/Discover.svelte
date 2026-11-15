@@ -15,7 +15,12 @@
   onMount(async () => {
     // Today's picks are ready (or found now, once a day); the last search is shown on its tab.
     if (!app.daily) app.loadDaily(false);
-    await app.loadDiscover();
+    try {
+      await app.loadDiscover();
+    } catch (e) {
+      // Only the chips (top artists and genres) and the last search are missing: the page works.
+      console.warn("[Cadence] Discover: couldn't load the listening profile:", e);
+    }
   });
 
   /** This month's tab shows today's picks; the others, the last search. */
@@ -137,7 +142,7 @@
     {#if shown?.picks.length}
       <h2 class="section-title">{heading}</h2>
       <ul class="results" class:dim={loading}>
-        {#each shown.picks as d (d.artist + d.title)}
+        {#each shown.picks as d, i (`${i}|${d.artist}|${d.title}`)}
           <li class="result">
             <div class="art" class:artist={d.imageIsArtist}>
               {#if d.image}<img src={d.image} alt="" loading="lazy" />{:else}<Icon name="song" size={28} />{/if}
@@ -161,6 +166,14 @@
           </li>
         {/each}
       </ul>
+    {:else if !loading && !failed && (shown || basis === "month")}
+      <div class="none">
+        <Icon name="sparkle" size={22} />
+        <p>
+          {#if basis === "month"}No picks for today yet. Press New picks and the DJ looks again.
+          {:else}The DJ found nothing new for that. Try other words, or another {basis === "artist" ? "artist" : basis === "genre" ? "genre" : "request"}.{/if}
+        </p>
+      </div>
     {/if}
   {/if}
 </div>
@@ -254,6 +267,24 @@
   }
   .section-title {
     margin: 0 0 14px;
+  }
+  .none {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 18px 20px;
+    max-width: 640px;
+    border-radius: var(--r-lg);
+    background: var(--hover);
+    box-shadow: inset 0 0 0 1px var(--line);
+    color: var(--text-2);
+  }
+  .none :global(svg) {
+    flex: none;
+    color: var(--accent);
+  }
+  .none p {
+    margin: 0;
   }
   .results {
     list-style: none;

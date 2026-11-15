@@ -52,8 +52,15 @@
     app.seek(fraction(e) * duration);
     dragging = false;
   }
+  /** The system took the pointer (a touch turned into a scroll, a dialog opened): drop the drag without seeking. */
+  function seekCancel() {
+    dragging = false;
+    hoverX = null;
+  }
+  /** Same step as the global ← / → shortcut (+page.svelte). */
+  const SEEK_STEP = 10;
   function seekKey(e: KeyboardEvent) {
-    const step = e.key === "ArrowRight" ? 5 : e.key === "ArrowLeft" ? -5 : 0;
+    const step = e.key === "ArrowRight" ? SEEK_STEP : e.key === "ArrowLeft" ? -SEEK_STEP : 0;
     if (!step) return;
     e.preventDefault();
     e.stopPropagation();
@@ -62,10 +69,17 @@
 
   // The slider is perceptual (squared); the top of the slider is exactly 1.0 = untouched samples.
   let volume = $state(1);
-  let lastNonZero = 1;
+  // The level Unmute returns to: the last audible one, from the real status as well (the app starts
+  // at its saved volume, and other windows or shortcuts change it). Until one is known, a moderate
+  // level, never full scale (in exclusive output that is the DAC's full level).
+  let lastNonZero = 0.55;
   let volDragging = false;
   $effect(() => {
-    if (s && !volDragging) volume = Math.sqrt(s.volume);
+    if (s && !volDragging) {
+      const v = Math.sqrt(Math.max(0, s.volume));
+      volume = v;
+      if (v > 0) lastNonZero = v;
+    }
   });
   function setVolume(v: number) {
     volume = v;
@@ -212,6 +226,7 @@
     onpointerdown={seekDown}
     onpointermove={seekMove}
     onpointerup={seekUp}
+    onpointercancel={seekCancel}
     onpointerleave={() => (hoverX = null)}
     onkeydown={seekKey}
   >
@@ -328,6 +343,8 @@
       style="--pct: {volume * 100}%"
       onpointerdown={() => (volDragging = true)}
       onpointerup={() => (volDragging = false)}
+      onpointercancel={() => (volDragging = false)}
+      onblur={() => (volDragging = false)}
       oninput={(e) => setVolume(+e.currentTarget.value)}
       aria-label="Volume"
       title="Volume {Math.round(volume * 100)}%"
@@ -509,6 +526,8 @@
     background-size: cover;
     background-position: center;
     filter: blur(50px) saturate(1.7);
+    /* Static, on its own layer: blurred once, not again when the times beside it repaint. */
+    will-change: transform;
     opacity: 0.35;
     pointer-events: none;
     mask-image: linear-gradient(to right, black, transparent);
@@ -1144,6 +1163,7 @@
     background-size: cover;
     background-position: center;
     filter: blur(24px) saturate(1.6);
+    will-change: transform;
     opacity: 0.22;
     clip-path: inset(0 round 0 10px 10px 0);
     mask-image: linear-gradient(to right, black, transparent 75%);
@@ -1360,6 +1380,33 @@
       width: 40px;
       height: 40px;
     }
+  }
+  /* Android wider than a phone (landscape, tablets) has the same shell: the same rules by the
+     class +page.svelte sets. */
+  :global(html.phone) .dock {
+    left: 8px;
+    right: 8px;
+    bottom: calc(64px + env(safe-area-inset-bottom));
+    height: 64px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 0 8px;
+    border-radius: 16px;
+  }
+  :global(html.phone) .art {
+    width: 46px;
+    height: 46px;
+  }
+  :global(html.phone) .badge,
+  :global(html.phone) .peek,
+  :global(html.phone) .right,
+  :global(html.phone) .time,
+  :global(html.phone) .transport > :not(.main-btn):not([aria-label="Next"]) {
+    display: none;
+  }
+  :global(html.phone) .main-btn {
+    width: 40px;
+    height: 40px;
   }
 
   @media (prefers-reduced-motion: reduce) {

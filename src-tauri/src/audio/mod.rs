@@ -4,7 +4,9 @@
 //! topped up. The device side ([`output::Renderer`]) only copies samples out of that ring, so decoding
 //! never blocks audio. Songs follow each other in the same stream: gapless.
 //!
-//! Signal chain (worker): decode → channel mapping → loudness gain → EQ → crossfeed → resample → ring.
+//! Signal chain (worker): decode → channel mapping → loudness gain → per-song tone → crossfade blend
+//! → vocal cut → EQ → crossfeed → resample → ring. The renderer then applies volume and the sleep
+//! timer's fade (both gliding), and dither where the device takes integers.
 
 pub mod crossfeed;
 pub mod eq;
@@ -16,7 +18,6 @@ mod android_direct;
 mod usb_dac;
 #[cfg(any(target_os = "android", test))]
 mod usb_audio;
-#[cfg(any(windows, target_os = "android"))]
 mod pcm;
 pub mod loudness;
 mod output;
@@ -73,6 +74,35 @@ impl QueueItem {
     fn is_cue(&self) -> bool {
         self.start > 0.0 || self.end.is_some()
     }
+
+    /// The frame of the file (at `rate`) where this song starts.
+    fn first_frame(&self, rate: u32) -> u64 {
+        cue_frame(self.start, rate)
+    }
+
+    /// How many frames long the song is, when it ends before the end of its file (CUE sheet).
+    fn cue_frames(&self, rate: u32) -> Option<u64> {
+        self.end.map(|e| cue_frame(e, rate).saturating_sub(self.first_frame(rate)))
+    }
+
+    /// This song carries straight on from `prev` in the same file (the next track of a CUE sheet).
+    fn continues(&self, prev: &QueueItem, rate: u32) -> bool {
+        self.path == prev.path
+            && prev.end.is_some_and(|e| cue_frame(e, rate) == self.first_frame(rate))
+    }
+}
+
+/// A position in seconds as a frame at `rate`. CUE sheets count in CD frames (1/75 s), which are a
+/// whole number of samples at the usual rates (588 at 44.1 kHz), so a position that is a whole
+/// number of CD frames lands exactly on its sample (truncating float seconds could land one early).
+fn cue_frame(secs: f64, rate: u32) -> u64 {
+    let secs = secs.max(0.0);
+    let cd = (secs * 75.0).round();
+    if rate.is_multiple_of(75) && (secs * 75.0 - cd).abs() < 1e-6 {
+        cd as u64 * u64::from(rate / 75)
+    } else {
+        (secs * f64::from(rate)).round() as u64
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,8 +156,9 @@ struct Crossfade {
     index: usize,
     /// Linear loudness gain for the incoming song.
     gain: f32,
-    /// Its Sound Check gain in dB (None = off), for its tone once it takes over.
-    gain_db: Option<f32>,
+    /// The incoming song's own per-song tone, applied to it before the blend; it becomes the
+    /// worker's tone EQ (filter memory and all) when the song takes over.
+    tone: Equalizer,
     rate: u32,
     /// Incoming audio already mapped to the output channels and gain-adjusted, not yet mixed.
     buf: Vec<f32>,
@@ -147,8 +178,13 @@ impl Crossfade {
                 Ok(Some((samples, _rate, src_ch))) => {
                     self.frames += (samples.len() / src_ch.max(1)) as u64;
                     map_channels(samples, src_ch, ch, &mut self.scratch);
-                    let g = self.gain;
-                    self.buf.extend(self.scratch.iter().map(|x| x * g));
+                    if self.gain != 1.0 {
+                        let g = self.gain;
+                        self.scratch.iter_mut().for_each(|x| *x *= g);
+                    }
+                    self.tone.set_format(ch, self.rate);
+                    self.tone.process(&mut self.scratch);
+                    self.buf.extend_from_slice(&self.scratch);
                 }
                 _ => break,
             }
@@ -335,6 +371,12 @@ impl Engine {
         let _ = self.tx.send(cmd);
     }
 
+    /// The sleep timer's fade (0 = silent, 1 = full), on top of the volume and without moving it:
+    /// the renderer glides to each new value, so steps a tenth of a second apart are one smooth fade.
+    pub fn set_fade(&self, gain: f32) {
+        self.shared.fade_gain.store(gain.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
     /// Diagnostics: start or stop recording the device output to `%TEMP%\cadence-tap.f32`.
     pub fn tap(&self, on: bool) {
         self.shared.tap.store(on, Ordering::Relaxed);
@@ -397,9 +439,12 @@ struct Worker {
     crossfade: Option<Crossfade>,
     /// Song index a crossfade was already considered for (so it isn't retried every packet).
     crossfade_checked: Option<usize>,
-    /// Incoming-song audio left over when a crossfade completes (mapped and gain-adjusted).
+    /// Incoming-song audio left over when a crossfade completes (mapped, gain-adjusted and toned).
     carry: Vec<f32>,
     carry_rate: u32,
+    /// The outgoing song of a crossfade ended before the blend did: the rest of the incoming
+    /// song's fade-in (frames done, total) carries on by itself instead of jumping to full level.
+    fade_in: Option<(u64, u64)>,
     leveling: Leveling,
     tone_settings: tone::ToneSettings,
     /// Per-song tone (before the listener's EQ).
@@ -421,6 +466,12 @@ struct Worker {
     stop: Option<StopAfter>,
     volume: f32,
     error: Option<String>,
+    /// A song that couldn't be played and was skipped: told once (as the status error), even
+    /// when the next song opens fine straight away (which clears `error`).
+    skipped: Option<String>,
+    /// The queue played to its end (paused at the start of its last song): Play goes on with
+    /// songs added since rather than playing the last one again.
+    finished: bool,
     last_emit: Instant,
     last_clip: Option<Instant>,
     exclusive: bool,
@@ -470,6 +521,7 @@ impl Worker {
             crossfade_checked: None,
             carry: Vec::new(),
             carry_rate: 0,
+            fade_in: None,
             leveling: dsp.leveling,
             tone_settings: dsp.tone,
             tone_eq: Equalizer::new(EqSettings::default(), 2, 44_100),
@@ -487,6 +539,8 @@ impl Worker {
             stop: None,
             volume,
             error: None,
+            skipped: None,
+            finished: false,
             last_emit: Instant::now(),
             last_clip: None,
             exclusive: dsp.exclusive,
@@ -795,10 +849,15 @@ impl Worker {
             Cmd::Prev => {
                 // Like Apple Music: past the first 3 seconds, "previous" restarts the song.
                 if let Some(i) = self.play_index {
-                    let target = if self.position > 3.0 || i == 0 {
+                    let target = if self.position > 3.0 {
                         i
-                    } else {
+                    } else if i > 0 {
                         i - 1
+                    } else if self.repeat == Repeat::All {
+                        // Repeat All goes round: before the first song comes the last.
+                        self.queue.len().saturating_sub(1)
+                    } else {
+                        i
                     };
                     self.start_at(target, 0.0, true);
                 }
@@ -865,7 +924,12 @@ impl Worker {
                     return;
                 }
                 self.queue.remove(i);
-                let was_prepared = self.decoding && self.dec_index == i;
+                // Already on its way: being decoded, blended in, waiting for the device to switch
+                // rate, or decoded into the buffer already (a short song).
+                let was_prepared = (self.decoding && self.dec_index == i)
+                    || self.crossfade.as_ref().is_some_and(|x| x.index == i)
+                    || self.switch_pending == Some(i)
+                    || self.boundaries.iter().any(|b| b.index == i);
                 self.shift_indices(i + 1, -1);
                 if was_prepared {
                     // The removed song was already being prepared as "next": redo that part.
@@ -919,7 +983,18 @@ impl Worker {
                     self.restart_here(None);
                 }
             }
-            Cmd::SetRepeat(r) => self.repeat = r,
+            Cmd::SetRepeat(r) => {
+                let before = self.play_index.map(|i| self.auto_next(i));
+                self.repeat = r;
+                // The next song may already be prepared (the last moments of a song, or a
+                // crossfade): if the new mode picks another one, prepare that instead.
+                if let Some(pi) = self.play_index
+                    && before != Some(self.auto_next(pi))
+                    && self.moved_on(pi)
+                {
+                    self.restart_here(None);
+                }
+            }
             Cmd::SetShuffle(on) => self.set_shuffle(on),
             Cmd::Replace(pairs) => {
                 for q in self.queue.iter_mut() {
@@ -964,14 +1039,27 @@ impl Worker {
         }
         self.queue.append(&mut rest);
         // The next song may already be on its way to the device: prepare the new one instead.
-        if self.dec_index > pi || self.boundaries.iter().any(|b| b.index > pi) {
+        if self.next_is_prepared(pi) {
             self.restart_here(None);
         }
     }
 
-    /// Whether the song after `pi` is already being decoded or buffered for the device.
+    /// Whether the song after `pi` is already being decoded or buffered for the device, or waiting
+    /// for it to switch rate (another index: Repeat All goes round to the first song).
     fn next_is_prepared(&self, pi: usize) -> bool {
-        self.dec_index > pi || self.boundaries.iter().any(|b| b.index > pi)
+        self.dec_index != pi
+            || self.boundaries.iter().any(|b| b.index != pi)
+            || self.switch_pending.is_some()
+    }
+
+    /// Whether what follows song `pi` was already decided: the decoder finished it (and found the
+    /// next song, or none), or a next song is decoding, blending in or waiting for a rate switch.
+    fn moved_on(&self, pi: usize) -> bool {
+        !self.decoding
+            || self.dec_index != pi
+            || self.boundaries.len() > 1
+            || self.crossfade.is_some()
+            || self.switch_pending.is_some()
     }
 
     /// Puts `items` into the queue at `at`, never before the song that's playing.
@@ -1027,6 +1115,10 @@ impl Worker {
         };
         self.play_index = self.play_index.map(fix);
         self.dec_index = fix(self.dec_index);
+        self.switch_pending = self.switch_pending.map(fix);
+        if let Some(xf) = &mut self.crossfade {
+            xf.index = fix(xf.index);
+        }
         for b in &mut self.boundaries {
             b.index = fix(b.index);
         }
@@ -1041,6 +1133,8 @@ impl Worker {
             && self.shared.consumed.load(Ordering::Acquire) >= self.written;
         match self.play_index {
             None => self.start_at(0, 0.0, true),
+            // The queue had played to its end and songs were added since: go on with them.
+            Some(i) if self.finished && i + 1 < self.queue.len() => self.start_at(i + 1, 0.0, true),
             Some(i) if ended => self.start_at(i, 0.0, true),
             // The device was released while paused: take it again and carry on from here.
             Some(i) if self.out.is_none() => self.start_at(i, self.position, true),
@@ -1083,6 +1177,8 @@ impl Worker {
         self.crossfade = None;
         self.crossfade_checked = None;
         self.carry.clear();
+        self.fade_in = None;
+        self.finished = false;
         self.dirty = true;
         self.switch_pending = None;
         let mut tries = 0;
@@ -1098,7 +1194,8 @@ impl Worker {
                 }
                 Err(e) => {
                     log::warn!("can't play {}: {e:#}", self.queue[index].path.display());
-                    self.error = Some(format!(
+                    // Kept apart from `error`, which opening the next song clears.
+                    self.skipped = Some(format!(
                         "Couldn't play “{}”: {e}",
                         file_name(&self.queue[index].path)
                     ));
@@ -1125,11 +1222,11 @@ impl Worker {
         same(index.checked_sub(1)) || same(Some(index + 1))
     }
 
-    /// Sets the per-song tone for song `index` and its linear gain (`self.gain`): Sound Check's gain
-    /// plus back whatever level the tone EQ's own headroom took, as far as the song's peak allows.
+    /// The per-song tone for song `index`: the tone EQ's settings, what to show for it, and how far
+    /// the song may be lifted back (its peak headroom after Sound Check's gain, less 1 dB).
     /// While an album plays in order its songs share one curve (the album's average), so gapless
     /// transitions never change the filters mid-stream.
-    fn apply_tone(&mut self, index: usize, gain_db: Option<f32>) -> Option<ToneInfo> {
+    fn tone_plan(&self, index: usize, gain_db: Option<f32>) -> (EqSettings, Option<ToneInfo>, f32) {
         let album = self.album_context(index);
         let item = &self.queue[index];
         let smart = if album {
@@ -1157,13 +1254,9 @@ impl Worker {
         .map(|g| g.peak)
         .unwrap_or(1.0);
         let settings = tone::settings_for(&self.tone_settings, gain_db, smart.as_ref());
-        let on = settings.enabled;
-        self.tone_eq.set_settings(settings);
         let gain = gain_db.unwrap_or(0.0);
-        let lift = if on { -self.tone_eq.auto_headroom_db() as f32 } else { 0.0 };
         let room = (-gain - 20.0 * peak.max(1e-6).log10() - 1.0).max(0.0);
-        self.gain = 10f32.powf((gain + lift.min(room)) / 20.0);
-        on.then(|| {
+        let info = settings.enabled.then(|| {
             let (bass, treble) = if self.tone_settings.loudness {
                 tone::loudness_shelves(-gain)
             } else {
@@ -1174,7 +1267,36 @@ impl Worker {
                 treble,
                 smart: smart.filter(|_| self.tone_settings.smart),
             }
-        })
+        });
+        (settings, info, room)
+    }
+
+    /// A song's linear gain: Sound Check's gain plus back whatever level its tone EQ's own headroom
+    /// took, as far as the song's peak allows (`room`, from [`Self::tone_plan`]).
+    fn song_gain(gain_db: Option<f32>, tone: &Equalizer, room: f32) -> f32 {
+        let gain = gain_db.unwrap_or(0.0);
+        let lift = if tone.settings().enabled { -tone.auto_headroom_db() as f32 } else { 0.0 };
+        10f32.powf((gain + lift.min(room)) / 20.0)
+    }
+
+    /// Sets the per-song tone for song `index` and its linear gain (`self.gain`).
+    fn apply_tone(&mut self, index: usize, gain_db: Option<f32>) -> Option<ToneInfo> {
+        let (settings, info, room) = self.tone_plan(index, gain_db);
+        // A new song: its tone's level changes at the same sample as its gain, not gliding.
+        self.tone_eq.set_settings_now(settings);
+        self.gain = Self::song_gain(gain_db, &self.tone_eq, room);
+        info
+    }
+
+    /// Sound Check's gain for song `index` in dB (None = leveling off).
+    fn leveling_db(&self, index: usize) -> Option<f32> {
+        match self.leveling.mode {
+            loudness::LevelingMode::Off => None,
+            _ => Some(
+                self.leveling
+                    .gain_db(&self.queue[index].gain, self.album_context(index)),
+            ),
+        }
     }
 
     /// Opens a song for decoding and records where it starts in the output. Returns the start position,
@@ -1188,36 +1310,49 @@ impl Worker {
             }
             self.open_output(Some(src.rate));
         }
-        // Where the song starts in the file (a song of a CUE sheet starts partway in). `offset` is
-        // the position in the song itself.
-        let start = self.queue[index].start;
-        let offset = if secs > 0.5 || start > 0.0 {
-            (src.seek(start + secs).unwrap_or(start) - start).max(0.0)
+        // Where the song starts in the file (a song of a CUE sheet starts partway in), in frames,
+        // and how far into the song itself decoding starts. The seek is sample-exact: a CUE song
+        // starts on its first sample, not on the start of the FLAC frame holding it.
+        let rate = src.rate;
+        let first = self.queue[index].first_frame(rate);
+        let frames = if secs > 0.5 || first > 0 {
+            let want = first + (secs.max(0.0) * f64::from(rate)).round() as u64;
+            match src.seek_frame(want) {
+                Ok(reached) => reached.saturating_sub(first),
+                // A song of a CUE sheet can't start at the beginning of its file instead.
+                Err(e) if first > 0 => return Err(e),
+                Err(e) => {
+                    log::warn!("seek failed, playing from the start: {e:#}");
+                    0
+                }
+            }
         } else {
-            0.0
+            0
         };
+        let offset = frames as f64 / f64::from(rate);
+        self.begin_song(index, src, frames, !may_reopen);
+        Ok(Some(offset))
+    }
+
+    /// Makes `src` (already at `frames` into song `index`) the song being decoded: its gain, tone
+    /// and the place it starts in the output.
+    fn begin_song(&mut self, index: usize, src: Source, frames: u64, gapless: bool) {
         let out_rate = self.out.as_ref().map(|o| o.rate).unwrap_or(src.rate);
-        let gain_db = match self.leveling.mode {
-            loudness::LevelingMode::Off => None,
-            _ => Some(
-                self.leveling
-                    .gain_db(&self.queue[index].gain, self.album_context(index)),
-            ),
-        };
+        let gain_db = self.leveling_db(index);
         let tone = self.apply_tone(index, gain_db);
         log::info!(
             "song {index}: {} Hz from {:.1}s, device {} Hz{}, gain {:.1} dB",
             src.rate,
-            offset,
+            frames as f64 / f64::from(src.rate),
             out_rate,
-            if may_reopen { "" } else { " (gapless)" },
+            if gapless { " (gapless)" } else { "" },
             20.0 * self.gain.log10()
         );
         self.boundaries.push(Boundary {
             // `written` already counts samples still waiting in `pending`.
             start: self.written,
             index,
-            offset,
+            offset: frames as f64 / f64::from(src.rate),
             info: SourceInfo {
                 codec: src.codec.clone(),
                 sample_rate: src.rate,
@@ -1228,12 +1363,11 @@ impl Worker {
             gain_db,
             tone,
         });
-        self.dec_frames = (offset * src.rate as f64) as u64;
+        self.dec_frames = frames;
         self.dec = Some(src);
         self.dec_index = index;
         self.decoding = true;
         self.error = None;
-        Ok(Some(offset))
     }
 
     // ---------- decoding ----------
@@ -1270,7 +1404,7 @@ impl Worker {
         }
         let out_rate = out.rate;
         let rate = if !self.carry.is_empty() {
-            // The rest of a song that faded in, already mapped and gain-adjusted.
+            // The rest of a song that faded in, already mapped, gain-adjusted and toned.
             self.mapped.clear();
             self.mapped.append(&mut self.carry);
             self.carry_rate
@@ -1279,23 +1413,31 @@ impl Worker {
                 return Step::Full;
             };
             // A song of a CUE sheet ends where the next one starts, partway into the file.
-            let room = self.queue.get(self.dec_index).and_then(|q| q.end.map(|e| ((e - q.start) * f64::from(dec.rate)) as u64));
+            let room = self.queue.get(self.dec_index).and_then(|q| q.cue_frames(dec.rate));
             if room.is_some_and(|r| self.dec_frames >= r) {
                 return Step::EndOfSong;
             }
             match dec.next_chunk() {
                 Ok(Some((samples, rate, src_ch))) => {
-                    let frames = samples.len() / src_ch.max(1);
-                    let samples = match room {
-                        Some(r) if self.dec_frames + frames as u64 > r => &samples[..(r - self.dec_frames) as usize * src_ch.max(1)],
-                        _ => samples,
+                    let src_ch = src_ch.max(1);
+                    let frames = (samples.len() / src_ch) as u64;
+                    let used = match room {
+                        Some(r) if self.dec_frames + frames > r => r - self.dec_frames,
+                        _ => frames,
                     };
-                    self.dec_frames += (samples.len() / src_ch.max(1)) as u64;
-                    map_channels(samples, src_ch, ch, &mut self.mapped);
+                    map_channels(&samples[..used as usize * src_ch], src_ch, ch, &mut self.mapped);
+                    if used < frames {
+                        // The rest belongs to the next song of the sheet.
+                        dec.give_back(used as usize);
+                    }
+                    self.dec_frames += used;
                     if self.gain != 1.0 {
                         let g = self.gain;
                         self.mapped.iter_mut().for_each(|s| *s *= g);
                     }
+                    // The song's own tone, before it's blended with anything.
+                    self.tone_eq.set_format(ch, rate);
+                    self.tone_eq.process(&mut self.mapped);
                     rate
                 }
                 Ok(None) => return Step::EndOfSong,
@@ -1305,12 +1447,13 @@ impl Worker {
                 }
             }
         };
+        if let Some((done, len)) = self.fade_in {
+            self.fade_in = fade_in_rest(&mut self.mapped, ch, done, len);
+        }
         self.maybe_start_crossfade(rate, out_rate);
         if let Some(xf) = self.crossfade.as_mut() {
             xf.mix_into(&mut self.mapped, ch);
         }
-        self.tone_eq.set_format(ch, rate);
-        self.tone_eq.process(&mut self.mapped);
         self.vocals.process(&mut self.mapped, ch, rate);
         self.eq.set_format(ch, rate);
         self.eq.process(&mut self.mapped);
@@ -1346,6 +1489,17 @@ impl Worker {
         Step::Continue
     }
 
+    /// Frames left of the song being decoded: from the CUE sheet, else the file's header, else the
+    /// library's duration.
+    fn frames_left(&self, rate: u32) -> Option<u64> {
+        let current = self.queue.get(self.dec_index)?;
+        let total = current
+            .cue_frames(rate)
+            .or_else(|| self.dec.as_ref().filter(|d| !current.is_cue() && d.rate == rate).and_then(|d| d.total_frames))
+            .or_else(|| (current.duration > 0.0).then(|| (current.duration * f64::from(rate)) as u64))?;
+        Some(total.saturating_sub(self.dec_frames))
+    }
+
     /// Starts blending in the next song when the current one is about to end (crossfade on).
     /// Songs from the same album stay gapless, and so do songs at a different sample rate.
     fn maybe_start_crossfade(&mut self, rate: u32, out_rate: u32) {
@@ -1362,8 +1516,11 @@ impl Worker {
         let Some(current) = self.queue.get(self.dec_index) else {
             return;
         };
-        let remaining = current.duration - self.dec_frames as f64 / rate as f64;
-        if remaining > cf.seconds as f64 || current.duration <= 0.0 {
+        let Some(left) = self.frames_left(rate) else {
+            return;
+        };
+        let remaining = left as f64 / f64::from(rate);
+        if remaining > cf.seconds as f64 {
             return;
         }
         self.crossfade_checked = Some(self.dec_index);
@@ -1383,13 +1540,12 @@ impl Worker {
         if src.rate != rate {
             return;
         }
-        let gain_db = match self.leveling.mode {
-            loudness::LevelingMode::Off => None,
-            _ => Some(
-                self.leveling
-                    .gain_db(&self.queue[next].gain, self.album_context(next)),
-            ),
-        };
+        let gain_db = self.leveling_db(next);
+        // The incoming song's own tone and gain, as it will have once it takes over.
+        let (settings, tone_info, room) = self.tone_plan(next, gain_db);
+        let ch = self.out.as_ref().map(|o| o.channels).unwrap_or(2);
+        let tone = Equalizer::new(settings, ch, rate);
+        let gain = Self::song_gain(gain_db, &tone, room);
         // The incoming song is "now playing" from the start of the blend.
         self.boundaries.push(Boundary {
             start: self.written,
@@ -1403,20 +1559,19 @@ impl Worker {
             },
             resampling: src.rate != out_rate,
             gain_db,
-            // Set when the incoming song takes over (see `finish_track`).
-            tone: None,
+            tone: tone_info,
         });
         log::info!("crossfading into song {next} over {remaining:.1}s");
         self.crossfade = Some(Crossfade {
             src,
             index: next,
-            gain: 10f32.powf(gain_db.unwrap_or(0.0) / 20.0),
-            gain_db,
+            gain,
+            tone,
             rate,
             buf: Vec::new(),
             frames: 0,
             pos: 0,
-            len: (remaining * rate as f64) as u64,
+            len: left,
             scratch: Vec::new(),
         });
     }
@@ -1431,15 +1586,27 @@ impl Worker {
             self.dec_frames = xf.frames;
             self.carry = xf.buf;
             self.carry_rate = xf.rate;
-            // Its tone starts now; the gain already applied to the carried audio stays as it was.
-            let tone = self.apply_tone(xf.index, xf.gain_db);
-            if let Some(b) = self.boundaries.iter_mut().rev().find(|b| b.index == xf.index) {
-                b.tone = tone;
-            }
+            // Its tone was already on it during the blend; the same filters carry on.
+            self.tone_eq = xf.tone;
+            // The outgoing song ended early (shorter than it said): finish the fade-in smoothly.
+            self.fade_in = (xf.pos < xf.len).then_some((xf.pos, xf.len));
             return;
         }
-        self.dec = None;
         let mut next = self.auto_next(self.dec_index);
+        // The next track of the same CUE sheet: carry on with the same decoder, which is already
+        // exactly at its first sample (no reopening, no seek: truly gapless).
+        if let (Some(n), Some(dec)) = (next, self.dec.as_ref()) {
+            let (cur, rate) = (&self.queue[self.dec_index], dec.rate);
+            if n != self.dec_index
+                && self.queue[n].continues(cur, rate)
+                && cur.cue_frames(rate).is_some_and(|r| self.dec_frames >= r)
+            {
+                let src = self.dec.take().expect("checked above");
+                self.begin_song(n, src, 0, true);
+                return;
+            }
+        }
+        self.dec = None;
         let mut tries = 0;
         while let Some(n) = next {
             match self.open_source(n, 0.0, false) {
@@ -1451,6 +1618,10 @@ impl Worker {
                 }
                 Err(e) => {
                     log::warn!("skipping {}: {e:#}", self.queue[n].path.display());
+                    self.skipped = Some(format!(
+                        "Couldn't play “{}”: {e}",
+                        file_name(&self.queue[n].path)
+                    ));
                     tries += 1;
                     next = if tries < self.queue.len() {
                         self.manual_next(n)
@@ -1499,16 +1670,29 @@ impl Worker {
         }
         let ended = !self.decoding && self.pending.is_empty() && consumed >= self.written;
         if ended && self.shared.playing.load(Ordering::Relaxed) && self.play_index.is_some() {
-            if let Some(n) = self.switch_pending.take() {
-                self.start_at(n, 0.0, true);
-                return;
+            self.drained();
+        }
+    }
+
+    /// Everything decoded has been played and nothing more was queued up for the device: switch
+    /// the device's rate for the next song (exclusive mode), or stop at the end of the queue.
+    fn drained(&mut self) {
+        if let Some(n) = self.switch_pending.take() {
+            // The sleep timer's "end of this song / album" counts here too.
+            let play = !self.stop_here(self.play_index, n);
+            if !play {
+                self.stop = None;
+                self.shared.playing.store(false, Ordering::Relaxed);
             }
-            // Queue finished: stop, ready to play again from the start of the last song.
-            self.stop = None;
-            self.shared.playing.store(false, Ordering::Relaxed);
-            if let Some(i) = self.play_index {
-                self.start_at(i, 0.0, false);
-            }
+            self.start_at(n, 0.0, play);
+            return;
+        }
+        // Queue finished: stop, ready to play again from the start of the last song.
+        self.stop = None;
+        self.shared.playing.store(false, Ordering::Relaxed);
+        if let Some(i) = self.play_index {
+            self.start_at(i, 0.0, false);
+            self.finished = true;
         }
     }
 
@@ -1562,6 +1746,7 @@ impl Worker {
                     && !remixing
                     && leveling.is_none_or(|g| g == 0.0)
                     && self.volume >= 1.0
+                    && f32::from_bits(self.shared.fade_gain.load(Ordering::Relaxed)) >= 1.0
                     && device_volume_db.is_none();
                 OutputInfo {
                     device: o.device.clone(),
@@ -1603,12 +1788,29 @@ impl Worker {
             shuffle: self.shuffle,
             source: current.map(|b| b.info.clone()),
             output,
-            error: self.error.clone(),
+            // A skipped song is told once; a lasting problem (no device) comes first.
+            error: self.error.clone().or_else(|| self.skipped.take()),
             stop_after: self.stop.clone(),
         };
         (self.on_status)(&status);
         *self.status.lock() = status;
     }
+}
+
+/// Carries on a crossfade's fade-in (equal-power, as in [`Crossfade::mix_into`]) over `samples`,
+/// `done` of `len` frames in. Returns what's left of it (None once at full level).
+fn fade_in_rest(samples: &mut [f32], ch: usize, done: u64, len: u64) -> Option<(u64, u64)> {
+    let len = len.max(1);
+    let mut f = done;
+    for frame in samples.chunks_exact_mut(ch.max(1)) {
+        if f >= len {
+            break;
+        }
+        let g = ((f as f32 / len as f32) * std::f32::consts::FRAC_PI_2).sin();
+        frame.iter_mut().for_each(|s| *s *= g);
+        f += 1;
+    }
+    (f < len).then_some((f, len))
 }
 
 fn file_name(p: &std::path::Path) -> String {
@@ -1784,5 +1986,123 @@ mod tests {
         w.handle(Cmd::Insert { at: 0, items: vec![item("a3")] });
         assert_eq!(ids(&w), ["a1", "a2", "a3", "b1", "b2"]);
         assert_eq!(w.play_index, Some(1));
+    }
+
+    #[test]
+    fn cue_positions_are_whole_samples() {
+        // 20:34.56 + 56 CD frames: f64 seconds times the rate lands just below the sample.
+        let secs = 1234.0 + 56.0 / 75.0;
+        assert_eq!(cue_frame(secs, 44_100), (1234 * 75 + 56) * 588);
+        assert_eq!(cue_frame(secs, 48_000), (1234 * 75 + 56) * 640);
+        assert_eq!(cue_frame(secs, 96_000), (1234 * 75 + 56) * 1280);
+        // Not a whole CD frame (or a rate that isn't a multiple of 75): the nearest sample.
+        assert_eq!(cue_frame(1.00001, 44_100), 44_100);
+        assert_eq!(cue_frame(1.5, 22_050 + 1), 33_077);
+        // Track 2 of a sheet carries on from track 1 of the same file.
+        let mut t1 = item("a1");
+        t1.end = Some(secs);
+        let mut t2 = item("a2");
+        t2.path = t1.path.clone();
+        t2.start = secs;
+        assert!(t2.continues(&t1, 44_100));
+        assert_eq!(t1.cue_frames(44_100), Some((1234 * 75 + 56) * 588));
+        assert!(!item("b1").continues(&t1, 44_100));
+    }
+
+    #[test]
+    fn sleep_timer_stops_across_a_rate_switch() {
+        // Exclusive mode, the next song needs another rate: the device switches once this song
+        // has played out. "End of this song" must stop there too.
+        let mut w = worker(0);
+        w.stop = Some(StopAfter::Songs { left: 1 });
+        w.switch_pending = Some(1);
+        w.shared.playing.store(true, Ordering::Relaxed);
+        w.drained();
+        assert_eq!(w.stop, None, "the rule was used up");
+        assert!(!w.shared.playing.load(Ordering::Relaxed));
+        assert_eq!(w.play_index, Some(1), "paused at the start of the next song");
+        // "After 2 songs" counts the boundary and plays on.
+        let mut w = worker(0);
+        w.stop = Some(StopAfter::Songs { left: 2 });
+        w.switch_pending = Some(1);
+        w.drained();
+        assert_eq!(w.stop, Some(StopAfter::Songs { left: 1 }));
+    }
+
+    #[test]
+    fn queue_edits_follow_a_pending_switch() {
+        let mut w = worker(0);
+        w.switch_pending = Some(2);
+        w.handle(Cmd::Remove(1));
+        assert_eq!(w.switch_pending, Some(1), "still b1");
+        // A song put in front of it is now the next one: prepare that instead.
+        w.handle(Cmd::Insert { at: 1, items: vec![item("a3")] });
+        assert_eq!(w.switch_pending, None);
+        assert!(w.skipped.is_some(), "restarted (the test files don't exist, so it reports one)");
+    }
+
+    #[test]
+    fn previous_goes_round_under_repeat_all() {
+        let mut w = worker(0);
+        w.repeat = Repeat::All;
+        w.handle(Cmd::Prev);
+        assert_eq!(w.play_index, Some(3));
+        let mut w = worker(0);
+        w.handle(Cmd::Prev);
+        assert_eq!(w.play_index, Some(0), "without repeat: the first song again");
+    }
+
+    #[test]
+    fn play_after_the_end_goes_on_with_added_songs() {
+        let mut w = worker(3);
+        w.finished = true;
+        w.handle(Cmd::Enqueue { items: vec![item("c1")], next: false });
+        w.handle(Cmd::Play);
+        assert_eq!(w.play_index, Some(4), "the added song, not b2 again");
+        // Without anything added, Play starts the last song again.
+        let mut w = worker(3);
+        w.finished = true;
+        w.handle(Cmd::Play);
+        assert_eq!(w.play_index, Some(3));
+    }
+
+    #[test]
+    fn repeat_change_redoes_a_prepared_next_song() {
+        // Song a2 is already being decoded after a1: Repeat One means a1 again instead.
+        let mut w = worker(0);
+        w.dec_index = 1;
+        w.decoding = true;
+        w.handle(Cmd::SetRepeat(Repeat::One));
+        assert!(w.skipped.is_some(), "restarted (the test files don't exist, so it reports one)");
+        // Nothing prepared yet: nothing to redo.
+        let mut w = worker(0);
+        w.decoding = true;
+        w.handle(Cmd::SetRepeat(Repeat::One));
+        assert!(w.skipped.is_none());
+    }
+
+    #[test]
+    fn a_skipped_song_is_reported_once() {
+        let mut w = worker(0);
+        w.skipped = Some("Couldn't play “x”".into());
+        w.error = None;
+        w.emit();
+        assert_eq!(w.status.lock().error.as_deref(), Some("Couldn't play “x”"));
+        w.emit();
+        assert_eq!(w.status.lock().error, None);
+    }
+
+    #[test]
+    fn a_cut_short_fade_in_carries_on() {
+        let mut x = vec![1.0f32; 2 * 100];
+        let rest = fade_in_rest(&mut x, 2, 50, 120);
+        // Starts where the blend was (sin of 50/120 of a quarter turn), rises, reaches full.
+        assert!((x[0] - (50.0f32 / 120.0 * std::f32::consts::FRAC_PI_2).sin()).abs() < 1e-6);
+        let left: Vec<f32> = x.iter().step_by(2).copied().collect();
+        assert!(left.windows(2).all(|p| p[1] >= p[0]));
+        assert_eq!(x[2 * 70], 1.0, "full level from frame 120 on");
+        assert_eq!(rest, None);
+        let mut y = vec![1.0f32; 2 * 10];
+        assert_eq!(fade_in_rest(&mut y, 2, 0, 120), Some((10, 120)));
     }
 }

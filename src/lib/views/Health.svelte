@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import { api, khz, type DupGroup, type HealthIntegrityRow, type HealthKind, type HealthQualityRow, type Track } from "#lib/api.js";
   import Icon from "#lib/components/Icon.svelte";
@@ -7,6 +7,11 @@
   import { android, app } from "#lib/store.svelte.js";
 
   const droid = android();
+  // Windows and Linux: the Recycle Bin, and Undo brings copies back. macOS: the Trash, put back by hand.
+  // Phones: deleted for good.
+  const mac = !droid && typeof navigator !== "undefined" && navigator.userAgent.includes("Mac OS");
+  const canBringBack = !droid && !mac;
+  const bin = mac ? "Trash" : "Recycle Bin";
 
   onMount(() => app.loadHealth());
 
@@ -43,8 +48,24 @@
 
   // (Ones Cadence isn't sure of start unticked.)
   const losers = $derived((groups ?? []).flatMap((g) => g.songs.filter((s) => !s.keep).map((s) => s.id)));
+  // The list reloads whenever the library changes (a rescan while files are landing), so the listener's
+  // choices are kept: only copies this page hasn't seen before get a default, and copies that are
+  // gone drop out.
+  const seen = new Set<string>();
   $effect(() => {
-    unchecked = (groups ?? []).filter((g) => !g.sure).flatMap((g) => g.songs.filter((s) => !s.keep).map((s) => s.id));
+    const gs = groups ?? [];
+    untrack(() => {
+      const present = new Set(gs.flatMap((g) => g.songs.filter((s) => !s.keep).map((s) => s.id)));
+      const next = unchecked.filter((id) => present.has(id));
+      for (const g of gs) {
+        for (const s of g.songs) {
+          if (s.keep || seen.has(s.id)) continue;
+          seen.add(s.id);
+          if (!g.sure) next.push(s.id);
+        }
+      }
+      unchecked = next;
+    });
   });
   const chosen = $derived(losers.filter((id) => !unchecked.includes(id)));
   const chosenBytes = $derived(chosen.reduce((n, id) => n + (app.trackById.get(id)?.size ?? 0), 0));
@@ -60,7 +81,7 @@
       const r = await api.healthRemove(chosen);
       confirming = false;
       app.showToast(
-        `${r.recycled ? "Moved" : "Deleted"} ${r.deleted} ${r.deleted === 1 ? "file" : "files"}${r.recycled ? " to the Recycle Bin" : ""}, freed ${mb(r.freed)}${r.skipped.length ? `; ${r.skipped.length} left alone` : ""}`,
+        `${r.recycled ? "Moved" : "Deleted"} ${r.deleted} ${r.deleted === 1 ? "file" : "files"}${r.recycled ? ` to the ${bin}` : ""}, freed ${mb(r.freed)}${r.skipped.length ? `; ${r.skipped.length} left alone` : ""}`,
         app.undoAction(r.change),
         8000,
       );
@@ -270,9 +291,11 @@
   <Modal title="Remove {chosen.length} {chosen.length === 1 ? 'file' : 'files'}?" onclose={() => !removing && (confirming = false)}>
     <p>
       {#if droid}
-        This deletes {chosen.length} {chosen.length === 1 ? "copy" : "copies"} from your phone and frees {mb(chosenBytes)}.
-      {:else}
+        This deletes {chosen.length} {chosen.length === 1 ? "copy" : "copies"} from your phone for good and frees {mb(chosenBytes)}. They can’t be brought back.
+      {:else if canBringBack}
         This moves {chosen.length} {chosen.length === 1 ? "copy" : "copies"} to the Recycle Bin ({mb(chosenBytes)}); Undo brings them back.
+      {:else}
+        This moves {chosen.length} {chosen.length === 1 ? "copy" : "copies"} to the {bin} ({mb(chosenBytes)}). Undo can’t bring them back here; put them back from the {bin} yourself.
       {/if}
       For each song, the copy marked <b>Keep</b> stays, and Cadence checks again that another copy remains before deleting anything.
     </p>

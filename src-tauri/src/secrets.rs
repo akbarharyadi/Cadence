@@ -58,5 +58,7 @@ pub fn set(name: &str, value: &str) -> Result<(), String> {
     } else {
         all.insert(name.to_string(), value.trim().to_string());
     }
-    std::fs::write(dir.join("secrets.json"), serde_json::to_vec(&all).unwrap_or_default()).map_err(|e| e.to_string())
+    let bytes = serde_json::to_vec(&all).map_err(|e| e.to_string())?;
+    // Whole or not at all (no backup copy: a removed key must not linger in one).
+    crate::state::write_file(&dir.join("secrets.json"), &bytes, false).map_err(|e| e.to_string())
 }

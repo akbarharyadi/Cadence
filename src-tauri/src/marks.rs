@@ -40,6 +40,20 @@ impl Entry {
     }
 }
 
+/// A removed copy's mark handed to the copy that stayed (`Marks::pass_on`), kept with the change so
+/// Undo can give it back.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PassedOn {
+    /// The removed copy's song id, and its mark.
+    pub from: String,
+    entry: Entry,
+    /// The copy that stayed, its mark before and after.
+    pub to: String,
+    to_before: Option<Entry>,
+    to_after: Entry,
+}
+
 /// What the UI needs per song.
 #[derive(Clone, Copy, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,13 +95,31 @@ impl Marks {
     }
 
     /// A removed copy's favourite and rating go to the copy that stays (the higher rating, a
-    /// favourite if either was). True when anything changed.
-    pub fn pass_on(&mut self, from: &str, to: &Track) -> bool {
-        let Some(old) = self.items.remove(from) else { return false };
+    /// favourite if either was). Returns what was done, to undo it (`take_back`); None when the
+    /// removed copy had no mark.
+    pub fn pass_on(&mut self, from: &str, to: &Track) -> Option<PassedOn> {
+        let old = self.items.remove(from)?;
+        let to_before = self.items.get(&to.id).cloned();
         let e = self.items.entry(to.id.clone()).or_insert_with(|| Entry::of(to));
         e.rating = e.rating.max(old.rating);
         e.loved |= old.loved;
-        true
+        Some(PassedOn { from: from.to_string(), entry: old, to: to.id.clone(), to_before, to_after: e.clone() })
+    }
+
+    /// Undoes a `pass_on` (the removed copy is back): its mark returns, and the copy that stayed
+    /// gets its own back, unless it has been changed since (then the listener's change stays).
+    pub fn take_back(&mut self, p: &PassedOn) {
+        self.items.entry(p.from.clone()).or_insert_with(|| p.entry.clone());
+        if p.to != p.from && self.items.get(&p.to) == Some(&p.to_after) {
+            match &p.to_before {
+                Some(e) => {
+                    self.items.insert(p.to.clone(), e.clone());
+                }
+                None => {
+                    self.items.remove(&p.to);
+                }
+            }
+        }
     }
 
     /// Entries whose song id is gone from the library follow the same song under its new id (same
@@ -168,6 +200,39 @@ mod tests {
         let v = m.view();
         assert!(!v.contains_key("old"));
         assert_eq!((v["new"].rating, v["new"].loved), (5, true));
+    }
+
+    #[test]
+    fn undoing_a_removal_gives_both_copies_their_own_marks_back() {
+        let gone = song("lossy", "Lemon", "Kenshi Yonezu", "Lemon", 255.0);
+        let kept = song("flac", "Lemon", "Kenshi Yonezu", "Lemon", 255.2);
+        let mut m = Marks::default();
+        m.set_rating(&gone, 5);
+        m.set_loved(&gone, true);
+        m.set_rating(&kept, 2);
+        let p = m.pass_on("lossy", &kept).expect("it had a mark");
+        assert_eq!((m.view()["flac"].rating, m.view()["flac"].loved), (5, true));
+        assert!(!m.view().contains_key("lossy"));
+        // Kept with the change on disk and read back.
+        let p: PassedOn = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        m.take_back(&p);
+        let v = m.view();
+        assert_eq!((v["lossy"].rating, v["lossy"].loved), (5, true));
+        assert_eq!((v["flac"].rating, v["flac"].loved), (2, false));
+
+        // The kept copy had no mark of its own: it has none again. One changed since keeps the change.
+        let mut m = Marks::default();
+        m.set_rating(&gone, 4);
+        let p = m.pass_on("lossy", &kept).unwrap();
+        let mut changed = Marks { items: m.items.clone() };
+        m.take_back(&p);
+        assert!(!m.view().contains_key("flac"));
+        changed.set_loved(&kept, true);
+        changed.take_back(&p);
+        assert_eq!((changed.view()["flac"].rating, changed.view()["flac"].loved), (4, true));
+        assert_eq!(changed.view()["lossy"].rating, 4);
+        // Nothing to hand on.
+        assert!(Marks::default().pass_on("lossy", &kept).is_none());
     }
 
     #[test]

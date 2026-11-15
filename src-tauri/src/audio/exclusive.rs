@@ -1,8 +1,12 @@
 //! WASAPI exclusive mode: Cadence takes the device directly, bypassing the Windows mixer, and runs it
 //! at the song's own sample rate. With no processing on, every sample reaches the DAC unchanged.
 //!
-//! A dedicated thread (MMCSS "Pro Audio" priority comes with event-driven exclusive streams) pulls from
-//! the same [`Renderer`] as shared mode and converts to the device's integer format.
+//! A dedicated thread pulls from the same [`Renderer`] as shared mode and converts to the device's
+//! integer format. It registers itself with MMCSS as "Pro Audio" (Windows doesn't do that for an
+//! app's own thread, event-driven or not), so a busy system doesn't starve it of time.
+//!
+//! The stream follows the Windows default output: when it changes to another device, the worker is
+//! told (as when the device fails) and reopens on the new one.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +15,7 @@ use std::thread::JoinHandle;
 use anyhow::{Result, anyhow};
 use ringbuf::traits::Split;
 use ringbuf::{HeapProd, HeapRb};
-use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
+use wasapi::{DeviceEnumerator, DeviceEventCallbacks, Direction, Role, SampleType, StreamMode, WaveFormat};
 
 use super::output::{Output, Renderer, Shared};
 use super::pcm::{Dither, Format, encode};
@@ -51,8 +55,43 @@ const FORMATS: [Format; 4] = [
     },
 ];
 
-/// Opens the default device exclusively at `rate`. Fails (so the caller can fall back to shared mode)
-/// when the device is busy, exclusive mode is disallowed, or the rate isn't supported.
+// avrt.dll (MMCSS), part of every Windows since Vista; avrt.lib comes with the Windows SDK. Declared
+// here rather than through the `windows` crate, which Cadence doesn't depend on directly.
+#[link(name = "avrt")]
+unsafe extern "system" {
+    fn AvSetMmThreadCharacteristicsW(task_name: *const u16, task_index: *mut u32) -> isize;
+    fn AvRevertMmThreadCharacteristics(handle: isize) -> i32;
+}
+
+/// The calling thread's MMCSS registration ("Pro Audio"); undone when dropped.
+struct Mmcss(isize);
+
+impl Mmcss {
+    fn pro_audio() -> Option<Self> {
+        let name: Vec<u16> = "Pro Audio".encode_utf16().chain(std::iter::once(0)).collect();
+        let mut index = 0u32;
+        // SAFETY: `name` is a NUL-terminated UTF-16 string that outlives the call; `index` is a
+        // valid out pointer.
+        let handle = unsafe { AvSetMmThreadCharacteristicsW(name.as_ptr(), &mut index) };
+        if handle == 0 {
+            log::warn!("couldn't register the exclusive stream with MMCSS");
+            None
+        } else {
+            Some(Self(handle))
+        }
+    }
+}
+
+impl Drop for Mmcss {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from AvSetMmThreadCharacteristicsW on this same thread (the
+        // value lives and is dropped inside `run`).
+        unsafe {
+            AvRevertMmThreadCharacteristics(self.0);
+        }
+    }
+}
+
 /// What the stream thread reports once the device is running.
 struct Ready {
     device: String,
@@ -61,6 +100,8 @@ struct Ready {
     prod: HeapProd<f32>,
 }
 
+/// Opens the default device exclusively at `rate`. Fails (so the caller can fall back to shared mode)
+/// when the device is busy, exclusive mode is disallowed, or the rate isn't supported.
 pub fn open(shared: Arc<Shared>, rate: u32) -> Result<Output> {
     let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<Ready>>(1);
     let stop = Arc::new(AtomicBool::new(false));
@@ -105,10 +146,27 @@ fn run(
     ready: &crossbeam_channel::Sender<Result<Ready>>,
 ) -> Result<()> {
     let _ = wasapi::initialize_mta();
-    let device = DeviceEnumerator::new()?.get_default_device(&Direction::Render)?;
+    let enumerator = DeviceEnumerator::new()?;
+    let device = enumerator.get_default_device(&Direction::Render)?;
     let name = device
         .get_friendlyname()
         .unwrap_or_else(|_| "Speakers".into());
+    // A new default output (another device chosen in Windows, or plugged in): reopen there, as
+    // shared mode would. Only the render + console default counts (what "default device" means in
+    // Sound settings); the callback runs on a Windows thread and only sets a flag.
+    let id = device.get_id().ok();
+    let mut callbacks = DeviceEventCallbacks::new();
+    let notify = shared.clone();
+    callbacks.set_default_device_callback(move |direction, role, new| {
+        if direction == Direction::Render && role == Role::Console && new.is_some() && new != id {
+            log::info!("the default output changed; reopening there");
+            notify.failed.store(true, Ordering::Release);
+        }
+    });
+    let _registration = enumerator
+        .register_notification_callback(callbacks)
+        .map_err(|e| log::warn!("can't follow default output changes: {e}"))
+        .ok();
     let mut client = device.get_iaudioclient()?;
     let channels = (client.get_mixformat()?.get_nchannels() as usize).clamp(1, 8);
 
@@ -159,7 +217,7 @@ fn run(
 
     // Half a second of buffer, as in shared mode.
     let (prod, cons) = HeapRb::<f32>::new((rate as usize / 2) * channels).split();
-    let mut renderer = Renderer::new(cons, shared.clone(), channels, rate, true);
+    let mut renderer = Renderer::new(cons, shared.clone(), channels, rate, true).with_bits(format.valid_bits as u32);
     let mut floats: Vec<f32> = Vec::new();
     let mut bytes: Vec<u8> = Vec::new();
     let mut dither = Dither::default();
@@ -188,6 +246,7 @@ fn run(
     {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    let _mmcss = Mmcss::pro_audio();
     // Prime the device buffer before starting, as Microsoft recommends.
     fill(
         client.get_available_space_in_frames()? as usize,

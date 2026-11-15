@@ -645,12 +645,10 @@ fn names_file(dir: &Path) -> PathBuf {
     dir.join("artist-names.json")
 }
 fn load_names(dir: &Path) -> ArtistNames {
-    std::fs::read(names_file(dir)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    crate::state::read_json(&names_file(dir))
 }
 fn save_names(dir: &Path, names: &ArtistNames) {
-    if let Ok(b) = serde_json::to_vec(names) {
-        let _ = std::fs::write(names_file(dir), b);
-    }
+    crate::state::write_json(&names_file(dir), names);
 }
 
 /// Every artist name in the library (each name of a credit like "A & B"), as written, with its songs.
@@ -863,8 +861,11 @@ pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<Renamed, Stri
         rec.add(&path.to_string_lossy(), false);
     }
     let mut shown = Vec::new();
+    let mut later = 0;
+    let mut failed: Vec<(String, String)> = Vec::new();
     for (id, path, c) in &changes {
         if playing.as_deref() == Some(id.as_str()) {
+            later += 1;
             let (ctx, path, c) = (ctx.clone(), path.clone(), c.clone());
             autotag::after_song(
                 id,
@@ -877,7 +878,11 @@ pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<Renamed, Stri
         } else {
             match crate::tagedit::write(path, c) {
                 Ok(()) => shown.push((id.clone(), c.clone())),
-                Err(e) => log::warn!("couldn't rename the artist in {}: {e}", path.display()),
+                Err(e) => {
+                    log::warn!("couldn't rename the artist in {}: {e}", path.display());
+                    let why = e.split_once(": ").map_or(e.clone(), |(_, why)| why.to_string());
+                    failed.push((path.to_string_lossy().into_owned(), why));
+                }
             }
         }
     }
@@ -887,7 +892,13 @@ pub fn merge_artist(ctx: &Ctx, from: String, to: String) -> Result<Renamed, Stri
         ctx.emit("library-changed", ());
         crate::jobs::start_scan(ctx.clone());
     }
-    Ok(Renamed { songs: changes.len(), change: rec.finish(ctx) })
+    let change = rec.finish(ctx);
+    // The songs renamed (or to be, the playing one when it ends), not the ones that failed.
+    let songs = shown.len() + later;
+    if !failed.is_empty() {
+        return Err(crate::api::not_all_saved(songs, changes.len(), &failed));
+    }
+    Ok(Renamed { songs, change })
 }
 
 #[cfg(test)]

@@ -37,6 +37,10 @@ class Updates {
   dismissed = $state(false);
   auto = $state(typeof localStorage === "undefined" || localStorage.getItem("cadence-auto-update") !== "off");
 
+  /** Desktop: the installer is running (the Restart button waits). */
+  installing = $state(false);
+  /** Desktop: the update is installed, only the restart is left. */
+  private installed = false;
   private desktop: DesktopUpdate | null = null;
   private apkUrl = "";
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -113,10 +117,32 @@ class Updates {
   /** Desktop: install the downloaded version and restart. Android: download and open the installer. */
   async apply() {
     if (!isAndroid) {
-      if (!this.desktop) return;
-      const { relaunch } = await import("@tauri-apps/plugin-process");
-      await this.desktop.install();
-      await relaunch();
+      if (!this.desktop || this.installing) return;
+      this.installing = true;
+      this.message = "";
+      try {
+        const { relaunch } = await import("@tauri-apps/plugin-process");
+        // Installed already by an earlier try whose restart failed: only restart.
+        if (!this.installed) {
+          await this.desktop.install();
+          this.installed = true;
+        }
+        await relaunch();
+      } catch (e) {
+        // Still "ready": the downloaded update is kept, so the banner (and Settings) offer to try
+        // again. Seen: "Failed to kill Cadence" when Windows' installer couldn't close Cadence.
+        const why = String(e).replace(/^Error:\s*/, "");
+        this.message = this.installed
+          ? `The update is installed but Cadence couldn't restart (${why}). Close Cadence and open it again.`
+          : /kill|in use|access is denied|being used/i.test(why)
+            ? `The update couldn't be installed: Windows couldn't close Cadence (${why}). Try again, or close Cadence and open it again.`
+            : `The update couldn't be installed: ${why}. Try again.`;
+        this.phase = "ready";
+        this.dismissed = false;
+        console.error("[Cadence] update failed:", e);
+      } finally {
+        this.installing = false;
+      }
       return;
     }
     this.phase = "downloading";

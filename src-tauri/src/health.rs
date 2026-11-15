@@ -762,7 +762,12 @@ pub fn remove(ctx: &Ctx, ids: &[String]) -> Removed {
                 out.deleted += 1;
                 out.freed += t.size;
                 rec.removed(&t.path);
-                moved_marks |= state.marks.lock().pass_on(&t.id, &copy);
+                // Kept with the change, so Undo gives the mark back to the file.
+                let passed = state.marks.lock().pass_on(&t.id, &copy);
+                if let Some(p) = passed {
+                    rec.passed_on(&t.path, p);
+                    moved_marks = true;
+                }
             }
             Err(e) => out.skipped.push(format!("{} – {}: {e}", t.artist, t.title)),
         }

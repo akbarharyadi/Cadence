@@ -47,8 +47,12 @@
   });
 
   async function saveMix(name: string, tracks: Track[]) {
-    const p = await app.createPlaylist(name, tracks);
-    app.showToast(`Saved “${p.name}” as a playlist`);
+    try {
+      const p = await app.createPlaylist(name, tracks);
+      app.showToast(`Saved “${p.name}” as a playlist`);
+    } catch (e) {
+      app.showToast(`Couldn't save “${name}” as a playlist: ${e}`);
+    }
   }
 
   const mixMenu = (e: MouseEvent, name: string, tracks: Track[]) =>
@@ -84,9 +88,20 @@
   }
 
   // ---------- header ----------
-  const hour = new Date().getHours();
-  const greeting = hour < 5 ? "Good night" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
-  const today = new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+  // Looked at again every minute, so a window left open overnight says the right thing.
+  let now = $state(new Date());
+  $effect(() => {
+    const timer = setInterval(() => {
+      const d = new Date();
+      if (d.getHours() !== now.getHours() || d.getDate() !== now.getDate()) now = d;
+    }, 60_000);
+    return () => clearInterval(timer);
+  });
+  const greeting = $derived.by(() => {
+    const hour = now.getHours();
+    return hour < 5 ? "Good night" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  });
+  const today = $derived(now.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" }));
   let djOpen = $state(false);
 
   // ---------- quick picks: what you played lately, one tap away ----------
@@ -108,6 +123,8 @@
     sub: string;
     art: string | null;
     tint: string | null;
+    /** What pressing the cover does: open the album, or play the mix (which has no page). */
+    openLabel: "Open" | "Play";
     open: () => void;
     play: () => void;
   }
@@ -119,6 +136,7 @@
       sub: a.artist,
       art: a.art,
       tint: a.tint ?? a.accent,
+      openLabel: "Open",
       open: () => app.go({ name: "album", id: a.id }),
       play: () => app.playAlbum(a),
     });
@@ -130,6 +148,7 @@
         sub,
         art: album?.art ?? null,
         tint: album?.tint ?? album?.accent ?? null,
+        openLabel: "Play",
         open: () => app.playTracks(tracks),
         play: () => app.playTracks(tracks),
       };
@@ -236,7 +255,7 @@
             </div>
           </div>
           <ol class="answer-list">
-            {#each tracks.slice(0, 8) as t, i (t.id)}
+            {#each tracks.slice(0, 8) as t, i (`${i}|${t.id}`)}
               <li>
                 <button onclick={() => app.playTracks(tracks, i, true)} oncontextmenu={(e) => app.trackMenu(e, tracks, i)}>
                   <span class="song-art">{#if app.albumById.get(t.albumId)?.artSmall}<img src={artUrl(app.albumById.get(t.albumId)?.artSmall)} alt="" />{/if}</span>
@@ -284,7 +303,7 @@
     <Carousel title="Top picks for you" gap={16}>
       {#each picks as p, i (p.label + p.title + i)}
         <div class="pick" style="--tint: {p.tint ?? '#24273d'}">
-          <button class="pick-art" onclick={p.open} aria-label="Open {p.title}">
+          <button class="pick-art" onclick={p.open} aria-label="{p.openLabel} {p.title}">
             {#if p.art}<img src={artUrl(p.art)} alt="" loading="lazy" />{:else}<Icon name="album" size={48} />{/if}
           </button>
           <div class="pick-body">
@@ -318,7 +337,7 @@
       {#snippet actions()}
         <button class="link" onclick={() => app.loadAiMixes(true)} disabled={app.aiMixesState === "loading"}>{app.aiMixesState === "loading" ? "Making mixes…" : "New mixes"}</button>
       {/snippet}
-      {#each app.aiMixes as m, i (m.title)}
+      {#each app.aiMixes as m, i (`${i}|${m.title}`)}
         {@render tile(m.title, m.reason, aiTracks(m), aiArt[i], m.lane)}
       {:else}
         {#if app.aiMixesState === "loading"}
@@ -336,7 +355,7 @@
         <button class="link" onclick={() => app.loadAiNew(true)} disabled={app.aiNewState === "loading"}>{app.aiNewState === "loading" ? "Searching…" : "Find more"}</button>
         <button class="link" onclick={() => app.go({ name: "discover" })}>Discover</button>
       {/snippet}
-      {#each app.aiNew as d (d.artist + d.title)}
+      {#each app.aiNew as d, i (`${i}|${d.artist}|${d.title}`)}
         {@render newCard(d)}
       {:else}
         {#if app.aiNewState === "loading"}
@@ -350,7 +369,7 @@
 
   {#if app.mixes.length}
     <Carousel title="Mixes by sound">
-      {#each app.mixes as mix (mix.name)}
+      {#each app.mixes as mix, i (`${i}|${mix.name}`)}
         {@render tile(mix.name, mix.description, app.mixTracks(mix))}
       {/each}
     </Carousel>
@@ -377,8 +396,9 @@
   {#if app.artists.length > 1}
     <Carousel title="Artists">
       {#each app.artists.slice(0, 30) as a (a.name)}
+        {@const pic = app.artistPicture(a, "small")}
         <button class="artist-chip" onclick={() => app.go({ name: "artist", artist: a.name })}>
-          <span class="avatar">{#if a.albums[0]?.artSmall}<img src={artUrl(a.albums[0].artSmall)} alt="" loading="lazy" />{/if}</span>
+          <span class="avatar">{#if pic}<img src={artUrl(pic)} alt="" loading="lazy" />{/if}</span>
           <span class="name">{a.name}</span>
         </button>
       {/each}

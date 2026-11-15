@@ -121,6 +121,12 @@ pub fn start_scan(ctx: Ctx) {
             let ids: std::collections::HashSet<String> = state.engine.status().queue.into_iter().collect();
             previous.iter().filter(|t| ids.contains(&t.id)).cloned().collect()
         };
+        // The same for the playlists' songs.
+        let listed: Vec<library::Track> = {
+            let ids: std::collections::HashSet<String> =
+                state.playlists.lock().items.iter().flat_map(|p| p.track_ids.iter().cloned()).collect();
+            previous.iter().filter(|t| ids.contains(&t.id)).cloned().collect()
+        };
         let started = std::time::Instant::now();
         // Progress at most 5 times a second (it came every 25 files: ~280 sidebar updates a scan).
         let last_progress = std::sync::atomic::AtomicU64::new(0);
@@ -166,6 +172,12 @@ pub fn start_scan(ctx: Ctx) {
         if found > 0 {
             log::info!("{found} queued songs moved; the queue follows them");
         }
+        // Playlists follow them too (songs that can't be found stay, under their old ids).
+        let followed = state.remap_playlists(&listed);
+        if followed > 0 {
+            log::info!("{followed} playlist entries moved; the playlists follow them");
+            ctx.emit("playlists-changed", ());
+        }
         // Favourites and ratings follow songs whose files moved.
         let relinked = {
             let lib = state.library.lock();
@@ -175,7 +187,7 @@ pub fn start_scan(ctx: Ctx) {
             log::info!("{relinked} rated or favourite songs moved; their marks follow them");
             state.save_marks();
         }
-        if unchanged && found == 0 && relinked == 0 {
+        if unchanged && found == 0 && relinked == 0 && followed == 0 {
             log::info!("rescan found no changes");
             ctx.emit("library-scanned", ());
         } else {
@@ -263,6 +275,9 @@ pub fn start_analysis(ctx: Ctx) {
             });
         });
         let mut done = 0;
+        // Saved every half minute too (as sound analysis is): quitting halfway through a big
+        // library keeps what was measured.
+        let mut saved = std::time::Instant::now();
         for (tracks, (per_track, album)) in rx {
             let mut updates = Vec::new();
             {
@@ -285,6 +300,10 @@ pub fn start_analysis(ctx: Ctx) {
             }
             state.engine.send(Cmd::UpdateGains(updates));
             done += tracks.len();
+            if saved.elapsed() > Duration::from_secs(30) {
+                state.save_library();
+                saved = std::time::Instant::now();
+            }
             ctx.emit("analysis-progress", Progress { done, total });
         }
         log::info!(

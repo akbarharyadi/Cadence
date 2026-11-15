@@ -1,6 +1,9 @@
 //! Sleep timer: pause after a number of minutes (fading the sound out first). "After this song",
 //! "after N songs" and "after this album" are the engine's (`audio::StopAfter`), since they have
 //! to act exactly at a song boundary.
+//!
+//! The fade is the engine's own gain on top of the volume (`Engine::set_fade`): the volume slider
+//! stays where the listener put it, and moving it (or a volume key) during the fade still works.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -56,30 +59,28 @@ fn run(ctx: Ctx, generation: u64, total: Duration) {
         std::thread::sleep(Duration::from_millis(500));
     }
     let engine = &ctx.state.engine;
-    let status = engine.status();
-    let volume = status.volume;
-    if status.playing {
+    if engine.status().playing {
         let fade = total.saturating_sub(started.elapsed()).max(STEP);
         let steps = (fade.as_millis() / STEP.as_millis()).max(1) as u32;
         for k in 1..=steps {
             if !alive() {
                 // Cancelled while fading: the sound comes back.
-                engine.send(Cmd::SetVolume(volume));
+                engine.set_fade(1.0);
                 return;
             }
             if !engine.status().playing {
                 break; // Paused by hand meanwhile.
             }
             let left = 1.0 - k as f32 / steps as f32;
-            engine.send(Cmd::SetVolume(volume * left * left));
+            engine.set_fade(left * left);
             std::thread::sleep(STEP);
         }
         if alive() {
             engine.send(Cmd::Pause);
-            // Let the pause settle before the volume comes back.
+            // Let the pause settle before the sound comes back.
             std::thread::sleep(Duration::from_millis(400));
         }
-        engine.send(Cmd::SetVolume(volume));
+        engine.set_fade(1.0);
     }
     if alive() {
         sleep.ends_at.store(0, Ordering::SeqCst);

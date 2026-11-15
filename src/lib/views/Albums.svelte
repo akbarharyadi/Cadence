@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import AlbumCard from "#lib/components/AlbumCard.svelte";
   import Select from "#lib/components/Select.svelte";
   import { app } from "#lib/store.svelte.js";
@@ -32,15 +33,24 @@
     typeof requestIdleCallback === "function" ? requestIdleCallback(f, { timeout: 200 }) : (setTimeout(f, 30) as unknown as number);
   const cancelIdle = (h: number) => (typeof cancelIdleCallback === "function" ? cancelIdleCallback(h) : clearTimeout(h));
   let limit = $state(FIRST);
+  // The grid starts over (small, then grows) only when the page or the sort the listener chose
+  // changes. A library reload (after a cover or tag edit) only changes how many there are: the cards
+  // already shown stay, so the grid doesn't collapse and the scroll position holds.
+  let startedFor = "";
   $effect(() => {
     const total = sorted.length;
-    limit = FIRST;
+    const key = `${recent}|${sort}`;
+    // (`limit` is read untracked: this effect must follow the library and the sort, not its own growth.)
+    if (untrack(() => key !== startedFor)) {
+      startedFor = key;
+      limit = FIRST;
+    }
     let handle = 0;
     const more = () => {
       limit = Math.min(total, limit + STEP);
       if (limit < total) handle = idle(more);
     };
-    if (total > FIRST) handle = idle(more);
+    if (untrack(() => total > limit)) handle = idle(more);
     return () => cancelIdle(handle);
   });
   const shown = $derived(sorted.length > limit ? sorted.slice(0, limit) : sorted);

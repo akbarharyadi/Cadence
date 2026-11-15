@@ -34,6 +34,9 @@ pub struct Crossfeed {
     a1_hi: f64,
     b1_hi: f64,
     gain: f64,
+    /// Levels of the crossfed low-pass and of what the direct path takes out (see `init`).
+    g_lo: f64,
+    g_hi: f64,
     lo: [f64; 2],
     hi: [f64; 2],
     last_in: [f64; 2],
@@ -50,6 +53,8 @@ impl Crossfeed {
             a1_hi: 0.0,
             b1_hi: 0.0,
             gain: 1.0,
+            g_lo: 0.0,
+            g_hi: 0.0,
             lo: [0.0; 2],
             hi: [0.0; 2],
             last_in: [0.0; 2],
@@ -62,10 +67,30 @@ impl Crossfeed {
         self.settings.enabled
     }
 
+    /// A new level takes effect on the running filters without a click: clearing their memory
+    /// would drop the sound for a moment. Both paths are a level times a one-pole low-pass, so the
+    /// low-passes carry on and only the levels change. Turning crossfeed on starts from silence
+    /// (the memory is stale by then).
     pub fn set_settings(&mut self, settings: CrossfeedSettings) {
         if settings != self.settings {
+            let switched_on = settings.enabled && !self.settings.enabled;
+            let (g_lo, g_hi) = (self.g_lo, self.g_hi);
             self.settings = settings;
             self.init();
+            if switched_on {
+                self.reset();
+            } else {
+                for c in 0..2 {
+                    // lo = g_lo · lp_lo;  hi = x − g_hi · lp_hi (as of the last input x).
+                    if g_lo > 0.0 {
+                        self.lo[c] *= self.g_lo / g_lo;
+                    }
+                    if g_hi > 0.0 {
+                        let x = self.last_in[c];
+                        self.hi[c] = x - (x - self.hi[c]) * self.g_hi / g_hi;
+                    }
+                }
+            }
         }
     }
 
@@ -73,6 +98,7 @@ impl Crossfeed {
         if rate != self.rate {
             self.rate = rate;
             self.init();
+            self.reset();
         }
     }
 
@@ -96,7 +122,8 @@ impl Crossfeed {
         self.a0_hi = 1.0 - g_hi * (1.0 - x);
         self.a1_hi = -x;
         self.gain = 1.0 / (1.0 - g_hi + g_lo);
-        self.reset();
+        self.g_lo = g_lo;
+        self.g_hi = g_hi;
     }
 
     pub fn reset(&mut self) {
@@ -142,6 +169,21 @@ mod tests {
         c.process(&mut buf, 2);
         let last = buf[buf.len() - 1];
         assert!((last - 0.5).abs() < 0.02, "{last}");
+    }
+
+    #[test]
+    fn changing_the_level_does_not_click() {
+        let on = |level| CrossfeedSettings { enabled: true, level };
+        let mut c = Crossfeed::new(on(CrossfeedLevel::Default), 48_000);
+        let mut buf = vec![0.5f32; 2 * 48_000];
+        c.process(&mut buf, 2);
+        let before = buf[buf.len() - 2];
+        c.set_settings(on(CrossfeedLevel::Meier));
+        let mut next = vec![0.5f32; 2 * 64];
+        c.process(&mut next, 2);
+        // Clearing the filters would drop the output to ~0.44 here (heard as a click); keeping
+        // them unscaled would jump to ~0.54.
+        assert!((next[0] - before).abs() < 0.005, "{before} -> {}", next[0]);
     }
 
     #[test]
