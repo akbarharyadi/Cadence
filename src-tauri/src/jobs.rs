@@ -42,8 +42,9 @@ pub struct Progress {
 /// at once, no more than two heavy threads do. The music, the UI and other apps come first, and
 /// memory stays modest (every song being analysed holds its decoded audio). A job never waits for
 /// another job inside the pool (that would hold a thread the other needs): it waits on its own
-/// thread, then hands the work over. (Light, bounded work that must not wait hours behind a long
-/// job has a low-priority thread of its own: the lyrics index, the waveform of the song playing.)
+/// thread, then hands the work over. Light, bounded work that must not wait hours behind a long
+/// job (the lyrics index) takes a turn on it (`run_soon`). (The waveform of the song playing, a
+/// second or two, has a low-priority thread of its own.)
 pub(crate) fn background_pool() -> &'static rayon::ThreadPool {
     static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
@@ -67,14 +68,59 @@ pub(crate) fn background_pool() -> &'static rayon::ThreadPool {
     })
 }
 
+type Turn = Box<dyn FnOnce() + Send>;
+
+/// Short work waiting for a turn on the pool (`run_soon`).
+static TURNS: parking_lot::Mutex<std::collections::VecDeque<Turn>> = parking_lot::Mutex::new(std::collections::VecDeque::new());
+
+/// Runs light, bounded work (the lyrics index) on one of the pool's threads soon: at once when
+/// the pool is free, else by the first pool thread that finishes a song (or an album) of a long
+/// job (`take_turn`): one song's work later, not after the whole job. Never a third heavy thread.
+pub(crate) fn run_soon(work: impl FnOnce() + Send + 'static) {
+    TURNS.lock().push_back(Box::new(work));
+    background_pool().spawn(take_turn);
+}
+
+/// Called by the long jobs between their songs: runs one waiting short task here, if any (each
+/// runs once: whoever takes it first).
+pub(crate) fn take_turn() {
+    let next = TURNS.lock().pop_front();
+    if let Some(work) = next {
+        work();
+    }
+}
+
 #[cfg(test)]
 mod pool_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     #[test]
     fn one_shared_pool_of_at_most_two_threads() {
         let a = super::background_pool() as *const rayon::ThreadPool;
         let b = super::background_pool() as *const rayon::ThreadPool;
         assert_eq!(a, b, "every job gets the same pool");
         assert!((1..=2).contains(&super::background_pool().current_num_threads()));
+    }
+
+    #[test]
+    fn short_work_runs_once_on_the_pool_between_the_songs_of_a_long_job() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let on_pool = Arc::new(AtomicUsize::new(0));
+        let (r, p) = (ran.clone(), on_pool.clone());
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        super::run_soon(move || {
+            r.fetch_add(1, Ordering::SeqCst);
+            if rayon::current_thread_index().is_some() {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+            let _ = tx.send(());
+        });
+        // A long job's song boundary takes it if the pool hasn't yet; either way, once.
+        super::background_pool().install(super::take_turn);
+        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("it ran");
+        super::take_turn();
+        assert_eq!((ran.load(Ordering::SeqCst), on_pool.load(Ordering::SeqCst)), (1, 1));
     }
 }
 
@@ -323,6 +369,8 @@ pub fn start_analysis(ctx: Ctx) {
         let data_dir = state.data_dir.clone();
         background_pool().spawn(move || {
             todo.into_par_iter().for_each_with(tx, |tx, (_, tracks)| {
+                // (Short work waiting for a turn goes first: `run_soon`.)
+                take_turn();
                 let paths: Vec<&Path> = tracks.iter().map(|(_, p)| Path::new(p.as_str())).collect();
                 let want: Vec<bool> = tracks
                     .iter()
@@ -414,6 +462,7 @@ pub fn start_listening(ctx: Ctx) {
         let (tx, rx) = crossbeam_channel::unbounded();
         background_pool().spawn(move || {
             todo.into_par_iter().for_each_with(tx, |tx, (id, path, stamp)| {
+                take_turn();
                 let (f, t) = crate::sonic::analyze(Path::new(&path)).unwrap_or_else(|e| {
                     log::warn!("sound analysis failed for {path}: {e:#}");
                     (Vec::new(), Vec::new())

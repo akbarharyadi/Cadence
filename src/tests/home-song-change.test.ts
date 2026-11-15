@@ -13,7 +13,20 @@ import { makeAlbum, makeStatus, makeTrack, mockBackend, resetApp, settle } from 
 const ALBUMS = 2000;
 const PER = 10;
 
-/** 20,000 songs in 2,000 albums, and every pass over the album list counted. */
+/** Whole-list operations: each one is a pass over the list. */
+const PASSES = new Set<PropertyKey>(["filter", "map", "find", "findIndex", "some", "every", "reduce", "forEach", "flatMap", "indexOf", "includes", "slice", "sort", Symbol.iterator]);
+
+/** `list`, with every pass over it counted in `tally`. */
+function counted<T extends object>(list: T[], tally: { n: number }): T[] {
+  return new Proxy(list, {
+    get(target, key, receiver) {
+      if (PASSES.has(key)) tally.n++;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+}
+
+/** 20,000 songs in 2,000 albums, and every pass over the album list and the song list counted. */
 function bigLibrary() {
   const tracks: Track[] = [];
   const albums: Album[] = [];
@@ -24,14 +37,9 @@ function bigLibrary() {
     tracks.push(...songs);
     albums.push(makeAlbum(songs, { id: `al${a}`, title: `Album ${a}`, artist: `Artist ${a % 300}`, added: a }));
   }
-  let passes = 0;
-  const counted = new Proxy(albums, {
-    get(target, key, receiver) {
-      if (key === "filter" || key === "map" || key === "find" || key === "some" || key === "reduce" || key === Symbol.iterator) passes++;
-      return Reflect.get(target, key, receiver);
-    },
-  });
-  return { tracks, albums: counted as Album[], passes: () => passes };
+  const overAlbums = { n: 0 };
+  const overSongs = { n: 0 };
+  return { tracks: counted(tracks, overSongs), albums: counted(albums, overAlbums), passes: () => overAlbums.n, songPasses: () => overSongs.n };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -50,18 +58,19 @@ describe("Home on a big library", () => {
     render(Home);
     flushSync();
     const before = lib.passes();
-    const started = performance.now();
+    const songsBefore = lib.songPasses();
     const N = 100;
     // Shuffle: every song from another album.
     for (let i = 1; i <= N; i++) {
       play(makeStatus({ queue, index: ((i * 37) % ALBUMS) * PER, playing: true, duration: 1 }));
       flushSync();
     }
-    const ms = (performance.now() - started) / N;
+    // What a change costs, counted rather than timed (a busy machine slows a timing, not this):
+    // what is on screen, never a pass over the whole library.
     const passes = lib.passes() - before;
-    console.log(`Home, 20,000 songs: ${ms.toFixed(2)} ms and ${(passes / N).toFixed(1)} passes over the albums per song change`);
+    const songPasses = lib.songPasses() - songsBefore;
     expect(passes / N).toBeLessThan(1);
-    expect(ms).toBeLessThan(15);
+    expect(songPasses / N).toBeLessThan(1);
   });
 
   test("a burst of finished plays reloads the history once or twice, not once per play", async () => {

@@ -80,11 +80,41 @@ describe("Unmute after a device switch", () => {
     expect(last.volume as number).toBeCloseTo(SAFE_SLIDER * SAFE_SLIDER, 5);
   });
 
+  test("Unmute after Direct output really opened on the same device goes no higher than the start level", async () => {
+    const { backend } = await bar({ volume: 1, deviceGen: 4 });
+    const user = userEvent.setup();
+    // Through the mixer at the top of the slider, muted.
+    await user.click(screen.getByRole("button", { name: "Mute" }));
+    app.status = makeStatus({ ...app.status!, volume: 0, deviceGen: 4 });
+    await settle();
+    // The next song: the same DAC, now really in Direct output (only the mode changed).
+    app.status = makeStatus({ ...app.status!, volume: 0, deviceGen: 5 });
+    await settle();
+    await user.click(screen.getByRole("button", { name: "Unmute" }));
+    const last = sent(backend).at(-1)!;
+    expect(last.deviceGen).toBe(5);
+    expect(last.volume as number).toBeLessThanOrEqual(SAFE_SLIDER * SAFE_SLIDER + 1e-9);
+  });
+
   test("a new device with a volume of its own: Unmute returns to that one", () => {
     const vc = new VolumeControl();
     vc.status(0.81, 1);
     vc.press(0);
     vc.status(0.04, 2);
     expect(vc.lastNonZero).toBeCloseTo(0.2, 5);
+  });
+});
+
+describe("Before the first status", () => {
+  test("no volume change is sent until a status says which device it is for", () => {
+    const vc = new VolumeControl();
+    expect(vc.set(0.8)).toBeNull();
+    expect(vc.press(0)).toBeNull();
+    vc.down();
+    expect(vc.set(0.9)).toBeNull();
+    vc.up();
+    vc.status(0.25, 3);
+    expect(vc.set(0.6)).toEqual({ gen: 3 });
+    expect(vc.press(0)).toEqual({ gen: 3 });
   });
 });

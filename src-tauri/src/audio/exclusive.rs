@@ -126,7 +126,12 @@ pub fn open(shared: Arc<Shared>, rate: u32, device: Option<&str>) -> Result<Outp
             let _ = thread.join();
             return Err(e);
         }
-        Err(_) => return Err(anyhow!("the device didn't respond")),
+        Err(_) => {
+            // The thread carries on by itself: it must not take the device later (and render
+            // beside the stream Cadence falls back to). It stops at its next check.
+            stop.store(true, Ordering::Release);
+            return Err(anyhow!("the device didn't respond"));
+        }
     };
     Ok(Output {
         backend: super::output::Backend::Exclusive(ExclusiveStream {
@@ -183,6 +188,10 @@ fn run(
         .calculate_aligned_period_near(default_period, Some(128), &wave)
         .unwrap_or(default_period);
     let mode = StreamMode::EventsExclusive { period_hns: period };
+    // Given up on (`open` timed out): the device isn't taken.
+    if stop.load(Ordering::Acquire) {
+        return Ok(());
+    }
     if client
         .initialize_client(&wave, &Direction::Render, &mode)
         .is_err()
@@ -222,12 +231,16 @@ fn run(
 
     // Hand the ring to the worker first and give it a moment to fill it: starting the device on an
     // empty ring plays a short gap at the start of the song (heard as a dip after a rate change).
-    let _ = ready.send(Ok(Ready {
+    let handed = ready.send(Ok(Ready {
         device: name,
         channels,
         format,
         prod,
     }));
+    // Given up on meanwhile: the device is let go without a sample.
+    if handed.is_err() || stop.load(Ordering::Acquire) {
+        return Ok(());
+    }
     let want = rate as usize * 15 / 100; // 150 ms
     let waited = std::time::Instant::now();
     while renderer.buffered_frames() < want
@@ -235,6 +248,9 @@ fn run(
         && !stop.load(Ordering::Acquire)
     {
         std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if stop.load(Ordering::Acquire) {
+        return Ok(());
     }
     let _mmcss = Mmcss::pro_audio();
     // Prime the device buffer before starting, as Microsoft recommends.

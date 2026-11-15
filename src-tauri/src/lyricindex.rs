@@ -340,7 +340,7 @@ fn let_go_if_idle(ctx: &Ctx) {
     }
     let ctx = ctx.clone();
     let asked = USE.lock().searched;
-    on_own_thread(move || {
+    in_turn(move || {
         let dir = ctx.state.data_dir.clone();
         let taken = INDEX.lock().take();
         if let Some(idx) = taken {
@@ -446,31 +446,24 @@ pub fn search(ctx: &Ctx, query: &str, limit: usize) -> Found {
     Found { ready: true, hits }
 }
 
-/// Runs the index's work (`BUILDING` set: one at a time) on a thread of its own, at low priority.
-/// Not on the shared pool of heavy jobs: reading lyrics files is light and bounded, and there it
-/// would wait behind a long analysis (hours on a first run) while "find a song by a line" says the
-/// index isn't ready.
-fn on_own_thread(work: impl FnOnce() + Send + 'static) {
-    let spawned = std::thread::Builder::new().name("cadence-lyric-index".into()).spawn(move || {
-        crate::jobs::background_priority();
-        work();
-    });
-    if let Err(e) = spawned {
-        log::warn!("couldn't start the lyrics index: {e}");
-        BUILDING.store(false, Ordering::SeqCst);
-    }
+/// Runs the index's work (`BUILDING` set: one at a time) on one of the shared pool's threads (at
+/// most two heavy threads in all), taking a turn there: reading lyrics files is light and bounded,
+/// and it starts between two songs of a long analysis (hours on a first run) rather than after it,
+/// so "find a song by a line" doesn't say for hours that the index isn't ready.
+fn in_turn(work: impl FnOnce() + Send + 'static) {
+    crate::jobs::run_soon(work);
 }
 
 /// Songs to read per batch (a dictionary load each for Japanese; progress between them).
 const BATCH: usize = 400;
 
 /// Loads the index kept on disk, then reads the songs whose lyrics changed since it was saved,
-/// on one low-priority thread.
+/// in a turn on the shared pool (`in_turn`).
 fn start(ctx: Ctx) {
     if BUILDING.swap(true, Ordering::SeqCst) {
         return;
     }
-    on_own_thread(move || {
+    in_turn(move || {
         let started = std::time::Instant::now();
         let dir = ctx.state.data_dir.clone();
         let cache = dir.join("lyrics");

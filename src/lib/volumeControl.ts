@@ -5,7 +5,8 @@
  * generation it started under; when a status of another generation arrives during it (playback
  * moved to another device, or Direct output was turned on or off), the drag is over: the slider
  * shows that device's volume, and nothing more is sent until the pointer is let go. Unmute never
- * brings back a level from another device. */
+ * brings back a level from another device (or mode). Nothing is sent before the first status. The
+ * engine holds its own rules on top (a raise that isn't heard on Direct output; `audio::safety`). */
 
 /** What Unmute returns to when the device's own level isn't known (the slider at 30%: the level
  * Direct output starts a new device at, `NEW_DIRECT_VOLUME`). */
@@ -56,16 +57,19 @@ export class VolumeControl {
   }
 
   /** The listener moved the slider to `v` (dragged, or with the keys). Returns the generation to
-   * send it with, or null when it isn't sent (a drag that playback moved away from under). */
+   * send it with, or null when it isn't sent (a drag that playback moved away from under, or no
+   * status yet: which device it would be for isn't known). */
   set(v: number): { gen: number | undefined } | null {
-    if (this.stale) return null;
+    if (this.stale || !this.seen) return null;
     if (v > 0) this.lastNonZero = v;
     return { gen: this.dragging ? this.dragGen : this.gen };
   }
 
-  /** Mute (0) or Unmute (`lastNonZero`) was pressed: for the device shown. */
-  press(v: number): number | undefined {
+  /** Mute (0) or Unmute (`lastNonZero`) was pressed: for the device shown. Null: not sent (no
+   * status yet). */
+  press(v: number): { gen: number | undefined } | null {
+    if (!this.seen) return null;
     if (v > 0) this.lastNonZero = v;
-    return this.gen;
+    return { gen: this.gen };
   }
 }

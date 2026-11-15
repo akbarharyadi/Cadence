@@ -12,6 +12,20 @@
 //! - An automatic move (the system default changed, the chosen device came back) waits for Play
 //!   when it would play much louder than before, or on a device never played in that mode while the
 //!   volume is above `NEW_DIRECT_VOLUME` (the device's own system volume is unknown: `waits`).
+//! - A level is recorded only while that device is open in that mode (`opened`): a volume set
+//!   while nothing is open is the volume wanted, held to the rule at the next open.
+//! - The first raise (`unheard_ceiling`): on an open Direct output that isn't being heard (paused,
+//!   at zero, or under the sleep timer's fade: what reaches the device is the volume times the
+//!   fade), one volume command goes no higher than the volume last heard there (`NEW_DIRECT_VOLUME`
+//!   for a device with none), or where it already is. While it plays at a level above zero with no
+//!   fade any command is taken: the listener hears it rising. So Unmute from zero, a drag while
+//!   paused and a drag under the fade can't jump a DAC to full scale (nor above what it last
+//!   played); Unmute back to the level heard before muting, and lowering, always work. A volume
+//!   held like that is recorded as the level only as far as this ceiling; past it, once heard.
+//!
+//! Every open is a new device generation (`Status::device_gen`) unless it replaces an open output
+//! on the same device in the same real mode: a command, a drag or an Unmute level from before a
+//! fallback to the mixer, a return to Direct output, a release or a device move is dropped.
 
 use super::NEW_DIRECT_VOLUME;
 
@@ -48,6 +62,13 @@ pub(super) fn limit(rec: Recorded, direct: bool, before: f32) -> f32 {
         None if direct => before.min(NEW_DIRECT_VOLUME),
         None => before,
     }
+}
+
+/// The most one volume command may set on a Direct output that isn't being heard now: the volume
+/// last heard there (`heard`; with none, or only silence, the start level), or where it is (`now`).
+pub(super) fn unheard_ceiling(heard: f32, now: f32) -> f32 {
+    let base = level(Some(heard)).filter(|h| *h > 0.0).unwrap_or(NEW_DIRECT_VOLUME);
+    base.max(level(Some(now)).unwrap_or(0.0))
 }
 
 /// Why an automatic move waits for Play (None: it plays on).
@@ -98,6 +119,15 @@ mod tests {
         assert_eq!(odd, Recorded::default());
         assert_eq!(Recorded::new(Some(f32::NAN), Some(f32::INFINITY)), Recorded::default());
         assert_eq!(limit(Recorded::new(None, Some(1.5)), true, 1.0), NEW_DIRECT_VOLUME);
+    }
+
+    #[test]
+    fn a_raise_not_heard_goes_no_higher_than_the_start_level_or_what_was_heard() {
+        assert_eq!(unheard_ceiling(0.0, 0.0), NEW_DIRECT_VOLUME, "from zero, nothing heard");
+        assert_eq!(unheard_ceiling(0.5, 0.0), 0.5, "Unmute back to what was heard");
+        assert_eq!(unheard_ceiling(0.05, 0.0), 0.05, "never above what it last played");
+        assert_eq!(unheard_ceiling(0.2, 0.3), 0.3, "where it is");
+        assert_eq!(unheard_ceiling(f32::NAN, 2.0), NEW_DIRECT_VOLUME, "not a volume: the start level");
     }
 
     #[test]

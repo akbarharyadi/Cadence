@@ -376,6 +376,7 @@ pub fn start(ctx: Ctx, kind: Kind) -> bool {
         let stop_state = state.clone();
         background_pool().spawn(move || {
             todo.into_par_iter().for_each_with(tx, |tx, (id, path, stamp, duration)| {
+                crate::jobs::take_turn();
                 if stop_state.health.stop.load(Ordering::Relaxed) {
                     return;
                 }

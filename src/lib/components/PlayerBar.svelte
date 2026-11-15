@@ -91,8 +91,10 @@
   }
   function toggleMute() {
     const v = volume > 0 ? 0 : vc.lastNonZero;
+    const send = vc.press(v);
+    if (!send) return;
     volume = v;
-    api.setVolume(v * v, vc.press(v));
+    api.setVolume(v * v, send.gen);
   }
 
   const repeatLabel = $derived(

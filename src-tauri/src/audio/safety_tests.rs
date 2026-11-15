@@ -13,11 +13,11 @@ use super::*;
 use crate::profiles::Profile;
 use crate::state::Settings;
 
-const CAP: f32 = NEW_DIRECT_VOLUME + 1e-6;
+pub(super) const CAP: f32 = NEW_DIRECT_VOLUME + 1e-6;
 
 /// The engine as Cadence starts it on these saved settings (read back from their file), without
 /// the book yet. Nothing is open or playing.
-fn engine(name: &str, saved: &Settings) -> (Worker, PathBuf, Settings) {
+pub(super) fn engine(name: &str, saved: &Settings) -> (Worker, PathBuf, Settings) {
     let settings: Settings = serde_json::from_str(&serde_json::to_string(saved).unwrap()).unwrap();
     let (mut w, _cons, dir) = real_worker(name, &["a1", "a2", "b1"], 100_000);
     w.list_devices = fake_devices;
@@ -30,36 +30,36 @@ fn engine(name: &str, saved: &Settings) -> (Worker, PathBuf, Settings) {
 }
 
 /// `engine`, with the book given before anything opens (as `hub::open` does).
-fn launch(name: &str, saved: &Settings) -> (Worker, PathBuf, Arc<Mutex<Settings>>) {
+pub(super) fn launch(name: &str, saved: &Settings) -> (Worker, PathBuf, Arc<Mutex<Settings>>) {
     let (mut w, dir, settings) = engine(name, saved);
     let book = Arc::new(Mutex::new(settings));
     w.handle(Cmd::SetProfiles(Some(crate::profiles::settings_book(book.clone()))));
     (w, dir, book)
 }
 
-fn direct_dsp() -> DspSettings {
+pub(super) fn direct_dsp() -> DspSettings {
     let mut d = base_dsp();
     d.exclusive = true;
     d
 }
 
 /// The settings of someone upgrading: Direct output on, this volume, no device of their own yet.
-fn upgraded(volume: f32, per_device: bool) -> Settings {
+pub(super) fn upgraded(volume: f32, per_device: bool) -> Settings {
     Settings { dsp: direct_dsp(), volume, device_profiles: per_device, ..Default::default() }
 }
 
-fn done(w: Worker, dir: PathBuf) {
+pub(super) fn done(w: Worker, dir: PathBuf) {
     drop(w);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Playing with Direct output really on, at no more than `cap`; told so when it was lowered.
 fn assert_direct_at_most(w: &Worker, cap: f32) {
-    assert_eq!(w.open_mode, Some(true), "really in Direct output");
+    assert_eq!(w.open_now().map(|o| o.direct), Some(true), "really in Direct output");
     assert!(vol(w) <= cap && w.volume <= cap, "{} / {}", vol(w), w.volume);
 }
 
-fn assert_told_lowered(w: &Worker) {
+pub(super) fn assert_told_lowered(w: &Worker) {
     assert!(w.notice.as_deref().is_some_and(|n| n.starts_with("Volume lowered to 30% for dac name")), "{:?}", w.notice);
 }
 
@@ -114,7 +114,7 @@ fn a_volume_raised_while_direct_output_fell_back_is_not_its_level_on_the_next_ru
         // Direct output wasn't available: the mixer played, and was turned up to full there.
         w.direct_fails = true;
         w.start_at(1, 0.1, true);
-        assert_eq!(w.open_mode, Some(false));
+        assert_eq!(w.open_now().map(|o| o.direct), Some(false));
         w.handle(Cmd::SetVolumeFor { volume: 1.0, device_gen: stamp(&w) });
         w.sync_book();
         assert_eq!(w.volume, 1.0, "the listener's own, through the mixer");
@@ -160,7 +160,7 @@ fn settings_reset_to_their_defaults_never_reach_the_dac_at_full_scale() {
     let (mut w, dir, _book) = launch("safety-defaults", &Settings::default());
     assert_eq!(w.volume, 1.0);
     w.start_at(1, 0.1, true);
-    assert_eq!(w.open_mode, Some(false), "the defaults play through the mixer");
+    assert_eq!(w.open_now().map(|o| o.direct), Some(false), "the defaults play through the mixer");
     // Direct output turned on.
     w.handle(Cmd::SetDspFor { dsp: direct_dsp(), device_gen: stamp(&w) });
     assert_direct_at_most(&w, CAP);

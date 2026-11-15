@@ -29,8 +29,15 @@ mod flacfix;
 pub mod tone;
 pub mod karaoke;
 mod safety;
+mod opened;
 #[cfg(test)]
 mod safety_tests;
+#[cfg(test)]
+mod safety_open_tests;
+#[cfg(test)]
+mod safety_prop_tests;
+#[cfg(test)]
+mod safety_fade_tests;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -567,7 +574,7 @@ impl Engine {
     /// The sleep timer's fade (0 = silent, 1 = full), on top of the volume and without moving it:
     /// the renderer glides to each new value, so steps a tenth of a second apart are one smooth fade.
     pub fn set_fade(&self, gain: f32) {
-        self.shared.fade_gain.store(gain.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.shared.set_fade(gain);
     }
 
     /// Diagnostics: start or stop recording the device output to `%TEMP%\cadence-tap.f32`.
@@ -752,9 +759,13 @@ struct Worker {
     auto_move: bool,
     /// The automatic move went to a much louder level: the song stays paused there.
     hold: bool,
-    /// The mode the output last opened actually ran in (true: Direct output; a Direct output that
-    /// fell back to the mixer is false); None: none opened since the mode was last changed.
-    open_mode: Option<bool>,
+    /// The output open now: its device and the mode it really runs in (`opened`; exists exactly
+    /// while `out` does).
+    open: Option<opened::Open>,
+    /// The key of the device opened last (Android names it only once it's open: `opened`).
+    last_key: Option<String>,
+    /// The volume last heard with Direct output on each device this run (`Open::heard`).
+    heard: std::collections::HashMap<String, f32>,
     /// `Status::queue_gen`.
     queue_gen: u64,
     /// Tests: "open" a silent output instead of a device, and count the opens.
@@ -883,7 +894,9 @@ impl Worker {
             notice: None,
             auto_move: false,
             hold: false,
-            open_mode: None,
+            open: None,
+            last_key: None,
+            heard: Default::default(),
             queue_gen: 0,
             #[cfg(test)]
             null_output: false,
@@ -905,10 +918,7 @@ impl Worker {
             let _ = (self.list_devices)();
             self.keep_watching();
         }
-        // Exclusive mode takes the device only once something plays.
-        if !self.exclusive {
-            self.open_output(None);
-        }
+        self.first_open();
         loop {
             let busy = self.decoding && self.has_room();
             // Paused or stopped, nothing to decode: a command still wakes it at once, and device
@@ -960,6 +970,7 @@ impl Worker {
             }
             self.fill();
             self.update_position();
+            self.note_heard();
             self.release_if_idle();
             // What's in effect changed this round: written into the settings once, not per command.
             if self.book_dirty {
@@ -985,8 +996,9 @@ impl Worker {
     /// change, a fallback), and so through the hearing-safety rule (`hold_to_limit`) before the
     /// first sample.
     fn open_output(&mut self, rate: Option<u32>) {
-        // Release the current device first: exclusive mode needs it free.
-        self.out = None;
+        // Release the current device first: exclusive mode needs it free. (What was open decides
+        // whether this is a new generation: `opened`.)
+        let previous = self.close_output();
         // The last output held for a while: earlier failures right after opening don't count any more.
         if !self.opened_at.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
             self.quick_failures = 0;
@@ -1000,8 +1012,8 @@ impl Worker {
         let before = self.volume;
         // What was recorded on it, read before anything is written for it (the move below writes
         // its profile): nothing written for this open can raise its own limit.
-        let key = device.as_ref().map_or_else(|| self.device_key(), |d| d.id.clone());
-        let rec = self.recorded(&key);
+        let key = self.key_for(device.as_ref(), previous.as_ref());
+        let rec = self.recorded(key.as_deref());
         // Another device: its own sound settings first (Direct output is one of them).
         let moved = match &device {
             Some(d) => self.switched_to(d),
@@ -1013,8 +1025,8 @@ impl Worker {
         if moved && auto_move {
             self.hold_if_unsafe(rec.get(direct).is_some(), before, device.as_ref());
         }
-        // A level is recorded only once it's open, in the mode it really runs in.
-        self.open_mode = None;
+        // A level is recorded only once it's open, in the mode it really runs in (`opened`).
+        let opening = opened::Opening { key, rec, previous };
         #[cfg(test)]
         if self.null_output && self.fail_opens {
             let chosen = !self.stand_in && device.as_ref().is_some_and(|d| self.choice.as_ref().is_some_and(|c| c.id == d.id));
@@ -1026,12 +1038,9 @@ impl Worker {
         if self.null_output {
             let (prod, _) = ringbuf::traits::Split::split(ringbuf::HeapRb::<f32>::new(1 << 16));
             let exclusive = direct && !self.direct_fails;
-            self.out = Some(Output { backend: output::Backend::Null, prod, rate: rate.unwrap_or(44_100), channels: 2, device: format!("test exclusive={exclusive}"), bits: None });
-            self.open_mode = Some(exclusive);
-            self.remember_level();
-            self.opened_at = Some(Instant::now());
+            let out = Output { backend: output::Backend::Null, prod, rate: rate.unwrap_or(44_100), channels: 2, device: format!("test exclusive={exclusive}"), bits: None };
+            self.opened(out, exclusive, opening);
             self.opens += 1;
-            self.dirty = true;
             return;
         }
         // Windows always names the device (also the default: see `devices`); elsewhere the system
@@ -1120,10 +1129,8 @@ impl Worker {
                     out.channels,
                     out.exclusive()
                 );
-                self.open_mode = Some(out.exclusive());
-                self.out = Some(out);
-                self.remember_level();
-                self.opened_at = Some(Instant::now());
+                let real = out.exclusive();
+                self.opened(out, real, opening);
                 self.error = None;
             }
             Err(e) => self.open_failed(device, chosen, e),
@@ -1133,7 +1140,7 @@ impl Worker {
 
     /// The output couldn't be opened on `device` (`chosen`: the device the listener chose).
     fn open_failed(&mut self, device: Option<DeviceRef>, chosen: bool, e: anyhow::Error) {
-        self.out = None;
+        self.close_output();
         match device.filter(|_| chosen) {
             Some(d) => {
                 // Still listed but gone (it was just unplugged, and the list hasn't caught up), or
@@ -1149,87 +1156,6 @@ impl Worker {
                 self.error = Some(format!("No audio output: {e}"));
             }
         }
-    }
-
-    /// The hearing-safety rule (`safety`), for the device being opened (or open) in this mode
-    /// (`direct`: Direct output): the volume may not be higher than `rec`, the level recorded on
-    /// that device in that mode, read before anything was written for this open; without one, no
-    /// more than `NEW_DIRECT_VOLUME` with Direct output, and never louder than `before` (what was
-    /// playing) through the mixer. Lowered, the volume is told (the status carries it, so the
-    /// slider follows) and written back to the settings. Whatever any other part of Cadence did to
-    /// the settings, nothing louder gets past here.
-    fn hold_to_limit(&mut self, rec: safety::Recorded, direct: bool, before: f32) {
-        let v = self.held(self.volume, rec, direct, before);
-        self.set_volume(v);
-    }
-
-    /// `wanted`, held to the limit (`hold_to_limit`): what may be applied. Told when lowered.
-    fn held(&mut self, wanted: f32, rec: safety::Recorded, direct: bool, before: f32) -> f32 {
-        let limit = safety::limit(rec, direct, before);
-        if wanted.is_finite() && wanted <= limit + 1e-6 {
-            return wanted;
-        }
-        let name = self.device.as_ref().map(|d| devices::display_name(&d.name)).unwrap_or_else(|| "this output".into());
-        log::warn!("volume {wanted:.3} is above the {limit:.3} allowed on {name}{}: lowered", if direct { " with Direct output" } else { "" });
-        self.book_dirty = true;
-        self.book_sync = true;
-        self.notice = Some(format!("Volume lowered to {}% for {name}{}.", (limit.sqrt() * 100.0).round(), if direct { " (Direct output)" } else { "" }));
-        limit
-    }
-
-    /// The levels recorded on device `key` ("": none named): this run's, else the book's (kept
-    /// across runs). Only `remember_level` writes them: what was in effect while the device really
-    /// ran in that mode.
-    fn recorded(&mut self, key: &str) -> safety::Recorded {
-        let mut get = |direct: bool| -> Option<f32> {
-            let run = safety::level(self.levels.get(&(key.to_string(), direct)).copied());
-            run.or_else(|| safety::level(self.profiles.as_mut().and_then(|b| b.saved_volume(key, direct))))
-        };
-        let shared = get(false);
-        safety::Recorded::new(shared, get(true))
-    }
-
-    /// An automatic move that would play much louder, or on a device never played in this mode
-    /// while the volume isn't low (`known`: it was): the song waits there for Play.
-    fn hold_if_unsafe(&mut self, known: bool, before: f32, device: Option<&DeviceRef>) {
-        let Some(why) = safety::waits(known, before, self.volume) else { return };
-        let name = device.map(|d| devices::display_name(&d.name)).unwrap_or_default();
-        log::info!("moved to {name} by itself ({why:?}, {before:.3} → {:.3}): paused there", self.volume);
-        self.hold = true;
-        self.notice = Some(match why {
-            safety::Wait::Louder => format!("Playback moved to {name}, which is set much louder, so it's paused. Press Play to carry on."),
-            safety::Wait::Unknown => format!("Playback moved to {name}, which Cadence hasn't played on before, so it's paused. Press Play to carry on."),
-        });
-    }
-
-    /// Which device the volume in effect is for ("" before any was opened; Android, which routes
-    /// by itself).
-    fn device_key(&self) -> String {
-        self.device.as_ref().map(|d| d.id.clone()).unwrap_or_default()
-    }
-
-    /// The mode the volume is heard in: the one the output last opened in actually runs in (also
-    /// while it's let go: a Direct output that fell back to the mixer counts as the mixer), else
-    /// the one it would open in.
-    fn level_mode(&self) -> bool {
-        self.open_mode.unwrap_or(self.exclusive && !self.plain)
-    }
-
-    /// The volume in effect now is the device's level, in the mode it really runs in. Nothing is
-    /// recorded while that isn't known (`open_mode` None: nothing opened on it since it or the mode
-    /// changed, or the open failed): a volume set then wasn't heard on it in any mode.
-    fn remember_level(&mut self) {
-        let Some(mode) = self.open_mode else { return };
-        if self.levels.insert((self.device_key(), mode), self.volume) != Some(self.volume) {
-            self.book_dirty = true;
-        }
-    }
-
-    /// The listener set the volume (for the device open now).
-    fn user_volume(&mut self, v: f32) {
-        self.set_volume(v);
-        self.remember_level();
-        self.book_dirty = true;
     }
 
     /// The listener changed the sound settings (for the device open now).
@@ -1265,8 +1191,10 @@ impl Worker {
     fn sync_book(&mut self) {
         self.book_dirty = false;
         let in_use = std::mem::take(&mut self.book_sync);
-        // (A level only in the mode it really runs in, `remember_level`.)
-        let (device, mode) = (self.device.clone(), self.open_mode);
+        // (A level only for the device open now, in the mode it really runs in: `opened`.)
+        let device = self.device.clone();
+        // (Nor a volume not recorded yet: `remember_level`.)
+        let mode = self.open_now().filter(|o| !o.unrecorded && o.key.is_some() && o.key.as_deref() == device.as_ref().map(|d| d.id.as_str())).map(|o| o.direct);
         if let Some(b) = self.profiles.as_mut() {
             b.applied(device.as_ref(), mode, &self.applied_dsp, self.volume, in_use);
         }
@@ -1340,7 +1268,7 @@ impl Worker {
     /// system a moment first).
     fn reopen(&mut self, settle: bool) {
         let playing = self.shared.playing.load(Ordering::Relaxed);
-        self.out = None;
+        self.close_output();
         if settle {
             std::thread::sleep(Duration::from_millis(300));
         }
@@ -1350,7 +1278,7 @@ impl Worker {
     /// Opens the output again (on the device it should be on now) and carries on from the same
     /// place, playing or paused.
     fn reopen_with(&mut self, play: bool) {
-        self.out = None;
+        self.close_output();
         match self.play_index {
             // start_at reopens the device at the song's rate.
             Some(i) => self.start_at(i, self.position, play),
@@ -1434,7 +1362,7 @@ impl Worker {
                 self.missing = Some(devices::Waiting { device, since: Instant::now(), resume: playing, fallback });
             }
         }
-        self.out = None;
+        self.close_output();
         self.shared.playing.store(false, Ordering::Relaxed);
         self.dirty = true;
     }
@@ -1450,8 +1378,7 @@ impl Worker {
             return false;
         }
         log::info!("output device: {}", d.name);
-        // The volume in effect where playback leaves is that device's (it never comes back louder).
-        self.remember_level();
+        // (The level where playback leaves was recorded while it was open there: `remember_level`.)
         let from = self.device.replace(d.clone());
         // Before the book writes anything for the new device: changes still on their way for the
         // old one are dropped from here on.
@@ -1479,7 +1406,7 @@ impl Worker {
     fn profiles_came(&mut self) {
         let Some(device) = self.device.clone() else { return };
         let (before, mode) = (self.volume, self.level_mode());
-        let rec = self.recorded(&device.id);
+        let rec = self.recorded(Some(&device.id));
         let profile = self.profiles.as_mut().and_then(|b| b.moved(None, &device, &self.applied_dsp, self.volume));
         if let Some((dsp, volume)) = profile {
             self.profile_seq += 1;
@@ -1589,7 +1516,7 @@ impl Worker {
 
     /// In exclusive mode, gives the device back to Windows after 20 s paused, so other apps can play.
     fn release_if_idle(&mut self) {
-        if !self.out.as_ref().is_some_and(|o| o.exclusive()) {
+        if !self.open_now().is_some_and(|o| o.direct) {
             self.idle_since = None;
             return;
         }
@@ -1599,7 +1526,7 @@ impl Worker {
             > Duration::from_secs(20)
         {
             log::info!("released the device while paused");
-            self.out = None;
+            self.close_output();
             self.idle_since = None;
             self.dirty = true;
         }
@@ -1615,6 +1542,9 @@ impl Worker {
     fn flush_output(&mut self) {
         self.shared.flush.store(true, Ordering::Release);
         let deadline = Instant::now() + Duration::from_millis(250);
+        // (Tests: the silent output has no renderer to confirm.)
+        #[cfg(test)]
+        let deadline = if self.null_output { Instant::now() } else { deadline };
         while self.shared.flush.load(Ordering::Acquire) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -1630,6 +1560,8 @@ impl Worker {
 
     fn handle(&mut self, cmd: Cmd) {
         self.dirty = true;
+        // (Playing until now: what was heard, before this command changes anything.)
+        self.note_heard();
         match cmd {
             Cmd::Load { mut items, mut index } => {
                 self.new_queue();
@@ -1929,8 +1861,7 @@ impl Worker {
     fn set_dsp(&mut self, dsp: DspSettings) -> bool {
         let (restart, mode_changed) = self.take_dsp(dsp);
         if mode_changed {
-            // Restarting the song opens the device in the new mode.
-            self.out = None;
+            // (`take_dsp` let the output go: restarting the song opens it in the new mode.)
             // Direct output off: Android gets the USB DAC back now (not a moment later), so
             // playing through it finds the DAC rather than the speaker.
             #[cfg(target_os = "android")]
@@ -1959,7 +1890,8 @@ impl Worker {
             // Changing the mode tries it again.
             self.plain = false;
             self.quick_failures = 0;
-            self.open_mode = None;
+            // The output open is in the other mode now.
+            self.close_output();
             // A volume on its way for the other mode isn't for this one (Direct output has no
             // system volume after it).
             self.next_device_gen();
@@ -4054,12 +3986,14 @@ mod tests {
         w.handle(Cmd::SetDsp(direct));
         w.handle(Cmd::SetVolume(0.2));
         // Direct output wasn't available for a while: the mixer played, turned up there.
-        w.open_mode = Some(false);
+        w.direct_fails = true;
+        w.open_output(Some(44_100));
+        assert!(w.open_now().is_some_and(|o| !o.direct));
         w.handle(Cmd::SetVolume(0.8));
         // Direct output works again as the next song starts: its own 0.2, not the mixer's 0.8.
-        w.out = None;
+        w.direct_fails = false;
         w.open_output(Some(44_100));
-        assert_eq!((w.open_mode, vol(&w)), (Some(true), 0.2));
+        assert_eq!((w.open_now().map(|o| o.direct), vol(&w)), (Some(true), 0.2));
         drop(w);
         let _ = std::fs::remove_dir_all(&dir);
     }

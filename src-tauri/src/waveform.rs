@@ -407,6 +407,7 @@ pub fn prepare_all(ctx: &Ctx) -> bool {
             }
             crate::jobs::background_pool().install(|| {
                 chunk.par_iter().for_each(|job| {
+                    crate::jobs::take_turn();
                     if STOP.load(Ordering::SeqCst) {
                         return;
                     }

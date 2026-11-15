@@ -1218,18 +1218,21 @@ fn put_back(dir: &Path, state: Option<&AppState>, a: &Archive) -> Result<PutBack
         match (*kind, name.as_str()) {
             (Kind::Whole, "settings.json") => {
                 let own = dir.join("settings.json").exists();
-                let current: crate::state::Settings = match state {
-                    Some(s) => s.settings.lock().clone(),
-                    None => crate::state::read_json(&dir.join("settings.json")),
-                };
-                let (bytes, parsed) = merged_settings(&current, own, bytes)?;
                 match state {
                     Some(st) => {
+                        // Merged under the lock they're replaced under: this device's part (its
+                        // levels, volume, sound) is the one in effect at that moment, so a level the
+                        // engine records meanwhile isn't lost, nor an older, louder one put back.
                         let mut s = st.settings.lock();
+                        let (bytes, parsed) = merged_settings(&s, own, bytes)?;
                         write_one(dir, name, &bytes, true, &mut out.held)?;
                         *s = parsed;
                     }
-                    None => write_one(dir, name, &bytes, true, &mut out.held)?,
+                    None => {
+                        let current: crate::state::Settings = crate::state::read_json(&dir.join("settings.json"));
+                        let (bytes, _) = merged_settings(&current, own, bytes)?;
+                        write_one(dir, name, &bytes, true, &mut out.held)?;
+                    }
                 }
             }
             (Kind::Whole, "playlists.json") => {

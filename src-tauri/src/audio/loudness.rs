@@ -87,10 +87,12 @@ impl Leveling {
         match pick {
             Some(g) => {
                 let wanted = g.gain + self.preamp;
-                let ceiling = if g.peak > 0.0 {
+                // A tag without a peak: how far it may rise isn't known, so no further than a
+                // song that wasn't measured at all (a quiet song with a boost could clip).
+                let ceiling = if g.peak.is_finite() && g.peak > 0.0 {
                     -20.0 * g.peak.log10() - PEAK_MARGIN_DB
                 } else {
-                    wanted
+                    UNMEASURED_HEADROOM_DB
                 };
                 wanted.min(ceiling)
             }
@@ -244,5 +246,14 @@ mod tests {
             preamp: 0.0,
         };
         assert_eq!(off.gain_db(&g, false), 0.0);
+    }
+
+    #[test]
+    fn a_gain_without_a_peak_rises_no_further_than_an_unmeasured_song() {
+        let boosted = Leveling { mode: LevelingMode::Track, preamp: 6.0 };
+        let quiet = SongGain { track: Some(GainInfo { gain: 4.0, peak: 0.0 }), album: None };
+        assert_eq!(boosted.gain_db(&quiet, false), UNMEASURED_HEADROOM_DB);
+        let loud = SongGain { track: Some(GainInfo { gain: -12.0, peak: f32::NAN }), album: None };
+        assert_eq!(boosted.gain_db(&loud, false), -6.0, "lowering is taken as it is");
     }
 }

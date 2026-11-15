@@ -56,6 +56,17 @@ impl Shared {
         }
     }
 
+    /// The sleep timer's fade (`Engine::set_fade`): 1 is none.
+    pub fn set_fade(&self, gain: f32) {
+        self.fade_gain.store(gain.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// What the volume is multiplied by on its way to the device besides itself: the sleep
+    /// timer's fade (`Renderer::target_gain`).
+    pub fn fade(&self) -> f32 {
+        f32::from_bits(self.fade_gain.load(Ordering::Relaxed))
+    }
+
     pub fn take_peak(&self) -> f32 {
         f32::from_bits(self.peak.swap(0, Ordering::AcqRel))
     }

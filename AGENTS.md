@@ -211,7 +211,7 @@ player runs all day; idle must be nearly free.
 - Heavy backend work runs off the window's thread: a `blocking` command, or a background job. Never inside a
   `plain` command that can take longer than a few milliseconds.
 - At most two heavy background threads in total: use `jobs::background_pool()` (it is sized for that, in background
-  priority). A job is visible in the sidebar and can be paused (work on a single song that lasts a few seconds at most, such as the lazy waveform of the song being played, is exempt). Memory used by a job is bounded.
+  priority). A job is visible in the sidebar and can be paused (work on a single song that lasts a few seconds at most, such as the lazy waveform of the song being played, is exempt). Light work that must not wait behind a long job takes a turn on the pool between its songs (`jobs::run_soon`, as the lyrics index does). Memory used by a job is bounded.
 - Caches have a size or age bound. Nothing heavy runs at startup: load on first use, on a thread, and keep the
   window opening fast. Do not hold decoded audio or large images longer than the job that needs them.
 
@@ -224,8 +224,9 @@ Audio
 - Bit-perfect pass-through must stay bit-exact: no gain, dither, resampling or float round trip in that path.
 - Any code path that opens an output device or switches to one goes through the volume-safety rule: a device
   with no remembered volume starts at a safe level (Direct output sends full scale to the DAC, with no Windows
-  volume after it). It lives with the device-profile code (`profiles.rs`, `audio/`; search for
-  `NEW_DIRECT_VOLUME` and `start_volume`). Do not add a new way around it.
+  volume after it). It lives with the device-profile code (`profiles.rs`, `audio/safety.rs`,
+  `audio/opened.rs`; search for `NEW_DIRECT_VOLUME` and `start_volume`). Do not add a new way around it: every
+  output is set and let go only through `opened` and `close_output`.
 - Tests never open an audio device. Test the logic around it with plain data.
 
 Robustness
