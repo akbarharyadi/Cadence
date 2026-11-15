@@ -1377,11 +1377,15 @@ mod tests {
 
     #[test]
     fn album_folder_skips_disc_folders() {
-        assert_eq!(album_folder(r"D:\M\Album\01.flac"), Path::new(r"D:\M\Album"));
-        assert_eq!(album_folder(r"D:\M\Album\CD2\04.flac"), Path::new(r"D:\M\Album"));
-        assert_eq!(album_folder(r"D:\M\Album\Disc 1\04.flac"), Path::new(r"D:\M\Album"));
+        // Paths are built with the platform's own separator: songs are on this machine's disk.
+        let p = |parts: &[&str]| parts.iter().collect::<PathBuf>();
+        let album = p(&["M", "Album"]);
+        let path = |parts: &[&str]| p(parts).to_string_lossy().into_owned();
+        assert_eq!(album_folder(&path(&["M", "Album", "01.flac"])), album);
+        assert_eq!(album_folder(&path(&["M", "Album", "CD2", "04.flac"])), album);
+        assert_eq!(album_folder(&path(&["M", "Album", "Disc 1", "04.flac"])), album);
         // Not a disc folder: a name that only starts like one.
-        assert_eq!(album_folder(r"D:\M\Album\Cdrama OST\04.flac"), Path::new(r"D:\M\Album\Cdrama OST"));
+        assert_eq!(album_folder(&path(&["M", "Album", "Cdrama OST", "04.flac"])), p(&["M", "Album", "Cdrama OST"]));
     }
 
     #[test]

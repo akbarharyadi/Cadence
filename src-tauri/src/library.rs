@@ -632,15 +632,19 @@ fn cover_search_key(tracks: &[&Track]) -> String {
         .map(|t| format!("{}|{}|{}|{}", t.path, t.size, t.modified, t.has_embedded_art))
         .collect();
     parts.sort();
-    let folder = tracks
-        .first()
-        .and_then(|t| Path::new(&t.path).parent().map(Path::to_path_buf))
-        .and_then(|d| std::fs::metadata(d).ok())
-        .and_then(|m| m.modified().ok())
-        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
-    parts.push(folder.to_string());
-    short_hash(&parts.join("\n"))
+    let dir = tracks.first().and_then(|t| Path::new(&t.path).parent());
+    let modified = dir.and_then(|d| std::fs::metadata(d).ok()).and_then(|m| m.modified().ok());
+    parts.push(modified.and_then(|m| m.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos()).to_string());
+    // A folder's modified time ticks coarsely (about 4 ms on Linux, 2 s on FAT drives): a cover added
+    // right after the search has the same time. While the folder is that fresh, its file list counts too.
+    if modified.is_none_or(|m| m.elapsed().is_ok_and(|age| age.as_secs() < 3)) {
+        let files = dir.and_then(|d| std::fs::read_dir(d).ok()).into_iter().flatten().flatten();
+        let mut files: Vec<String> = files.map(|e| format!("{:?}{}", e.file_name(), e.metadata().map_or(0, |m| m.len()))).collect();
+        files.sort();
+        parts.extend(files);
+    }
+    short_hash(&parts.join("
+"))
 }
 
 /// The album id for an album artist and title (see `album_key` in `read_track`).
