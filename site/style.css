@@ -3,14 +3,14 @@
 
 @font-face {
   font-family: "Bricolage Grotesque";
-  src: url("/fonts/bricolage.woff2") format("woff2");
+  src: url("fonts/bricolage.woff2") format("woff2");
   font-weight: 200 800;
   font-stretch: 75% 100%;
   font-display: swap;
 }
 @font-face {
   font-family: "Instrument Sans";
-  src: url("/fonts/instrument.woff2") format("woff2");
+  src: url("fonts/instrument.woff2") format("woff2");
   font-weight: 400 700;
   font-stretch: 75% 100%;
   font-display: swap;
@@ -23,7 +23,7 @@
   --line: rgba(196, 200, 255, 0.1);
   --text: #ecedf5;
   --text-2: #a3a5bd;
-  --text-3: #6d6f88;
+  --text-3: #8c8ea8;
   --violet: #8b7cff;
   --pink: #ef8fd6;
   --gold: #e8c77a;
@@ -64,6 +64,20 @@ img {
   outline: 2px solid var(--violet);
   outline-offset: 3px;
   border-radius: 4px;
+}
+.skip {
+  position: absolute;
+  left: 12px;
+  top: -60px;
+  z-index: 20;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  transition: top 0.15s;
+}
+.skip:focus {
+  top: 12px;
 }
 .sr-only {
   position: absolute;
@@ -314,6 +328,10 @@ h2 {
   line-height: 1.02;
   letter-spacing: -0.03em;
 }
+.copy strong {
+  color: var(--text);
+  font-weight: 600;
+}
 .copy p {
   margin: 20px 0 0;
   color: var(--text-2);
@@ -499,6 +517,52 @@ h2 {
   color: var(--text-2);
 }
 
+/* ---------- what's new ---------- */
+.news {
+  max-width: 1240px;
+  margin: clamp(90px, 12vw, 150px) auto 0;
+}
+.releases {
+  list-style: none;
+  margin: 36px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 14px;
+}
+.releases li {
+  padding: 20px 22px 22px;
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.releases h3 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0;
+  font-family: var(--display);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.releases time {
+  font-family: var(--body);
+  font-size: 13.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--text-3);
+}
+.releases p {
+  margin: 10px 0 0;
+  color: var(--text-2);
+  font-size: 15px;
+}
+.news .fine a {
+  color: var(--text-2);
+}
+
 /* ---------- questions ---------- */
 .faq {
   max-width: 860px;
@@ -604,4 +668,12 @@ footer p {
 footer a {
   color: var(--text-2);
   margin-right: 16px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+  }
 }

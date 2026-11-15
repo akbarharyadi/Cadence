@@ -43,7 +43,8 @@
   32-bit float.
 - **Direct output**: each song reaches the device at its own sample rate, past the system mixer. With processing off,
   playback is bit-perfect and Cadence labels it so.
-- **Gapless** albums, with optional crossfade between albums.
+- **Gapless** albums, with optional crossfade between albums. Cadence remembers the queue, the song and the position, so
+  it opens ready where you left off.
 - **Sound Check**: ReplayGain 2.0 loudness from tags or Cadence's own EBU R128 measurement, by album or by song.
 - **Tone per song**: gentle loudness compensation and a per-song Smart EQ from each song's measured tonal balance.
 - **Equalizer**: 10-band graphic and parametric, automatic headroom, and AutoEq / Equalizer APO headphone profiles.
@@ -57,30 +58,54 @@
 - **Lyrics follow the singer** (desktop): Cadence listens to a song once, separates the vocals from the music and
   places every word of the lyrics on the singing, so the karaoke highlight moves with the singer, syllable by
   syllable. It also corrects lyrics that run early or late. It works for Japanese, Chinese, Korean, English,
-  Indonesian and most other languages, on your computer, in the background. It needs an optional one-time download
-  of about 440 MB. You can do one song from the lyrics view, or every song with lyrics from Settings.
+  Indonesian and most other languages, on your computer, in the background (on a Windows graphics card, well under a
+  minute per song). It needs an optional one-time download of about 440 MB. You can do one song from the lyrics view,
+  or every song with lyrics from Settings; progress shows in the sidebar.
 - **Who sings each line**: in duets, each singer's lines get their own colour and a small name where the singer
   changes. Cadence uses names written in the lyrics ("Name: …", "[Name]", M/F/D), tells two voices apart by pitch and
   tone in songs credited to several singers, and can ask the AI DJ for the singers' credited names (⋯ → Who sings?).
 - **Sounds like**: every song is analysed once, locally ([bliss](https://github.com/Polochon-street/bliss-rs): tempo,
   timbre, loudness, harmony), for sound radio, similar songs and automatic mixes.
-- **AI DJ** (optional, with your own key; Z.ai GLM by default, or any OpenAI-compatible service): requests in your own
-  words, daily mixes from your listening, and new music to buy.
+- **AI DJ** (optional, with your own key; Z.ai GLM by default, Claude (Anthropic), or any OpenAI-compatible service):
+  requests in your own words (Ask the DJ), daily mixes from your listening, and new music to buy.
+- **Made for you today**: four daily mixes, each from a different part of your library (what you play at this time of
+  day, this month's most played, old favourites, deep cuts, somewhere you haven't been lately). A song is in one mix
+  only, and each day's mixes differ from the last week's. Made with the AI DJ.
+- **Discover**: new songs you don't have yet, searched for on the web by the AI DJ from your recent listening, an
+  artist, a genre or your own words, each with where to buy it. Songs you have, or that are on an album you have, are
+  never suggested.
+- **Your Stats**: your most played songs, artists and albums for the last week, month, year or all time, and when you
+  listen.
 - **Listen Now**: recent albums, top picks, mixes for the day, what's on repeat and what you haven't played in a while.
-- **Player**: full-width seek bar, lists of the previous and next songs, a mini player and the system tray.
+- **Player**: a seek bar with time and time left, shuffle and repeat, Up Next (clear it, save it as a playlist, drag to
+  reorder), a mini player and the system tray. On computers the player sits at the top of the window or along the
+  bottom (Settings → Appearance).
+- **Favorites and ratings**: heart a song and rate it 1 to 5 stars; they follow the song if its file moves.
+- **Sleep timer**: stop after some minutes (with a fade-out), at the end of the song or of the album.
+- **Global hotkeys** on computers: Ctrl+Alt+Space play/pause, Ctrl+Alt+← / → skip, Ctrl+Alt+↑ / ↓ volume, Ctrl+Alt+H
+  heart. They can be turned off in Settings.
 - **Updates itself**: checks GitHub for new versions, downloads them in the background and installs on restart
   (signed, so only genuine releases install). On Android it downloads the new APK and opens the installer.
-- **Fix song info**: for songs without tags (files named "Artist - Title"), pick the right match from the iTunes catalogue and
-  Cadence writes the title, artist, album, year and cover into the file (or does it by itself when they play).
+- **Fix song info**: for songs without tags (files named "Artist - Title"), pick the right match from the iTunes or
+  Deezer catalogue and Cadence writes the title, artist, album, year and cover into the file (or does it by itself when
+  they play). **Fix Album Info** does a whole album at once, and **Aa Latin** shows and saves Japanese, Chinese and
+  Korean titles in Latin letters.
+- **Needs Attention** and **Library Health**: one card per kind of problem, worst first (damaged files, extra copies,
+  albums split in two, artists under two names, songs without info, then optional ones such as missing covers, years
+  and genres, or lossless files that aren't). Every suggestion says how sure Cadence is, removed copies go to the
+  Recycle Bin, and every change to your files can be undone.
+- **CUE sheets**: albums ripped as one big file with a `.cue` sheet show up as their songs.
 - **Change cover**: pick an album cover from iTunes or Deezer (or an image file); it's shown at once and written
   into the songs' files.
 - **Artist pictures**: choose a photo from the online catalogue (Deezer), one of the artist's album covers or your
   own image.
 - **Themes**: colours from the album that's playing, or a fixed Dark or true Black theme.
-- **Lyrics in Latin letters**: romaji, pinyin or Korean romanization under each line, for scripts you can't read.
+- **Lyrics in Latin letters**: romaji (read word by word with a built-in Japanese dictionary), pinyin or Korean
+  romanization under each line, for scripts you can't read; it fills in along with the karaoke.
 - **Skip songs** you don't want in rotation (or every instrumental and karaoke version): they stay in the library but
   are left out when albums, playlists, mixes and shuffles play.
-- Playlists and smart playlists, tag editing, ListenBrainz scrobbling, and media keys with the system media controls.
+- Playlists and smart playlists (rules can use favorites, ratings, format, sample rate, bit depth and bitrate), tag
+  editing, ListenBrainz scrobbling, and media keys with the system media controls.
 
 ### Android
 
@@ -88,6 +113,11 @@
 - Playback continues with the screen off; control it from the lock screen, the notification, Bluetooth buttons or the
   media island.
 - A home screen widget with the cover, the song's quality and play controls.
+- **USB DAC output**: with Direct output on, Cadence drives a USB Audio 2.0 DAC with its own USB driver (or uses
+  Android's bit-perfect USB on Android 14+ phones that offer it), so each song reaches the DAC at its own sample rate,
+  44.1 kHz included. Android asks once per plug-in whether Cadence may use the DAC.
+- Pauses when Bluetooth headphones or a car disconnect, and can play when they connect. Songs can be opened from a file
+  manager, and SD cards and USB drives can be added as music folders.
 
 <p align="center">
   <img src="site/assets/phone-home.jpg" width="240" alt="Listen Now on Android" />
@@ -104,7 +134,7 @@ Each operating system mixes audio differently, so Direct output uses the most di
 | Windows 10/11 | WASAPI exclusive mode | Straight to the device at the song's rate and bit depth, past the Windows mixer. |
 | macOS | Device follows the song | The output device is switched to each song's sample rate, so Core Audio never resamples. |
 | Linux | ALSA `hw:` device | Plays to the sound card directly, around PulseAudio / PipeWire; USB DACs are preferred. Falls back to shared mode while another app holds the card. |
-| Android 8+ | — | 32-bit float to AAudio at the phone's own rate (Android always mixes). |
+| Android 8+ | USB driver, or AAudio | With a USB Audio 2.0 DAC: Cadence's own USB driver, each song at its own rate. Otherwise 32-bit float to AAudio at the phone's own rate (Android mixes; its bit-perfect USB needs Android 14+ and a phone that enables it). |
 
 Bit-perfect playback needs Direct output on, with Sound Check, the equalizer and crossfeed off and the volume at 100%.
 The signal path shows a gold **Bit-perfect** label when that holds.
@@ -115,10 +145,12 @@ Download the file for your system from the [latest release](https://github.com/a
 
 | System | File | Notes |
 |---|---|---|
-| Windows 10/11 (64-bit) | `Cadence_<version>_x64-setup.exe` | `.msi` also available. |
+| Windows 10/11 (64-bit) | `Cadence_<version>_x64-setup.exe` | `.msi` also available. Not code-signed yet, so Windows or your antivirus may be cautious about it; every build is scanned with Microsoft Defender before it's published. |
 | macOS (Apple Silicon and Intel) | `Cadence_<version>_universal.dmg` | Not signed by Apple yet: the first time, right-click the app and choose **Open**. |
 | Linux | `Cadence_<version>_amd64.AppImage` | Any distribution (make it executable). `.deb` and `.rpm` also available. |
-| Android 8+ (64-bit ARM) | `Cadence_<version>_android-arm64.apk` | Allow installs from your browser or file manager when asked. |
+| Android 8+ (64-bit ARM) | `Cadence_<version>_android-arm64.apk` | Allow installs from your browser or file manager when asked. The APK is attached a little after the desktop installers. |
+
+Already have Cadence 0.2.2 or newer? It updates itself (Settings → Updates).
 
 ## Build from source
 
@@ -167,6 +199,10 @@ when a `v*` tag is pushed and attaches everything to a GitHub Release, with that
 `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml` first. The Android job needs the `ANDROID_KEYSTORE_BASE64` and
 `ANDROID_KEYSTORE_PASSWORD` repository secrets.
 
+The website is the plain static folder `site/` (no build step). [`.github/workflows/pages.yml`](.github/workflows/pages.yml)
+publishes it to GitHub Pages when a change to `site/` reaches `main` (Settings → Pages → Source: GitHub Actions). All
+its links are relative, so it works at a project address and at a domain root alike.
+
 ## Architecture
 
 Cadence is a [Tauri 2](https://tauri.app) app: a Rust core with a [Svelte 5](https://svelte.dev) interface.
@@ -203,10 +239,10 @@ It only goes online for these, and sends only what's listed:
 |---|---|---|
 | [LRCLIB](https://lrclib.net) | A song has no lyrics (can be turned off) | Artist, title, album and length |
 | iTunes Search (Apple) | Fill in missing song info (can be turned off), Fix Song Info, Change Cover | The file name, or the words you search for |
-| [Deezer](https://developers.deezer.com/api) | Change Cover, artist pictures, checking AI music suggestions | Artist and album or song names |
+| [Deezer](https://developers.deezer.com/api) | Fix song info, Change Cover, artist pictures, checking AI music suggestions | Artist and album or song names |
 | GitHub | Checking for updates | Nothing beyond the request itself |
 | PyPI or GitHub, Hugging Face | Only when you download the voice models for following the singer | Nothing beyond the requests themselves |
-| Your AI service (Z.ai GLM or another) | Only if you add your own key | What Settings shows before you turn it on |
+| Your AI service (Z.ai GLM, Claude from Anthropic, or another) | Only if you add your own key (Ask the DJ, daily mixes, Discover, who sings) | What Settings shows before you turn it on |
 | [ListenBrainz](https://listenbrainz.org) | Only if you connect it | The songs you listen to |
 
 The website counts visits with Cloudflare Web Analytics, which uses no cookies and keeps no personal data.

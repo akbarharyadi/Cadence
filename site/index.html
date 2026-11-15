@@ -6,25 +6,33 @@
     <title>Cadence: a lossless music player for your own files</title>
     <meta
       name="description"
-      content="Cadence plays your FLAC and other music files exactly as they were recorded: bit-perfect output, gapless albums, Sound Check, synced karaoke lyrics, mixes by sound and an optional AI DJ. Free and open source for Windows, macOS, Linux and Android."
+      content="Cadence plays your FLAC and other music files exactly as they were recorded: bit-perfect output, gapless albums, Sound Check, lyrics that follow the singer, mixes by sound, a tidy library and an optional AI DJ. Free and open source for Windows, macOS, Linux and Android."
     />
+    <link rel="canonical" href="https://cadence.akbarharyadi.com/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Cadence" />
     <meta property="og:title" content="Cadence: a lossless music player for your own files" />
     <meta property="og:description" content="Bit-perfect, gapless, synced lyrics and mixes by sound. Free and open source." />
     <meta property="og:image" content="https://cadence.akbarharyadi.com/assets/social.png?v=1d5d035c" />
     <meta property="og:image:width" content="1280" />
     <meta property="og:image:height" content="640" />
+    <meta property="og:image:alt" content="Cadence, a lossless music player for your own files" />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Cadence: a lossless music player for your own files" />
+    <meta name="twitter:description" content="Bit-perfect, gapless, synced lyrics and mixes by sound. Free and open source." />
+    <meta name="twitter:image" content="https://cadence.akbarharyadi.com/assets/social.png?v=1d5d035c" />
     <meta property="og:url" content="https://cadence.akbarharyadi.com/" />
     <meta name="theme-color" content="#0d0e17" />
-    <link rel="icon" href="/icon.svg?v=a9925b16" type="image/svg+xml" />
-    <link rel="icon" href="/favicon.png?v=4edd6e11" sizes="64x64" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=3274e167" />
-    <link rel="preload" href="/fonts/bricolage.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="stylesheet" href="/style.css?v=192eabaf" />
+    <link rel="icon" href="icon.svg?v=a9925b16" type="image/svg+xml" />
+    <link rel="icon" href="favicon.png?v=4edd6e11" sizes="64x64" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png?v=3274e167" />
+    <link rel="preload" href="fonts/bricolage.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="style.css?v=9972fc06" />
   </head>
   <body>
+    <a class="skip" href="#main">Skip to content</a>
     <header class="nav">
-      <a class="brand" href="/" aria-label="Cadence home">
+      <a class="brand" href="./" aria-label="Cadence home">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15c2.5-7 4.5-7 6 0s3.5 7 6 0 3.5-7 6 0" /></svg>
         Cadence
       </a>
@@ -32,13 +40,14 @@
         <a href="#sound">Sound</a>
         <a href="#lyrics">Lyrics</a>
         <a href="#mixes">Mixes</a>
+        <a href="#library">Library</a>
         <a href="#android">Android</a>
         <a href="#download">Download</a>
         <a href="https://github.com/akbarharyadi/cadence">GitHub</a>
       </nav>
     </header>
 
-    <main>
+    <main id="main">
       <section class="hero">
         <svg class="wave" viewBox="0 0 1200 220" preserveAspectRatio="none" aria-hidden="true">
           <defs>
@@ -62,7 +71,7 @@
           <p class="fine" id="download-note">Free and open source. Windows, macOS, Linux and Android.</p>
         </div>
         <figure class="shot hero-shot">
-          <img src="/assets/home.jpg?v=a5bd03ea" width="1650" height="1075" alt="Cadence's Listen Now page: recent albums, top picks and the player" />
+          <img src="assets/home.jpg?v=a5bd03ea" width="1650" height="1075" alt="Cadence's Listen Now page: recent albums, top picks and the player" />
         </figure>
       </section>
 
@@ -92,7 +101,7 @@
             <li>Crossfeed for headphones, high-quality resampling when it's needed</li>
           </ul>
         </div>
-        <figure class="shot"><img src="/assets/sound.jpg?v=3a29582d" width="1270" height="627" loading="lazy" alt="The signal path: every step from the file to the speakers, and the Direct output switch" /></figure>
+        <figure class="shot"><img src="assets/sound.jpg?v=3a29582d" width="1270" height="627" loading="lazy" alt="The signal path: every step from the file to the speakers, and the Direct output switch" /></figure>
       </section>
 
       <section class="feature flip" id="lyrics">
@@ -106,10 +115,16 @@
           <p>
             On your computer, Cadence can also follow the singer. It listens to a song once, separates the vocals from the
             music, and places every word on the singing, so the highlight moves syllable by syllable in Japanese, Chinese,
-            Korean, English, Indonesian and more. Do it for one song, or your whole library at once.
+            Korean, English, Indonesian and more. Do it for one song, or your whole library at once. The first time needs a
+            one-time download of about 440 MB.
           </p>
+          <ul class="ticks">
+            <li>Japanese, Chinese and Korean lyrics can show romaji, pinyin or romanization under each line, filling in as it's sung</li>
+            <li>In duets, each singer's lines get their own colour and a small name where the singer changes</li>
+            <li>Lyrics that run early or late? Follow singer sets them right, or nudge the timing yourself</li>
+          </ul>
         </div>
-        <figure class="shot"><img src="/assets/lyrics.jpg?v=b87d46fa" width="1510" height="950" loading="lazy" alt="Now Playing with lyrics filling in word by word" /></figure>
+        <figure class="shot"><img src="assets/lyrics.jpg?v=b87d46fa" width="1510" height="950" loading="lazy" alt="Now Playing with lyrics filling in word by word" /></figure>
       </section>
 
       <section class="feature" id="mixes">
@@ -120,11 +135,39 @@
             radio from any song, lists of songs that sound alike, and mixes it builds and names for you.
           </p>
           <p>
-            Want more? Connect an AI DJ (Z.ai GLM or any compatible service, with your own key) and ask for "calm songs for
-            late-night coding", get daily mixes, and find new music to buy.
+            Want more? Connect an AI DJ (Z.ai GLM, Claude or any compatible service, with your own key) and ask for "calm songs for
+            late-night coding". It also makes your daily mixes, "Made for you today": each one comes from a different part of
+            your library, like what you play at this time of day, old favourites you haven't played in two months, or the
+            corner you haven't visited lately. A song is in one mix only, and every day brings fresh ones.
+          </p>
+          <p>
+            <strong>Discover</strong> finds songs you don't have yet, searched for on the web by the AI DJ, with where to buy
+            them. Songs you already have are never suggested. <strong>Your Stats</strong> shows what you play most, for the
+            last week, month, year or all time.
           </p>
         </div>
-        <figure class="shot"><img src="/assets/mixes.jpg?v=9a7892d8" width="1250" height="419" loading="lazy" alt="Mixes by sound: Warm and quiet, Bright and full, Warm and slow, Warm and upbeat" /></figure>
+        <figure class="shot"><img src="assets/mixes.jpg?v=9a7892d8" width="1250" height="419" loading="lazy" alt="Mixes by sound: Warm and quiet, Bright and full, Warm and slow, Warm and upbeat" /></figure>
+      </section>
+
+      <section class="feature" id="library">
+        <div class="copy">
+          <h2>A library that stays in order</h2>
+          <p>
+            Needs Attention finds what's wrong in your folders, worst first: damaged files, extra copies, albums split in two,
+            artists under two names, and songs without info. Every suggestion says how sure Cadence is, and you look before
+            anything changes.
+          </p>
+          <p>
+            Every change Cadence makes to your files can be undone. Removed copies go to the Recycle Bin, and Undo puts files
+            back as they were, cover included.
+          </p>
+          <ul class="ticks">
+            <li>Library Health checks for songs you have twice, lossless files that aren't, and damaged files</li>
+            <li>Fix song info searches iTunes and Deezer, and can write Japanese, Chinese and Korean titles in Latin letters</li>
+            <li>Covers for albums that have none are found for you, and shown in a grid to check before anything is saved</li>
+            <li>Albums ripped as one big file with a .cue sheet show up as their songs</li>
+          </ul>
+        </div>
       </section>
 
       <section class="android" id="android">
@@ -139,12 +182,14 @@
             <li>Made for one hand: tabs at the bottom, the player always within reach</li>
             <li>A home screen widget with the cover, the song's quality and play controls</li>
             <li>Works with your phone's media controls and the Now Playing island</li>
+            <li>Plug in a USB DAC and each song reaches it at its own sample rate, 44.1 kHz included (USB Audio 2.0 DACs)</li>
+            <li>Pauses when your headphones or car disconnect, and can play when they connect</li>
           </ul>
         </div>
         <div class="phones">
-          <figure class="phone"><img src="/assets/phone-home.jpg?v=29358838" width="640" height="1236" loading="lazy" alt="Listen Now on an Android phone" /></figure>
-          <figure class="phone raised"><img src="/assets/phone-now.jpg?v=c7293cfc" width="640" height="1236" loading="lazy" alt="Now Playing on an Android phone, showing Lossless 24-bit/48 kHz" /></figure>
-          <figure class="widget"><img src="/assets/widget.jpg?v=72383906" width="900" height="240" loading="lazy" alt="The Cadence widget on an Android home screen" /></figure>
+          <figure class="phone"><img src="assets/phone-home.jpg?v=29358838" width="640" height="1236" loading="lazy" alt="Listen Now on an Android phone" /></figure>
+          <figure class="phone raised"><img src="assets/phone-now.jpg?v=c7293cfc" width="640" height="1236" loading="lazy" alt="Now Playing on an Android phone, showing Lossless 24-bit/48 kHz" /></figure>
+          <figure class="widget"><img src="assets/widget.jpg?v=72383906" width="900" height="240" loading="lazy" alt="The Cadence widget on an Android home screen" /></figure>
         </div>
       </section>
 
@@ -172,8 +217,8 @@
           </div>
           <div>
             <dt>Android</dt>
-            <dd class="how">32-bit float to AAudio</dd>
-            <dd>Decoded without loss and handed to Android's audio system in full precision, at the phone's own rate.</dd>
+            <dd class="how">USB DAC, or 32-bit float to AAudio</dd>
+            <dd>With a USB Audio 2.0 DAC, Cadence's own USB driver plays each song at its own rate. Without one, songs are decoded without loss and handed to Android in full precision.</dd>
           </div>
         </dl>
       </section>
@@ -181,9 +226,12 @@
       <section class="grid" aria-labelledby="more-title">
         <h2 id="more-title">Everything else you'd expect</h2>
         <ul>
-          <li><h3>Your library, your folders</h3><p>Add folders or drop them on the window. Cadence watches them and picks up new music by itself.</p></li>
-          <li><h3>Media keys and mini player</h3><p>Play from the keyboard, the system media controls or a small always-on-top player. On Android: lock screen controls and a home screen widget.</p></li>
-          <li><h3>Playlists and smart playlists</h3><p>Build them by hand, or with rules like "played often, not this month".</p></li>
+          <li><h3>Your library, your folders</h3><p>Add folders or drop them on the window. Cadence watches them and picks up new music by itself, and carries on where you left off with the same song, queue and position.</p></li>
+          <li><h3>Favorites and ratings</h3><p>Heart a song and give it 1 to 5 stars. They follow the song if its file moves, and smart playlists can use them.</p></li>
+          <li><h3>Playlists and smart playlists</h3><p>Build them by hand, or with rules like "played often, not this month". Save Up Next as a playlist, and drag songs to reorder it.</p></li>
+          <li><h3>Sleep timer</h3><p>Stop after some minutes, with a fade-out, or at the end of the song or the album.</p></li>
+          <li><h3>Hotkeys and mini player</h3><p>On computers, Ctrl+Alt+Space plays or pauses in any app, with keys to skip, change the volume and heart the song. Or use a small always-on-top player. On Android: lock screen controls and a home screen widget.</p></li>
+          <li><h3>Your player, your way</h3><p>Put the player at the top of the window or along the bottom. Choose the album's colours, a dark theme, or true black for OLED screens.</p></li>
           <li><h3>Song info, covers and pictures</h3><p>Songs without tags (files named "Artist - Title") get their real title, album and cover from the iTunes catalogue. Change any album's cover in a click, and give artists a real photo.</p></li>
           <li><h3>Skip songs</h3><p>Leave out songs you don't want in rotation, or every instrumental and karaoke version, when albums, playlists and shuffles play.</p></li>
           <li><h3>Updates itself</h3><p>New versions download in the background and install when you restart. Only signed releases are accepted.</p></li>
@@ -195,9 +243,10 @@
       <section class="privacy">
         <h2>Your music stays yours</h2>
         <p>
-          The app has no account and no tracking. Sound analysis and following the singer run on your computer. Lyrics and song info lookups send only
-          the artist, title or the words you search for. The AI DJ is off until you add your own key, and Settings shows
-          exactly what it would send. This website counts visits with Cloudflare Web Analytics, which uses no cookies.
+          The app has no account and no tracking. Sound analysis and following the singer run on your computer, and no audio ever
+          leaves it. Lyrics and song info lookups send only the artist, title or the words you search for. The AI DJ is off
+          until you add your own key, and Settings shows exactly what it would send. This website counts visits with Cloudflare
+          Web Analytics, which uses no cookies.
         </p>
       </section>
 
@@ -213,16 +262,43 @@
         </details>
         <details>
           <summary>Is the AI DJ required?</summary>
-          <p>No. Everything else works without it, including mixes by sound, which are made on your computer. The AI DJ only runs after you add your own key for Z.ai GLM or another OpenAI-compatible service.</p>
+          <p>No. Playing, lyrics, Sound Check and mixes by sound, which are made on your computer, all work without it. Ask the DJ, daily mixes and Discover need it, and it only runs after you add your own key for Z.ai GLM, Claude or another OpenAI-compatible service.</p>
         </details>
         <details>
           <summary>How much does it cost?</summary>
           <p>Nothing. Cadence is free and open source under the GNU GPL v3. There are no accounts, ads or subscriptions.</p>
         </details>
         <details>
+          <summary>Why is Windows cautious about the installer?</summary>
+          <p>The Windows build isn't code-signed yet, so Windows or your antivirus may be wary of a new, unsigned app. Updates inside Cadence are signed, and every Windows build is scanned with Microsoft Defender before it's published.</p>
+        </details>
+        <details>
           <summary>Why does macOS say the app can't be opened?</summary>
           <p>The macOS build isn't signed by Apple yet. The first time, right-click Cadence in Applications and choose Open; after that it opens normally.</p>
         </details>
+      </section>
+
+      <section class="news" id="news" aria-labelledby="news-title">
+        <h2 id="news-title">What's new</h2>
+        <ol class="releases">
+          <li>
+            <h3>0.2.40 <time datetime="2026-11-10">10 Nov 2026</time></h3>
+            <p>"Made for you today" is more varied: four daily mixes, each from a different part of your library, and no more look-alike mixes. Songs from last week's mixes wait their turn.</p>
+          </li>
+          <li>
+            <h3>0.2.39 <time datetime="2026-11-09">9 Nov 2026</time></h3>
+            <p>Better romaji: Japanese lyrics are read word by word, with a dictionary built into Cadence. Follow singer reads kanji the same way. The app is about 7 MB bigger.</p>
+          </li>
+          <li>
+            <h3>0.2.38 <time datetime="2026-11-09">9 Nov 2026</time></h3>
+            <p>Needs Attention was rebuilt: one card per kind of problem, and every suggestion marked Sure or Check. Removed copies go to the Recycle Bin, and Undo brings them back.</p>
+          </li>
+          <li>
+            <h3>0.2.37 <time datetime="2026-11-08">8 Nov 2026</time></h3>
+            <p>Fix song info can show Japanese, Chinese and Korean titles in Latin letters. In duets, a line is marked as sung together only when the two voices are clearly apart.</p>
+          </li>
+        </ol>
+        <p class="fine"><a href="https://github.com/akbarharyadi/cadence/blob/main/CHANGELOG.md">Read the full changelog on GitHub</a></p>
       </section>
 
       <section class="download" id="download">
@@ -236,14 +312,15 @@
             <span class="os">macOS</span><span class="what">Apple Silicon and Intel</span>
           </a>
           <a class="platform" data-os="linux" href="https://github.com/akbarharyadi/cadence/releases/latest">
-            <span class="os">Linux</span><span class="what">AppImage or .deb</span>
+            <span class="os">Linux</span><span class="what">AppImage, .deb or .rpm, 64-bit</span>
           </a>
           <a class="platform" data-os="android" href="https://github.com/akbarharyadi/cadence/releases/latest">
-            <span class="os">Android</span><span class="what">Android 8 or newer, .apk</span>
+            <span class="os">Android</span><span class="what">Android 8 or newer, 64-bit ARM, .apk</span>
           </a>
         </div>
         <p class="fine">
-          On Android, allow installs from your browser when asked. On macOS, right-click Cadence and choose Open the first time.
+          On Android, allow installs from your browser when asked. On macOS, which isn't signed by Apple yet, right-click Cadence
+          and choose Open the first time. The Windows installer isn't code-signed yet either, so Windows may be cautious about it.
           Every release, with notes and checksums, is on <a href="https://github.com/akbarharyadi/cadence/releases">GitHub</a>.
         </p>
       </section>
@@ -263,7 +340,7 @@
       <p><a href="https://github.com/akbarharyadi/cadence">Source code</a> <a href="https://github.com/akbarharyadi/cadence/issues">Report a problem</a></p>
     </footer>
 
-    <script src="/main.js?v=c9b022a7" defer></script>
+    <script src="main.js?v=c9b022a7" defer></script>
     <!-- Cloudflare Web Analytics: counts visits without cookies -->
     <script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "633e6965ff114fd3a4a0416dc2a742cc"}'></script>
   </body>
