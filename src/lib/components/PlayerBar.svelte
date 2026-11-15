@@ -6,6 +6,7 @@
   import Icon from "./Icon.svelte";
   import QualityBadge from "./QualityBadge.svelte";
   import SleepLabel from "./SleepLabel.svelte";
+  import { VolumeControl } from "#lib/volumeControl.js";
 
   /** "top": the desktop window's top bar. "bottom": a bar along the bottom of the desktop window
    * (Settings > Appearance). "dock": the phone's player above the tab bar. */
@@ -68,23 +69,30 @@
   }
 
   // The slider is perceptual (squared); the top of the slider is exactly 1.0 = untouched samples.
+  // Each change carries the device generation of the volume it was made from (`VolumeControl`),
+  // and Unmute never brings back another device's level.
   let volume = $state(1);
-  // The level Unmute returns to: the last audible one, from the real status as well (the app starts
-  // at its saved volume, and other windows or shortcuts change it). Until one is known, a moderate
-  // level, never full scale (in exclusive output that is the DAC's full level).
-  let lastNonZero = 0.55;
-  let volDragging = false;
+  const vc = new VolumeControl();
   $effect(() => {
-    if (s && !volDragging) {
-      const v = Math.sqrt(Math.max(0, s.volume));
-      volume = v;
-      if (v > 0) lastNonZero = v;
-    }
+    if (!s) return;
+    const v = vc.status(s.volume, s.deviceGen);
+    if (v != null) volume = v;
   });
-  function setVolume(v: number) {
+  function slide(e: Event & { currentTarget: HTMLInputElement }) {
+    const v = +e.currentTarget.value;
+    const send = vc.set(v);
+    // Playback moved to another device during the drag: the slider stays at that one's volume.
+    if (!send) {
+      e.currentTarget.value = String(volume);
+      return;
+    }
     volume = v;
-    if (v > 0) lastNonZero = v;
-    api.setVolume(v * v, s?.deviceGen);
+    api.setVolume(v * v, send.gen);
+  }
+  function toggleMute() {
+    const v = volume > 0 ? 0 : vc.lastNonZero;
+    volume = v;
+    api.setVolume(v * v, vc.press(v));
   }
 
   const repeatLabel = $derived(
@@ -330,7 +338,7 @@
     </button>
   </div>
   <div class="vol">
-    <button class="icon-btn" onclick={() => setVolume(volume > 0 ? 0 : lastNonZero)} aria-label={volume === 0 ? "Unmute" : "Mute"} title={volume === 0 ? "Unmute" : "Mute"}>
+    <button class="icon-btn" onclick={toggleMute} aria-label={volume === 0 ? "Unmute" : "Mute"} title={volume === 0 ? "Unmute" : "Mute"}>
       <Icon name={volume === 0 ? "mute" : volume < 0.5 ? "volumeLow" : "volume"} size={18} />
     </button>
     <input
@@ -341,11 +349,11 @@
       step="0.01"
       value={volume}
       style="--pct: {volume * 100}%"
-      onpointerdown={() => (volDragging = true)}
-      onpointerup={() => (volDragging = false)}
-      onpointercancel={() => (volDragging = false)}
-      onblur={() => (volDragging = false)}
-      oninput={(e) => setVolume(+e.currentTarget.value)}
+      onpointerdown={() => vc.down()}
+      onpointerup={() => vc.up()}
+      onpointercancel={() => vc.up()}
+      onblur={() => vc.up()}
+      oninput={slide}
       aria-label="Volume"
       title="Volume {Math.round(volume * 100)}%"
     />

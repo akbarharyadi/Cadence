@@ -114,6 +114,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Secrets are namespaced by identifier, so a test copy never sees the real token or keys.
+            secrets::init_identifier(&app.config().identifier);
             let data_dir = app.path().app_data_dir()?;
             #[cfg(target_os = "android")]
             secrets::init(&data_dir);

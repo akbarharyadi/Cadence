@@ -37,12 +37,13 @@ pub struct Progress {
 }
 
 /// The threads for the heavy background jobs (loudness, sound analysis, library health, waveforms
-/// for all songs, the lyrics index): ONE pool for all of them, made the first time it's needed —
+/// for all songs): ONE pool for all of them, made the first time it's needed —
 /// a quarter of the cores, at most 2, each in background mode — so however many of those jobs run
 /// at once, no more than two heavy threads do. The music, the UI and other apps come first, and
 /// memory stays modest (every song being analysed holds its decoded audio). A job never waits for
 /// another job inside the pool (that would hold a thread the other needs): it waits on its own
-/// thread, then hands the work over.
+/// thread, then hands the work over. (Light, bounded work that must not wait hours behind a long
+/// job has a low-priority thread of its own: the lyrics index, the waveform of the song playing.)
 pub(crate) fn background_pool() -> &'static rayon::ThreadPool {
     static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {

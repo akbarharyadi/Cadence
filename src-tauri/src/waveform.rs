@@ -223,15 +223,11 @@ pub struct Lazy {
 
 impl Lazy {
     /// `done(id, drawn)` is called on the worker thread after each song.
-    #[cfg_attr(not(test), allow(dead_code))]
+    ///
+    /// It doesn't wait for the heavy jobs (the loudness or sound analysis, "Prepare waveforms"):
+    /// on a first run they decode for hours, and the seek bar would stay a plain line all that
+    /// time. One song, decoded in a few seconds at the lowest priority, one at a time, beside them.
     pub fn new(data_dir: PathBuf, quiet: Duration, done: impl Fn(&str, bool) + Send + 'static) -> Self {
-        Self::new_waiting(data_dir, quiet, || false, done)
-    }
-
-    /// `new`, waiting while `busy()` says a heavy job is decoding songs (the loudness or sound
-    /// analysis, "Prepare waveforms"): with theirs, this decoder would make three at once beside
-    /// the music. The song asked for is drawn once they're done (or by them).
-    pub fn new_waiting(data_dir: PathBuf, quiet: Duration, busy: impl Fn() -> bool + Send + 'static, done: impl Fn(&str, bool) + Send + 'static) -> Self {
         let shared = Arc::new((Mutex::new(LazyState::default()), Condvar::new()));
         let worker = shared.clone();
         std::thread::Builder::new()
@@ -253,10 +249,6 @@ impl Lazy {
                             if s.asked == asked {
                                 break;
                             }
-                        }
-                        // (Asked without holding this lock: `busy` looks at the library.)
-                        while parking_lot::MutexGuard::unlocked(&mut s, &busy) {
-                            cv.wait_for(&mut s, Duration::from_secs(1));
                         }
                         let Some(job) = s.pending.take() else { continue };
                         s.busy = Some(job.id.clone());
@@ -305,16 +297,7 @@ static LAZY: OnceLock<Lazy> = OnceLock::new();
 fn lazy(ctx: &Ctx) -> &'static Lazy {
     LAZY.get_or_init(|| {
         let c = ctx.clone();
-        let state = Arc::downgrade(&ctx.state);
-        // The loudness or sound analysis, or "Prepare waveforms", is decoding on the background pool.
-        let busy = move || {
-            let analysing = state.upgrade().is_some_and(|s| {
-                let lib = s.library.lock();
-                lib.analyzing || lib.listening
-            });
-            analysing || (RUNNING.load(Ordering::SeqCst) && !PAUSED.load(Ordering::SeqCst))
-        };
-        Lazy::new_waiting(ctx.state.data_dir.clone(), Duration::from_millis(1500), busy, move |id, drawn| {
+        Lazy::new(ctx.state.data_dir.clone(), Duration::from_millis(1500), move |id, drawn| {
             c.emit("waveform-ready", Ready { track_id: id.to_string(), drawn });
         })
     })
@@ -536,24 +519,6 @@ mod tests {
         assert!(lazy.request(job("s2", &dir.path().join("missing.flac"))));
         assert_eq!(rx.recv_timeout(Duration::from_secs(20)).unwrap(), ("s2".to_string(), false));
         assert!(!lazy.request(job("s2", &dir.path().join("missing.flac"))));
-    }
-
-    #[test]
-    fn a_song_asked_for_waits_while_a_heavy_job_decodes() {
-        let dir = tempfile::tempdir().unwrap();
-        let wav = dir.path().join("song.wav");
-        crate::audio::envelope::test_wav(&wav, 44_100);
-        let busy = Arc::new(AtomicBool::new(true));
-        let b = busy.clone();
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let lazy = Lazy::new_waiting(dir.path().to_path_buf(), Duration::from_millis(20), move || b.load(Ordering::SeqCst), move |id, drawn| {
-            let _ = tx.send((id.to_string(), drawn));
-        });
-        lazy.request(Job { id: "s".into(), path: wav.clone(), start: 0.0, end: None, stamp: STAMP });
-        assert!(rx.recv_timeout(Duration::from_millis(600)).is_err(), "not while the analysis runs");
-        assert!(!has(dir.path(), "s", STAMP));
-        busy.store(false, Ordering::SeqCst);
-        assert_eq!(rx.recv_timeout(Duration::from_secs(20)).unwrap(), ("s".to_string(), true));
     }
 
     #[test]

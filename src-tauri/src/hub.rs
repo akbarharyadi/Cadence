@@ -214,19 +214,11 @@ fn status_hub(
     // While nothing plays the engine still reports once a second: the same status again changes
     // nothing anywhere (no window is woken for it, nothing is saved or told).
     let mut last: Option<serde_json::Value> = None;
-    for s in rx {
-        let full = serde_json::to_value(&s).ok();
-        if !changed(&last, &full) {
-            continue;
-        }
-        last.clone_from(&full);
-        if let Some(mut update) = full {
+    for mut s in rx {
+        let Some((update, queue_changed)) = update_of(&mut s, &mut last, &sent_queue) else { continue };
+        if let Some(update) = update {
             let mut significant = false;
-            if sent_queue.as_ref() == Some(&s.queue) {
-                if let Some(o) = update.as_object_mut() {
-                    o.remove("queue");
-                }
-            } else {
+            if queue_changed {
                 sent_queue = Some(s.queue.clone());
                 significant = true;
             }
@@ -307,6 +299,33 @@ fn changed(last: &Option<serde_json::Value>, now: &Option<serde_json::Value>) ->
     now.is_none() || last != now
 }
 
+/// What a status means for the front end: None when it's the same as the last one (skipped
+/// everywhere), else the update to send (None: it couldn't be written as JSON) and whether the
+/// queue is in it. Only the small part of the status is written as JSON, compared and kept
+/// (`last`); the queue, thousands of ids with a big library, is compared as it is with the one
+/// sent (`sent`), and written only when it differs.
+fn update_of(s: &mut Status, last: &mut Option<serde_json::Value>, sent: &Option<Vec<String>>) -> Option<(Option<serde_json::Value>, bool)> {
+    let queue_changed = sent.as_ref() != Some(&s.queue);
+    let queue = std::mem::take(&mut s.queue);
+    let rest = serde_json::to_value(&*s).ok();
+    s.queue = queue;
+    if !queue_changed && !changed(last, &rest) {
+        return None;
+    }
+    last.clone_from(&rest);
+    let update = rest.map(|mut u| {
+        if let Some(o) = u.as_object_mut() {
+            o.remove("queue");
+            if queue_changed {
+                o.insert("queue".into(), serde_json::to_value(&s.queue).unwrap_or_default());
+            }
+        }
+        u
+    });
+    let queue_changed = queue_changed && update.is_some();
+    Some((update, queue_changed))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -319,5 +338,27 @@ mod tests {
         let moved = Some(json!({ "playing": false, "position": 30.0, "peakDb": -120 }));
         assert!(super::changed(&paused, &moved), "a seek while paused");
         assert!(super::changed(&paused, &None));
+    }
+
+    #[test]
+    fn the_queue_is_sent_only_when_it_changed_and_never_kept_as_json() {
+        let mut s = crate::audio::Status { queue: vec!["a".into(), "b".into()], ..Default::default() };
+        let mut last = None;
+        let (update, queue) = super::update_of(&mut s, &mut last, &None).expect("the first one");
+        let update = update.unwrap();
+        assert!(queue && update["queue"] == json!(["a", "b"]));
+        assert_eq!(s.queue, ["a", "b"], "the status keeps its queue");
+        assert!(last.as_ref().is_some_and(|l| l.get("queue").is_some_and(|q| q == &json!([]))), "what's kept has no ids");
+        let sent = Some(s.queue.clone());
+        // The same again: skipped.
+        assert!(super::update_of(&mut s, &mut last, &sent).is_none());
+        // Only the position moved: sent, without the queue.
+        s.position = 3.0;
+        let (update, queue) = super::update_of(&mut s, &mut last, &sent).unwrap();
+        assert!(!queue && update.unwrap().get("queue").is_none());
+        // Only the queue changed: sent with it.
+        s.queue.push("c".into());
+        let (update, queue) = super::update_of(&mut s, &mut last, &sent).unwrap();
+        assert!(queue && update.unwrap()["queue"] == json!(["a", "b", "c"]));
     }
 }

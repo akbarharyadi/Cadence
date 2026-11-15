@@ -1090,11 +1090,11 @@ pub fn hotkey(ctx: &Ctx, action: &str) {
     let state = &ctx.state;
     match action {
         "toggle" | "next" | "prev" => player(ctx, action.to_string()),
-        // Steps on the volume slider (which is perceptual: the volume is its square).
+        // Steps on the volume slider, for the device the volume was read from (one snapshot).
         "volume up" | "volume down" => {
             let step = if action == "volume up" { 0.05 } else { -0.05 };
-            let slider = (state.engine.status().volume.sqrt() + step).clamp(0.0, 1.0);
-            set_volume(ctx, slider * slider, None);
+            let (volume, device_gen) = crate::profiles::volume_step(&state.engine.status(), step);
+            set_volume(ctx, volume, Some(device_gen));
         }
         "favorite" => {
             let status = state.engine.status();

@@ -340,7 +340,7 @@ fn let_go_if_idle(ctx: &Ctx) {
     }
     let ctx = ctx.clone();
     let asked = USE.lock().searched;
-    crate::jobs::background_pool().spawn(move || {
+    on_own_thread(move || {
         let dir = ctx.state.data_dir.clone();
         let taken = INDEX.lock().take();
         if let Some(idx) = taken {
@@ -446,6 +446,21 @@ pub fn search(ctx: &Ctx, query: &str, limit: usize) -> Found {
     Found { ready: true, hits }
 }
 
+/// Runs the index's work (`BUILDING` set: one at a time) on a thread of its own, at low priority.
+/// Not on the shared pool of heavy jobs: reading lyrics files is light and bounded, and there it
+/// would wait behind a long analysis (hours on a first run) while "find a song by a line" says the
+/// index isn't ready.
+fn on_own_thread(work: impl FnOnce() + Send + 'static) {
+    let spawned = std::thread::Builder::new().name("cadence-lyric-index".into()).spawn(move || {
+        crate::jobs::background_priority();
+        work();
+    });
+    if let Err(e) = spawned {
+        log::warn!("couldn't start the lyrics index: {e}");
+        BUILDING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Songs to read per batch (a dictionary load each for Japanese; progress between them).
 const BATCH: usize = 400;
 
@@ -455,8 +470,7 @@ fn start(ctx: Ctx) {
     if BUILDING.swap(true, Ordering::SeqCst) {
         return;
     }
-    // On the shared background pool (at most two heavy threads in all, low priority).
-    crate::jobs::background_pool().spawn(move || {
+    on_own_thread(move || {
         let started = std::time::Instant::now();
         let dir = ctx.state.data_dir.clone();
         let cache = dir.join("lyrics");

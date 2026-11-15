@@ -164,11 +164,12 @@ impl Profiles {
         }
     }
 
-    /// The volume last in effect on device `id` in this mode (Direct output or not), if known: its
-    /// level, else its profile's volume when the profile is for that mode.
+    /// The level recorded on device `id` in this mode (Direct output or not), if any. Only the
+    /// level counts, which the engine records while the device really runs in that mode: never the
+    /// profile's volume, which can be a volume carried over from another device, or one set while
+    /// Direct output had fallen back to the mixer (its `exclusive` is the setting, not what ran).
     pub fn saved_volume(&self, id: &str, direct: bool) -> Option<f32> {
         sane(self.levels.get(id).and_then(|l| l.get(direct)))
-            .or_else(|| sane(self.devices.get(id).filter(|p| p.exclusive == direct).and_then(|p| p.volume)))
     }
 
     /// The volume in effect on device `id` in this mode now.
@@ -248,9 +249,9 @@ impl crate::audio::SoundBook for Book {
         s.sound_profiles.saved_volume(id, direct)
     }
 
-    fn applied(&mut self, device: Option<&DeviceRef>, direct: bool, dsp: &DspSettings, volume: f32, in_use: bool) {
+    fn applied(&mut self, device: Option<&DeviceRef>, mode: Option<bool>, dsp: &DspSettings, volume: f32, in_use: bool) {
         let Some(state) = self.state.upgrade() else { return };
-        if applied_in(&mut state.settings.lock(), device, direct, dsp, volume, in_use) {
+        if applied_in(&mut state.settings.lock(), device, mode, dsp, volume, in_use) {
             state.save_settings_later();
         }
     }
@@ -280,22 +281,25 @@ pub(crate) fn settings_book(settings: std::sync::Arc<parking_lot::Mutex<crate::s
         fn saved_volume(&mut self, id: &str, direct: bool) -> Option<f32> {
             self.0.lock().sound_profiles.saved_volume(id, direct)
         }
-        fn applied(&mut self, device: Option<&DeviceRef>, direct: bool, dsp: &DspSettings, volume: f32, in_use: bool) {
-            let _ = applied_in(&mut self.0.lock(), device, direct, dsp, volume, in_use);
+        fn applied(&mut self, device: Option<&DeviceRef>, mode: Option<bool>, dsp: &DspSettings, volume: f32, in_use: bool) {
+            let _ = applied_in(&mut self.0.lock(), device, mode, dsp, volume, in_use);
         }
     }
     Box::new(Own(settings))
 }
 
-/// What the engine has in effect, written into the settings: the device's level is kept, and with
-/// sound settings per device they're that device's (`current` repaired to it). `in_use`: the
-/// engine changed them by itself, so the settings in use become exactly the engine's too (else
-/// they're the listener's change, which `set_volume` / `set_dsp` already wrote).
+/// What the engine has in effect, written into the settings: the device's level in the mode it
+/// really runs in (`mode`; None: not known, so none) is kept, and with sound settings per device
+/// they're that device's (`current` repaired to it). `in_use`: the engine changed them by itself,
+/// so the settings in use become exactly the engine's too (else they're the listener's change,
+/// which `set_volume` / `set_dsp` already wrote).
 /// Returns whether there was anything to write.
-pub(crate) fn applied_in(s: &mut crate::state::Settings, device: Option<&DeviceRef>, direct: bool, dsp: &DspSettings, volume: f32, in_use: bool) -> bool {
+pub(crate) fn applied_in(s: &mut crate::state::Settings, device: Option<&DeviceRef>, mode: Option<bool>, dsp: &DspSettings, volume: f32, in_use: bool) -> bool {
     let device = device.filter(|d| !d.id.is_empty());
     if let Some(d) = device {
-        s.sound_profiles.set_level(&d.id, direct, volume);
+        if let Some(direct) = mode {
+            s.sound_profiles.set_level(&d.id, direct, volume);
+        }
         if s.device_profiles {
             s.sound_profiles.record_for(d, dsp, volume);
         }
@@ -331,6 +335,16 @@ pub fn set_volume(state: &AppState, volume: f32, seen: Option<u64>) {
     if state.engine.device_generation() == device_gen && volume.is_finite() {
         s.volume = volume.clamp(0.0, 1.0);
     }
+}
+
+/// A step on the volume slider (which is perceptual: the volume is its square) from what a status
+/// says, stamped with that same status's device generation: the volume and the device it's for
+/// come from one snapshot. (The live generation would let "the old device's volume plus a step"
+/// land on the device playback has just moved to.)
+pub fn volume_step(status: &crate::audio::Status, step: f32) -> (f32, u64) {
+    let now = if status.volume.is_finite() { status.volume.clamp(0.0, 1.0) } else { 0.0 };
+    let slider = (now.sqrt() + step).clamp(0.0, 1.0);
+    (slider * slider, status.device_gen)
 }
 
 /// The Sound page's settings (`api::set_dsp`), stamped like `set_volume`.
@@ -539,8 +553,10 @@ mod tests {
     fn saved_volumes_are_per_mode_and_a_bad_file_counts_as_none() {
         let mut p = Profiles::default();
         assert_eq!(p.saved_volume("dac", true), None);
-        p.devices.insert("dac".into(), Profile::of("DAC", &tuned("Flat", false, true), 0.25));
-        assert_eq!((p.saved_volume("dac", true), p.saved_volume("dac", false)), (Some(0.25), None), "its volume is a Direct output one");
+        // A profile's volume is no level: it may have been carried over from another device, or
+        // set while Direct output had fallen back to the mixer.
+        p.devices.insert("dac".into(), Profile::of("DAC", &tuned("Flat", false, true), 1.0));
+        assert_eq!((p.saved_volume("dac", true), p.saved_volume("dac", false)), (None, None), "not recorded in either mode");
         p.set_level("dac", false, 0.8);
         p.set_level("dac", true, 0.1);
         assert_eq!((p.saved_volume("dac", true), p.saved_volume("dac", false)), (Some(0.1), Some(0.8)), "the level first");
@@ -557,15 +573,18 @@ mod tests {
         s.sound_profiles.current = Some("b".into());
         s.volume = 1.0;
         let dsp = tuned("Rock", false, true);
-        applied_in(&mut s, Some(&dev("a")), true, &dsp, 0.09, true);
+        applied_in(&mut s, Some(&dev("a")), Some(true), &dsp, 0.09, true);
         assert_eq!((s.sound_profiles.current.as_deref(), s.volume, s.dsp.exclusive), (Some("a"), 0.09, true));
         assert_eq!((s.sound_profiles.saved_volume("a", true), s.sound_profiles.devices["a"].name.as_str()), (Some(0.09), "a name"));
+        // Not open in a known mode (the open failed): the profile follows, but no level.
+        applied_in(&mut s, Some(&dev("a")), None, &dsp, 0.7, false);
+        assert_eq!((s.sound_profiles.saved_volume("a", true), s.sound_profiles.devices["a"].volume), (Some(0.09), Some(0.7)));
         // Nothing opened yet: the settings in use only.
-        applied_in(&mut s, None, true, &dsp, 0.05, true);
+        applied_in(&mut s, None, Some(true), &dsp, 0.05, true);
         assert_eq!((s.volume, s.sound_profiles.devices.len()), (0.05, 1));
         // One set for all: no profiles, but the level is still kept, and a move changes nothing.
         s.device_profiles = false;
-        applied_in(&mut s, Some(&dev("c")), false, &dsp, 0.4, false);
+        applied_in(&mut s, Some(&dev("c")), Some(false), &dsp, 0.4, false);
         assert!(!s.sound_profiles.devices.contains_key("c"));
         assert_eq!(s.sound_profiles.saved_volume("c", false), Some(0.4));
         assert_eq!(moved_in(&mut s, Some(&dev("c")), &dev("a"), &dsp, 0.4), None);

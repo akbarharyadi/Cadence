@@ -873,8 +873,28 @@ fn write_marker(dir: &Path, m: &Marker) -> Result<(), String> {
     crate::state::write_file(&dir.join(MARKER), &bytes, false).map_err(|e| format!("Nothing was restored: Cadence couldn't note the restore first ({e})."))
 }
 
-fn remove_marker(dir: &Path) {
-    let _ = std::fs::remove_file(dir.join(MARKER));
+/// Tells one restore's note from another's.
+fn marker_id(m: &Marker) -> String {
+    format!("{}|{}|{}", m.started, m.safety, m.backup)
+}
+
+/// The restore's note is done with. When it can't be removed (permissions, a file held open), it
+/// would undo the restore (or roll back again) on every start, losing what was done since: it's
+/// set aside under another name, and its id is kept so that no start acts on it again.
+fn clear_marker(dir: &Path, m: &Marker) {
+    let file = dir.join(MARKER);
+    let e = match std::fs::remove_file(&file) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => e,
+        _ => return,
+    };
+    log::error!("the restore note {} can't be removed ({e}); left as it is, every start would undo the restore again: set aside, and never acted on again", file.display());
+    let aside = dir.join(format!("restore-in-progress.{}.done.json", m.started));
+    if let Err(e) = std::fs::rename(&file, &aside) {
+        log::error!("the restore note can't be set aside either ({e}): it stays, and is ignored from now on");
+    }
+    let mut cfg = config(dir);
+    cfg.done_marker = marker_id(m);
+    save_config(dir, &cfg);
 }
 
 /// relink-pending.json as it was (`None`: there was none).
@@ -919,6 +939,13 @@ pub fn recover_interrupted(data_dir: &Path) -> Option<Interrupted> {
     let file = data_dir.join(MARKER);
     let bytes = std::fs::read(&file).ok()?;
     let marker: Marker = serde_json::from_slice(&bytes).unwrap_or_default();
+    if config(data_dir).done_marker == marker_id(&marker) {
+        // Dealt with on an earlier start, but it couldn't be removed: rolling back again would
+        // throw away everything since.
+        log::error!("the note of the restore of {} was dealt with before but is still there: left alone", marker.backup);
+        clear_marker(data_dir, &marker);
+        return None;
+    }
     log::warn!("a restore of {} was cut short; putting the data back as it was", marker.backup);
     let back = |path: &str| -> Result<(), String> {
         let a = open(Path::new(path))?;
@@ -944,7 +971,7 @@ pub fn recover_interrupted(data_dir: &Path) -> Option<Interrupted> {
         }
     }
     stats_cache_drop(data_dir);
-    remove_marker(data_dir);
+    clear_marker(data_dir, &marker);
     let mut cfg = config(data_dir);
     cfg.interrupted = Some(note.clone());
     save_config(data_dir, &cfg);
@@ -982,7 +1009,7 @@ pub fn restore(ctx: &Ctx, path: &Path) -> Result<Restored, String> {
     crate::state::hold_session_saves();
     let backups = backups_dir(&state.data_dir);
     let safety = snapshot_named(state, RESTORE_SAFETY, "safety").map_err(|e| format!("Nothing was restored: a copy of your data as it is now couldn't be made first ({e})."))?;
-    rotate_restore_safety(&backups);
+    rotate_restore_safety(&backups, &safety);
     let marker = Marker {
         safety: safety.to_string_lossy().into_owned(),
         backup: path.to_string_lossy().into_owned(),
@@ -1003,7 +1030,7 @@ pub fn restore(ctx: &Ctx, path: &Path) -> Result<Restored, String> {
                 log::error!("restore failed ({e}) and the data couldn't be put back yet ({e2})");
                 return Err(format!("The backup couldn't be restored ({e}), and your data couldn't be put back as it was yet ({e2}). Restart Cadence: it puts it back first."));
             }
-            remove_marker(&state.data_dir);
+            clear_marker(&state.data_dir, &marker);
             return Err(format!("The backup couldn't be restored ({e}); your data is as it was."));
         }
     };
@@ -1020,7 +1047,7 @@ pub fn restore(ctx: &Ctx, path: &Path) -> Result<Restored, String> {
     }
     let session = archive.files.iter().any(|(n, _, _)| n == "session.json");
     hold.expect = apply_to_player(ctx, &old_settings, session);
-    remove_marker(&state.data_dir);
+    clear_marker(&state.data_dir, &marker);
     {
         let mut cfg = config(&state.data_dir);
         if cfg.interrupted.take().is_some() {
@@ -1548,6 +1575,8 @@ struct Config {
     folder_error: String,
     /// The last restore that was cut short, until a restore goes through.
     interrupted: Option<Interrupted>,
+    /// A restore note dealt with that couldn't be removed (`marker_id`): never acted on again.
+    done_marker: String,
 }
 
 fn config(data_dir: &Path) -> Config {
@@ -1640,9 +1669,12 @@ pub(crate) fn rotate_safety(dir: &Path) {
     }
 }
 
-/// The snapshots before restores, rotated apart from the other safety snapshots.
-fn rotate_restore_safety(dir: &Path) {
-    for (_, p) in listed(dir, RESTORE_SAFETY).into_iter().skip(SAFETY_KEPT) {
+/// The snapshots before restores, rotated apart from the other safety snapshots. `just_made` (the
+/// one this restore will roll back to) is never removed: the order is by the time in the names,
+/// and after the clock was set back it isn't the newest.
+fn rotate_restore_safety(dir: &Path, just_made: &Path) {
+    let others = listed(dir, RESTORE_SAFETY).into_iter().filter(|(_, p)| p.file_name() != just_made.file_name());
+    for (_, p) in others.skip(SAFETY_KEPT.saturating_sub(1)) {
         let _ = std::fs::remove_file(p);
     }
 }
@@ -2578,8 +2610,74 @@ mod tests {
         }
         rotate_safety(&b);
         assert_eq!(listed(&b, RESTORE_SAFETY).len(), 8, "imports' snapshots don't push out the ones before restores");
-        rotate_restore_safety(&b);
+        rotate_restore_safety(&b, &b.join(format!("{RESTORE_SAFETY}-1007.zip")));
         assert_eq!((listed(&b, RESTORE_SAFETY).len(), listed(&b, "safety").len()), (SAFETY_KEPT, SAFETY_KEPT));
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[test]
+    fn the_snapshot_just_made_survives_a_clock_set_back() {
+        let b = base("safety-clock");
+        for t in 0..8u64 {
+            std::fs::write(b.join(format!("{RESTORE_SAFETY}-{}.zip", 5000 + t)), b"x").unwrap();
+        }
+        // The clock went back: the snapshot made now is named older than all the others.
+        let now = b.join(format!("{RESTORE_SAFETY}-10.zip"));
+        std::fs::write(&now, b"x").unwrap();
+        rotate_restore_safety(&b, &now);
+        assert!(now.exists(), "the one to roll back to is kept");
+        assert_eq!(listed(&b, RESTORE_SAFETY).len(), SAFETY_KEPT);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// A restore cut short: its safety snapshot of `data` as it is, and its note.
+    fn cut_short(data: &Path) -> Marker {
+        let safety = backups_dir(data).join(format!("{RESTORE_SAFETY}-1.zip"));
+        create(data, &safety, "safety", &no_links).unwrap();
+        let m = Marker { safety: safety.to_string_lossy().into(), backup: "elsewhere.zip".into(), started: 7, pending: None };
+        write_marker(data, &m).unwrap();
+        m
+    }
+
+    #[test]
+    fn a_restore_note_dealt_with_before_is_never_acted_on_again() {
+        let b = base("note-done");
+        let data = b.join("data");
+        fill(&data);
+        let m = cut_short(&data);
+        // An earlier start dealt with it but couldn't remove it; the listener carried on since.
+        let mut cfg = config(&data);
+        cfg.done_marker = marker_id(&m);
+        save_config(&data, &cfg);
+        std::fs::write(data.join("playlists.json"), r#"{"items":[]}"#).unwrap();
+        assert!(recover_interrupted(&data).is_none());
+        assert_eq!(std::fs::read(data.join("playlists.json")).unwrap(), br#"{"items":[]}"#, "not rolled back again");
+        assert!(!data.join(MARKER).exists(), "set aside");
+        // Another restore's note is acted on as ever.
+        let mut other = cut_short(&data);
+        other.started = 8;
+        write_marker(&data, &other).unwrap();
+        assert!(recover_interrupted(&data).is_some_and(|n| n.rolled_back));
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_restore_note_that_cannot_be_removed_rolls_back_only_once() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let b = base("note-stuck");
+        let data = b.join("data");
+        fill(&data);
+        cut_short(&data);
+        // Held open by something that lets others read it, but not delete or rename it.
+        const FILE_SHARE_READ: u32 = 1;
+        let held = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(data.join(MARKER)).unwrap();
+        assert!(recover_interrupted(&data).is_some_and(|n| n.rolled_back));
+        assert!(data.join(MARKER).exists(), "still there");
+        std::fs::write(data.join("playlists.json"), r#"{"items":[]}"#).unwrap();
+        assert!(recover_interrupted(&data).is_none(), "not a second time");
+        assert_eq!(std::fs::read(data.join("playlists.json")).unwrap(), br#"{"items":[]}"#);
+        drop(held);
         let _ = std::fs::remove_dir_all(&b);
     }
 }

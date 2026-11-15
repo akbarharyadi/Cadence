@@ -21,7 +21,8 @@ Run what applies and report the result honestly.
 You cannot hear or see the app. Say what you could not verify and what the owner should try (for example "play a
 gapless album on the DAC and check the first second", "open Settings on the phone layout"). Never claim sound or
 looks were checked. Do not launch the owner's running app, and do not run `tauri dev` or `tauri build` unless asked.
-To test against a running app, use an isolated test instance (its own identifier and data folder), muted.
+To test against a running app, use an isolated test instance (its own identifier and data folder), muted. A non-production identifier also gets its own keyring
+namespace (`secrets.rs`), so test copies have no ListenBrainz token or AI key.
 
 ## 2. Size limits
 
