@@ -2,6 +2,20 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.3.1 (2026-11-18)
+
+- **Louder with Sound Check.** Songs now play at the level of most streaming apps (−14 LUFS) instead of the
+  quieter ReplayGain level, so Cadence no longer sounds much quieter than other apps at the same Windows volume.
+  Songs you've already measured don't need measuring again.
+- **Quiet songs keep up.** A quiet song with sharp peaks used to be held back to stay clear of clipping. Now it's
+  raised like the others, and a gentle limiter turns down only the few peaks that would go too loud. It works only
+  while Sound Check is on.
+- **See the gain on this song.** The Sound Check options show how much the song playing now is turned up or down.
+- **Lighter rescans.** When the music folders change, songs split by a CUE sheet and damaged files are no longer
+  read again each time.
+- **Mini player keeps moving** while the main window is minimized.
+- **A cover added right after a scan is found** on Linux and on FAT drives.
+
 ## 0.3.0 (2026-11-15)
 
 This is the biggest update so far: lighter on your computer, much more in the lyrics, new ways to find and pick
