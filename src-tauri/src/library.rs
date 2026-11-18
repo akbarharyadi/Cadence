@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio::loudness::{GainInfo, SongGain, parse_tag_number};
 
+mod rescan;
+
 pub const AUDIO_EXTENSIONS: &[&str] = &[
     "flac", "mp3", "m4a", "alac", "aac", "wav", "aif", "aiff", "ogg", "oga", "mka",
 ];
@@ -225,7 +227,8 @@ pub fn scan(
         })
         .collect();
 
-    let tracks: Vec<Track> = jobs
+    let memo = rescan::take();
+    let checked: Vec<rescan::Checked> = jobs
         .into_par_iter()
         .filter_map(|(path, old)| {
             let meta = std::fs::metadata(&path).ok()?;
@@ -240,20 +243,14 @@ pub fn scan(
             if n.is_multiple_of(25) || n == total {
                 progress(n, total);
             }
-            match old {
-                // (A cached song of a single-file album isn't the file's own entry: read it again.)
-                Some(t) if t.cue.is_none() && t.size == size && t.modified == modified => Some(t),
-                old => {
-                    reread.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let mut t = read_track(&path)?;
-                    t.size = size;
-                    t.modified = modified;
-                    t.added = old.map(|o| o.added).unwrap_or_else(now);
-                    Some(t)
-                }
+            let c = rescan::check(&path, (size, modified), old, &memo, read_track);
+            if c.read {
+                reread.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+            Some(c)
         })
         .collect();
+    let tracks = rescan::settle(checked);
     log::info!(
         "found {total} songs in {walked:?}, checked them in {:?} ({} read again)",
         started.elapsed() - walked,
