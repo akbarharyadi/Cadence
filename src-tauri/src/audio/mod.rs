@@ -5,7 +5,7 @@
 //! never blocks audio. Songs follow each other in the same stream: gapless.
 //!
 //! Signal chain (worker): decode → channel mapping → loudness gain → per-song tone → crossfade blend
-//! → vocal cut → EQ → crossfeed → resample → ring. The renderer then applies volume and the sleep
+//! → vocal cut → EQ → crossfeed → peak limiter (Sound Check only) → resample → ring. The renderer then applies volume and the sleep
 //! timer's fade (both gliding), and dither where the device takes integers.
 
 pub mod crossfeed;
@@ -30,6 +30,7 @@ pub mod tone;
 pub mod karaoke;
 mod safety;
 mod opened;
+mod limiter;
 #[cfg(test)]
 mod safety_tests;
 #[cfg(test)]
@@ -652,6 +653,8 @@ struct Worker {
     vocals: karaoke::VocalCut,
     eq: Equalizer,
     crossfeed: Crossfeed,
+    /// Turns down the peaks Sound Check lets past the ceiling (only while it's on).
+    limiter: limiter::Limiter,
     resampler: Option<Resampler>,
     written: u64,
     boundaries: Vec<Boundary>,
@@ -836,6 +839,7 @@ impl Worker {
             vocals: karaoke::VocalCut::new(dsp.vocal_cut),
             eq: Equalizer::new(dsp.eq, 2, 44_100),
             crossfeed: Crossfeed::new(dsp.crossfeed, 44_100),
+            limiter: limiter::Limiter::new(),
             resampler: None,
             written: 0,
             boundaries: Vec::new(),
@@ -2207,6 +2211,7 @@ impl Worker {
         self.vocals.reset();
         self.eq.reset();
         self.crossfeed.reset();
+        self.limiter.reset();
         if let Some(r) = &mut self.resampler {
             r.reset();
         }
@@ -2515,6 +2520,10 @@ impl Worker {
         self.eq.process(&mut self.mapped);
         self.crossfeed.set_rate(rate);
         self.crossfeed.process(&mut self.mapped, ch);
+        if self.leveling.mode != loudness::LevelingMode::Off {
+            self.limiter.set_rate(rate);
+            self.limiter.process(&mut self.mapped, ch);
+        }
         let before = self.pending.len();
         if rate != out_rate {
             let fresh = !self

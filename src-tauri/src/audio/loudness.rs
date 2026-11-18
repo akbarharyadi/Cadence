@@ -1,9 +1,12 @@
 //! Loudness leveling (ReplayGain 2.0 / EBU R128).
 //!
-//! Every song is measured once (integrated loudness + true peak). During playback, each song gets a
-//! gain that brings it to the −18 LUFS reference, capped so its peak stays 1 dB below full scale
-//! (−1 dBTP). Songs measured before true peak was used have their sample peak stored, which can
-//! sit a little below the true peak; they keep working and get the true peak when re-measured.
+//! Every song is measured once (integrated loudness + true peak). Gains are stored against the
+//! ReplayGain 2.0 reference (−18 LUFS), the same scale as ReplayGain tags in files. During playback,
+//! each song gets a gain that brings it to −14 LUFS (where Spotify and YouTube play), capped so its
+//! peak stays 1 dB below full scale (−1 dBTP), plus up to 3 dB that the peak limiter
+//! (`limiter.rs`) takes off the few peaks that pass. Songs measured before true peak was used have their
+//! sample peak stored, which can sit a little below the true peak; they keep working and get the
+//! true peak when re-measured.
 //! Besides matching levels between songs, the reduction gives modern "hot" masters the headroom they
 //! need: without it, resampling and EQ push their peaks over full scale and they clip.
 
@@ -18,6 +21,12 @@ use super::source::Source;
 
 /// ReplayGain 2.0 reference loudness.
 pub const REFERENCE_LUFS: f64 = -18.0;
+/// Loudness songs are played at. Stored gains and tags stay on the ReplayGain scale, so already
+/// measured songs and tagged files need no re-measuring; the difference is added at playback.
+/// −18 LUFS made modern masters play 6–10 dB below other apps at the same Windows volume.
+pub const PLAYBACK_LUFS: f64 = -14.0;
+/// What playback adds to a ReplayGain-scale gain.
+const PLAYBACK_OFFSET_DB: f32 = (PLAYBACK_LUFS - REFERENCE_LUFS) as f32;
 /// Headroom applied to songs that haven't been measured yet.
 pub const UNMEASURED_HEADROOM_DB: f32 = -3.0;
 /// Margin kept below full scale when limiting a gain by the song's peak.
@@ -86,11 +95,13 @@ impl Leveling {
         };
         match pick {
             Some(g) => {
-                let wanted = g.gain + self.preamp;
+                let wanted = g.gain + PLAYBACK_OFFSET_DB + self.preamp;
                 // A tag without a peak: how far it may rise isn't known, so no further than a
                 // song that wasn't measured at all (a quiet song with a boost could clip).
+                // A measured peak may pass the ceiling by the limiter's allowance: the limiter
+                // turns those few peaks down, so quiet songs with sharp peaks aren't held back.
                 let ceiling = if g.peak.is_finite() && g.peak > 0.0 {
-                    -20.0 * g.peak.log10() - PEAK_MARGIN_DB
+                    -20.0 * g.peak.log10() - PEAK_MARGIN_DB + super::limiter::ALLOWANCE_DB
                 } else {
                     UNMEASURED_HEADROOM_DB
                 };
@@ -226,7 +237,8 @@ mod tests {
             mode: LevelingMode::Auto,
             ..Default::default()
         };
-        // A quiet song wants +6 dB but peaks at -2 dBFS: may only rise to -1 dBFS.
+        // A quiet song wants +10 dB (+6 and the playback level) but peaks at -2 dBFS: it may rise
+        // to -1 dBFS plus what the limiter takes off its peaks.
         let g = SongGain {
             track: Some(GainInfo {
                 gain: 6.0,
@@ -234,7 +246,7 @@ mod tests {
             }),
             album: None,
         };
-        assert!((l.gain_db(&g, false) - 1.0).abs() < 0.01);
+        assert!((l.gain_db(&g, false) - (1.0 + crate::audio::limiter::ALLOWANCE_DB)).abs() < 0.01);
         // Unmeasured songs get safety headroom.
         assert_eq!(
             l.gain_db(&SongGain::default(), false),
@@ -253,7 +265,20 @@ mod tests {
         let boosted = Leveling { mode: LevelingMode::Track, preamp: 6.0 };
         let quiet = SongGain { track: Some(GainInfo { gain: 4.0, peak: 0.0 }), album: None };
         assert_eq!(boosted.gain_db(&quiet, false), UNMEASURED_HEADROOM_DB);
-        let loud = SongGain { track: Some(GainInfo { gain: -12.0, peak: f32::NAN }), album: None };
+        // −16 on the ReplayGain scale, +4 to the playback level, +6 preamp.
+        let loud = SongGain { track: Some(GainInfo { gain: -16.0, peak: f32::NAN }), album: None };
         assert_eq!(boosted.gain_db(&loud, false), -6.0, "lowering is taken as it is");
+    }
+
+    #[test]
+    fn a_measured_song_plays_at_minus_14_lufs_not_the_replaygain_reference() {
+        let l = Leveling::default();
+        // A modern master at −8 LUFS: ReplayGain says −10 dB, playback at −14 LUFS needs −6 dB.
+        let hot = SongGain { track: Some(GainInfo { gain: -10.0, peak: 1.0 }), album: None };
+        assert!((l.gain_db(&hot, false) - -6.0).abs() < 0.001);
+        // A quiet song peaking at -3 dBFS wants +6 dB; it gets 2 dB to the ceiling and the limiter's
+        // 3 dB, no more.
+        let quiet = SongGain { track: Some(GainInfo { gain: 2.0, peak: 10f32.powf(-3.0 / 20.0) }), album: None };
+        assert!((l.gain_db(&quiet, false) - 5.0).abs() < 0.01);
     }
 }

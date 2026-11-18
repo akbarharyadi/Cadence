@@ -59,6 +59,8 @@
   const platform = ua.includes("Windows") ? "windows" : ua.includes("Android") ? "android" : ua.includes("Mac OS") ? "mac" : ua.includes("Linux") ? "linux" : "other";
 
   const tone = $derived(app.status?.output.tone ?? null);
+  /** Sound Check's gain on the song playing now (dB), shown next to the boost it adds to. */
+  const songGain = $derived(app.status?.output.leveling ?? null);
 
   function scrollTo(id: string) {
     document.getElementById(`sound-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -281,7 +283,8 @@
               <span class="num">{db(boost)}</span>
             </div>
             <p class="hint">
-              Reference level −18 LUFS (ReplayGain 2.0). Boosts never push a song past full scale.
+              Songs play at −14 LUFS, as loud as most streaming apps. Boosts never push a song past full scale.
+              {#if songGain != null}This song: {db(songGain)}.{/if}
               {#if app.analysis}Measuring {app.analysis.done} of {app.analysis.total} songs…{:else}{measured} of {app.tracks.length} songs measured.
                 <button class="link" onclick={() => api.reanalyze()}>Measure again</button>{/if}
             </p>
