@@ -2,6 +2,12 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.3.3 (2026-11-24)
+
+- **Fix song info finds songs tagged with a translated title.** A song the catalogue lists under its original
+  name (幾田りら's 「宝石」, tagged “Gemstone”) is now found among all of the artist's songs by its length, even when
+  the artist has hundreds of them.
+
 ## 0.3.2 (2026-11-24)
 
 - **Up Next on the phone.** Now Playing has an Up Next button next to Lyrics. The queue opens full screen: tap a
