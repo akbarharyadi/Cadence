@@ -36,6 +36,13 @@
     return true;
   }
 
+  /** Phones have no double-click: a tap plays the row (not when the tap was on its remove button). */
+  function tapToPlay(e: MouseEvent, i: number) {
+    if (!document.documentElement.classList.contains("phone")) return;
+    if ((e.target as HTMLElement).closest(".rm")) return;
+    api.jump(i);
+  }
+
   const history = $derived.by(() => {
     if (!queue || index == null) return [];
     const out: { track: Track | undefined; i: number }[] = [];
@@ -147,6 +154,7 @@
           ondragend={() => (dragFrom = dropAt = null)}
           ondrop={(e) => drop(e, i)}
           ondblclick={() => api.jump(i)}
+          onclick={(e) => tapToPlay(e, i)}
           oncontextmenu={(e) => app.queueMenu(e, i)}
           onkeydown={(e) => menuKey(e, i) || (e.key === "Enter" && api.jump(i))}
         >
@@ -164,7 +172,7 @@
     {#if history.length}
       <div class="label">Played</div>
       {#each history as { track, i } (i)}
-        <div class="item played" role="button" tabindex="0" ondblclick={() => api.jump(i)} onkeydown={(e) => e.key === "Enter" && api.jump(i)}>
+        <div class="item played" role="button" tabindex="0" ondblclick={() => api.jump(i)} onclick={(e) => tapToPlay(e, i)} onkeydown={(e) => e.key === "Enter" && api.jump(i)}>
           <img src={artUrl(app.albumById.get(track!.albumId)?.artSmall)} alt="" loading="lazy" />
           <div class="meta"><div class="t">{track!.title}</div><div class="a">{track!.artist}</div></div>
         </div>
@@ -349,6 +357,33 @@
   }
   .item:hover .d {
     display: none;
+  }
+  /* Phones: a full-screen sheet (over Now Playing too), and no hover, so the remove button always shows. */
+  :global(html.phone) .queue {
+    position: fixed;
+    inset: 0;
+    z-index: 45;
+    width: auto;
+    border-left: none;
+    background: var(--ink);
+    backdrop-filter: none;
+    padding-bottom: env(safe-area-inset-bottom);
+    animation: rise 0.22s ease-out;
+  }
+  :global(html.phone) header {
+    padding-top: calc(14px + env(safe-area-inset-top));
+  }
+  :global(html.phone) .rm {
+    display: grid;
+  }
+  :global(html.phone) .item:hover .d {
+    display: inline;
+  }
+  @keyframes rise {
+    from {
+      transform: translateY(32px);
+      opacity: 0;
+    }
   }
   .rm:hover {
     background: var(--active);

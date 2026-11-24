@@ -45,13 +45,8 @@
 <div class="page library">
   <h1 class="page-title">Library</h1>
 
-  <ul class="list">
-    {#each places as p (p.label)}
-      {@render row(p.label, p.icon, p.view, p.view.name === "attention" ? app.attentionCount : 0)}
-    {/each}
-  </ul>
-
-  <div class="group">
+  <!-- Playlists first: the phone has no other place that lists them. -->
+  <div class="group first">
     <h2 class="section-title">Playlists</h2>
     <button class="icon-btn add" onclick={newPlaylistMenu} aria-label="New playlist" title="New playlist"><Icon name="plus" size={18} /></button>
   </div>
@@ -62,6 +57,12 @@
       <li>
         <button class="item muted" onclick={newPlaylistMenu}><Icon name="plus" size={20} /><span class="label">New playlist</span></button>
       </li>
+    {/each}
+  </ul>
+
+  <ul class="list more">
+    {#each places as p (p.label)}
+      {@render row(p.label, p.icon, p.view, p.view.name === "attention" ? app.attentionCount : 0)}
     {/each}
   </ul>
 
@@ -98,6 +99,9 @@
     align-items: center;
     justify-content: space-between;
     margin: 28px 0 10px;
+  }
+  .group.first {
+    margin-top: 0;
   }
   .add {
     background: var(--hover);

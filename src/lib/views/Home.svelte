@@ -253,10 +253,11 @@
     </div>
   </header>
 
-  <!-- Phones have no sidebar: Discover and Your Stats from here. -->
+  <!-- Phones have no sidebar: Discover, Your Stats and the playlists (at the top of Library) from here. -->
   <nav class="shortcuts" aria-label="More">
     <button class="shortcut" onclick={() => app.go({ name: "discover" })}><Icon name="sparkle" size={14} />Discover</button>
     <button class="shortcut" onclick={() => app.go({ name: "stats" })}><Icon name="gauge" size={14} />Your Stats</button>
+    <button class="shortcut" onclick={() => app.go({ name: "library" })}><Icon name="playlist" size={14} />Playlists</button>
   </nav>
 
   {#if app.aiReady && (djOpen || asking || answer || askError)}
@@ -989,6 +990,7 @@
   }
   .shortcuts {
     display: none;
+    flex-wrap: wrap;
     gap: 8px;
     margin: -8px 0 22px;
   }

@@ -275,6 +275,9 @@
             <button class="icon-btn light" class:on={app.lyricsOpen} onclick={() => (app.lyricsOpen = !app.lyricsOpen)} aria-label="Lyrics" aria-pressed={app.lyricsOpen} title="Lyrics (Ctrl+L)">
               <Icon name="lyrics" size={20} />
             </button>
+            <button class="icon-btn light up-next" class:on={app.queueOpen} onclick={() => (app.queueOpen = !app.queueOpen)} aria-label="Up Next" aria-pressed={app.queueOpen} title="Up Next (Ctrl+U)">
+              <Icon name="queue" size={20} />
+            </button>
           </div>
         </div>
       </div>
@@ -564,6 +567,13 @@
   }
   .side.end {
     justify-content: flex-end;
+  }
+  /* Desktops open Up Next from the player bar; phones have no other way to it. */
+  .up-next {
+    display: none;
+  }
+  :global(html.phone) .up-next {
+    display: grid;
   }
   .icon-btn.light {
     color: rgba(255, 255, 255, 0.85);

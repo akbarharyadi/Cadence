@@ -1643,8 +1643,9 @@ class AppState {
     if (this.menu) this.menu = null;
     // Every dialog (the store's and the pages' own) is a Modal: the top-most one closes itself.
     else if (closeTopModal()) return true;
-    else if (this.nowPlayingOpen) this.nowPlayingOpen = false;
+    // On phones Up Next opens over Now Playing, so it closes first.
     else if (this.queueOpen) this.queueOpen = false;
+    else if (this.nowPlayingOpen) this.nowPlayingOpen = false;
     // A song list in selection mode leaves it before the page goes back.
     else if (leaveSelection()) return true;
     else if (this.history.length > 0) this.back();

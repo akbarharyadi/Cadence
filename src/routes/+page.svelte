@@ -399,7 +399,7 @@
     </main>
     {#if gutter > 0}<div class="bar-cap" class:on={scrolled} style="width: {gutter}px" aria-hidden="true" data-tauri-drag-region></div>{/if}
     </div>
-    {#if app.queueOpen}<Guard label="Up Next"><QueuePanel /></Guard>{/if}
+    {#if app.queueOpen && !phone}<Guard label="Up Next"><QueuePanel /></Guard>{/if}
   </div>
   {#if playerAt === "bottom"}<PlayerBar placement="bottom" />{/if}
   {#if phone}<PlayerBar placement="dock" />{/if}
@@ -407,6 +407,8 @@
 </div>
 
 {#if app.nowPlayingOpen}<Guard label="Now Playing" overlay onclose={() => (app.nowPlayingOpen = false)}><NowPlaying /></Guard>{/if}
+<!-- Phones: Up Next is a full-screen sheet over everything, Now Playing included. -->
+{#if app.queueOpen && phone}<Guard label="Up Next" overlay onclose={() => (app.queueOpen = false)}><QueuePanel /></Guard>{/if}
 <ContextMenu />
 <AppKeys />
 {#if app.picker}<PlaylistPicker />{/if}
