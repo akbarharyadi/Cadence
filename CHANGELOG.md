@@ -2,6 +2,13 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.3.2 (2026-11-24)
+
+- **Up Next on the phone.** Now Playing has an Up Next button next to Lyrics. The queue opens full screen: tap a
+  song to play it, tap × to take it out, and Back closes it.
+- **Playlists are easier to find on the phone.** Listen Now has a Playlists button, and the Library tab now shows
+  your playlists first.
+
 ## 0.3.1 (2026-11-18)
 
 - **Louder with Sound Check.** Songs now play at the level of most streaming apps (−14 LUFS) instead of the
