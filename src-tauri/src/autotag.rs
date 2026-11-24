@@ -21,6 +21,8 @@ use crate::ctx::Ctx;
 use crate::library::Track;
 use crate::state::AppState;
 
+mod artist_songs;
+
 /// What the catalogue says about a song.
 #[derive(Debug, Clone)]
 pub struct Found {
@@ -524,11 +526,11 @@ fn by_credits(client: &reqwest::blocking::Client, want: &Want) -> Vec<Candidate>
     let close = |c: &Candidate| (c.duration - want.duration).abs() < 3.0;
     let known = |out: &[Candidate], c: &Candidate| out.iter().any(|o| norm(&o.title) == norm(&c.title) && (o.duration - c.duration).abs() < 2.0);
     let mut out: Vec<Candidate> = Vec::new();
-    for country in ["US", "JP"] {
-        for c in itunes_candidates(client, &term, country, 50).unwrap_or_default() {
-            if close(&c) && !known(&out, &c) {
-                out.push(c);
-            }
+    let searched = ["US", "JP"].into_iter().flat_map(|country| itunes_candidates(client, &term, country, 50).unwrap_or_default());
+    // A search for the name lists only the artist's best-known 50 songs: their whole list too.
+    for c in searched.chain(artist_songs::by_artists(client, &want.credit)) {
+        if close(&c) && !known(&out, &c) {
+            out.push(c);
         }
     }
     let mut deezer: Vec<(Candidate, u64)> = deezer_candidates(client, &term, 50)
@@ -551,7 +553,13 @@ fn itunes_candidates(client: &reqwest::blocking::Client, term: &str, country: &s
         "https://itunes.apple.com/search?media=music&entity=song&limit={limit}&country={country}&term={}",
         urlencoding::encode(term)
     );
-    let s: Search = client.get(&url).send().ok()?.json().ok()?;
+    itunes_songs(client, &url, country)
+}
+
+/// The songs an iTunes search or lookup `url` answers with (other kinds of results, such as the
+/// artist a lookup starts with, are left out); None when it can't be reached.
+fn itunes_songs(client: &reqwest::blocking::Client, url: &str, country: &str) -> Option<Vec<Candidate>> {
+    let s: Search = client.get(url).send().ok()?.json().ok()?;
     Some(
         s.results
             .into_iter()
@@ -1324,6 +1332,20 @@ mod tests {
         assert_eq!(found[0].title, "Dancing Through Fantasies");
         assert!(found[0].likely);
         assert_eq!(found.iter().filter(|c| c.likely).count(), 1, "the instrumental isn't the song");
+    }
+
+    /// Needs the internet: 「宝石」 tagged with its English title is found among all of 幾田りら's
+    /// songs (a search for her name lists only 50, without it).
+    #[test]
+    #[ignore]
+    fn finds_a_translated_title_among_all_the_artists_songs() {
+        let t = Track { title: "Gemstone".into(), artist: "幾田りら".into(), duration: 255.5, ..Default::default() };
+        let found = candidates(&t, &search_term(&t)).unwrap();
+        for c in &found {
+            println!("{} | {} | {} | {} | {} | likely {}", c.title, c.artist, c.album, c.duration, c.source, c.likely);
+        }
+        let first = found.first().expect("a result");
+        assert_eq!((first.title.as_str(), first.artist.as_str(), first.likely), ("宝石", "幾田りら", true));
     }
 
     #[test]
