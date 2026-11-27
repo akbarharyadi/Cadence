@@ -2148,6 +2148,7 @@ fn profile(state: &AppState) -> crate::ai::Profile {
         }
         (m, h.stats().plays)
     };
+    let marks = state.marks.lock().view();
     let lib = state.library.lock();
     let track = |id: &str| lib.by_id.get(id).map(|&i| &lib.snapshot.tracks[i]);
     let m: Vec<_> = month.iter().filter_map(|(id, &n)| track(id).map(|t| (t, n))).collect();
@@ -2168,6 +2169,7 @@ fn profile(state: &AppState) -> crate::ai::Profile {
             let n = all.get(&t.id).copied().unwrap_or(0) + 1;
             genres_of(&t.genre).map(move |g| (g, n))
         })),
+        favorites: crate::mixes::discover::favorites(&lib.snapshot.tracks, &marks, &all),
     }
 }
 
@@ -2401,22 +2403,37 @@ fn recommend_now(ctx: &Ctx, basis: &str, value: &str) -> Result<crate::ai::Recom
     let profile = profile(state);
     let input = dj_input(state, value);
     let library = state.library.lock().snapshot.tracks.clone();
-    let mut owned: Vec<String> = library.iter().map(|t| t.artist.clone()).collect();
-    owned.sort();
-    owned.dedup();
+    // The artists played most first: what the AI is told the library has (it can't take them all).
+    let plays = state.history.lock().stats().plays;
+    let owned = crate::mixes::discover::artists_by_plays(&library, &plays);
     let seen_file = state.data_dir.join("ai-recommend-seen.json");
     let mut seen = seen_songs(&state.data_dir);
-    let before: Vec<String> = seen.iter().rev().take(60).map(|k| k.replacen('|', " - ", 1)).collect();
-    let known: HashSet<&str> = seen.iter().map(String::as_str).collect();
-    let picks = crate::ai::recommend(&input.settings, basis, value, &input.taste, &profile, &owned, &before)?;
-    let fresh: Vec<_> = picks
-        .into_iter()
-        .filter(|d| !known.contains(seen_key(d).as_str()) || d.rating >= crate::ai::REPEAT_AT)
-        .collect();
-    let picks = crate::catalog::check(fresh, &library);
-    if picks.is_empty() {
-        return Err("Everything the DJ found you already have, or it suggested before. Try again or ask another way.".into());
+    let mut before: Vec<String> = seen.iter().rev().take(60).map(|k| k.replacen('|', " - ", 1)).collect();
+    let known: HashSet<String> = seen.iter().cloned().collect();
+    let mut picks: Vec<crate::ai::Discovery> = Vec::new();
+    let mut failed = None;
+    // The filters (owned, suggested before, not in the catalogues) can leave few: then it asks once
+    // more, telling it what it suggested already.
+    for _ in 0..crate::mixes::discover::ROUNDS {
+        let found = match crate::ai::recommend(&input.settings, basis, value, &input.taste, &profile, &owned, &before) {
+            Ok(f) => f,
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        };
+        before.extend(found.iter().map(|d| format!("{} - {}", d.artist, d.title)));
+        let fresh: Vec<_> = found.into_iter().filter(|d| !known.contains(&seen_key(d)) || d.rating >= crate::ai::REPEAT_AT).collect();
+        picks.extend(crate::catalog::check(fresh, &library));
+        picks = crate::ai::distinct_picks(picks);
+        if picks.len() >= crate::mixes::discover::ENOUGH_PICKS {
+            break;
+        }
     }
+    if picks.is_empty() {
+        return Err(failed.unwrap_or_else(|| "Everything the DJ found you already have, or it suggested before. Try again or ask another way.".into()));
+    }
+    picks.sort_by(|a, b| b.score().cmp(&a.score()));
     for d in &picks {
         let k = seen_key(d);
         if !seen.contains(&k) {

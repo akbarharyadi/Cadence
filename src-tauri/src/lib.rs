@@ -28,6 +28,7 @@ mod lyricsfile;
 mod translate;
 mod marks;
 mod media;
+mod mixes;
 mod musicbrainz;
 mod net;
 mod romanize;

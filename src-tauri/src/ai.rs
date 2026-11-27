@@ -884,6 +884,8 @@ pub struct Profile {
     pub month_songs: Vec<Count>,
     pub artists: Vec<Count>,
     pub genres: Vec<Count>,
+    /// Favourite songs ("Artist - Title"): hearted or rated 4 stars or more, most played first.
+    pub favorites: Vec<String>,
 }
 
 /// The last Discover search and what it found (kept in ai-recommend.json).
@@ -902,9 +904,9 @@ pub struct RecommendCache {
 pub const REPEAT_AT: u8 = 85;
 
 impl Discovery {
-    /// Discover's order: how close it is, and how well it's rated.
+    /// Discover's order: mostly how close it is to the listener's songs, then how well it's rated.
     pub fn score(&self) -> u32 {
-        self.similarity as u32 * 6 + self.rating as u32 * 4
+        self.similarity as u32 * 8 + self.rating as u32 * 2
     }
 }
 
@@ -943,18 +945,22 @@ songs. similarity: how close it is to this month's listening."
     let prompt = format!(
         "Now: {now}.\nLISTENER (all time):\n{taste}\n\
 THIS MONTH (last 30 days): top artists: {ma}. Top genres: {mg}. Top songs: {ms}.\n\
-Artists already in their library: {artists}\n{before}\nREQUEST: {ask}\n\n\
-Suggest 15 real songs NOT in their library (not even on an album they have). Search the web for recent releases \
-(this year and last) and include several. Only real, existing songs, credited to the right artist. similarity: a whole \
-number from 0 to 100. like: the one song (\"Artist - Title\") or artist from their listening above that it is most \
-like. rating: how well listeners and critics rate the song, 0–100, from what you find on the web (charts, \
-streams, reviews); prefer well-rated songs. why: at most 12 words.\n\
+Their favourite songs: {fav}.\n\
+Artists in their library, most played first ({owned_n} in all): {artists}\n{before}\nREQUEST: {ask}\n\n\
+Suggest 15 real songs NOT in their library (not even on an album they have): they likely own the best-known songs \
+of the artists listed first, so prefer songs they wouldn't have. Choose by how close each is to their top and \
+favourite songs, whatever the year; at most 3 may be recent releases (this year and last), found on the web. Only \
+real, existing songs, credited to the right artist. similarity: a whole number from 0 to 100. like: the one song \
+(\"Artist - Title\") or artist from their listening above that it is most like. rating: how well listeners and \
+critics rate the song, 0–100 (charts, streams, reviews). why: at most 12 words.\n\
 Return JSON only: {{\"picks\":[{{\"artist\":\"\",\"title\":\"\",\"similarity\":0,\"rating\":0,\"like\":\"\",\"why\":\"\"}}]}}",
         now = now_words(),
-        ma = counts(&p.month_artists, 10),
+        ma = counts(&p.month_artists, 15),
         mg = counts(&p.month_genres, 6),
-        ms = counts(&p.month_songs, 12),
-        artists = owned_artists.iter().take(80).map(String::as_str).collect::<Vec<_>>().join(", "),
+        ms = counts(&p.month_songs, 25),
+        fav = if p.favorites.is_empty() { "none marked".to_string() } else { p.favorites.join("; ") },
+        owned_n = owned_artists.len(),
+        artists = owned_artists.iter().take(crate::mixes::discover::OWNED_ARTISTS).map(String::as_str).collect::<Vec<_>>().join(", "),
         before = if before.is_empty() {
             String::new()
         } else {
