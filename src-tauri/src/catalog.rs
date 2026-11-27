@@ -52,9 +52,17 @@ fn spellings<'a>(first: &'a str, other: &'a [String]) -> impl Iterator<Item = &'
     std::iter::once(first).chain(other.iter().map(String::as_str))
 }
 
-/// The library track is by the suggestion's artist, under any of the artist's names.
+/// The library track is by the suggestion's artist, under any of the artist's names: the ones the
+/// catalogue gave, and the ones the library's artist identity knows (藍井エイル is "Eir Aoi", which
+/// the catalogue may not say when its Japanese store doesn't list the song).
 fn by(d: &Discovery, t: &Track) -> bool {
-    spellings(&d.artist, &d.other_names.artists).any(|a| same_artist(&t.artist, a) || same_artist(&t.album_artist, a))
+    let ids = crate::identity::current();
+    spellings(&d.artist, &d.other_names.artists).any(|a| {
+        same_artist(&t.artist, a)
+            || same_artist(&t.album_artist, a)
+            || ids.same_artist(&t.artist, a)
+            || (!t.album_artist.is_empty() && ids.same_artist(&t.album_artist, a))
+    })
 }
 
 /// Whether the library already has this song (same title, a shared artist, under any of their names).
@@ -322,6 +330,16 @@ mod tests {
         blue.other_names.albums = vec!["Where Our Blue Is - Single".into()];
         assert!(album_owned(&blue, &lib));
         assert!(still_new(vec![kick, blue, pick("Uru", "アンビバレント")], &lib).len() == 1);
+    }
+
+    #[test]
+    fn spots_songs_by_an_artist_the_library_knows_by_another_name() {
+        crate::identity::set_for_test(Some(crate::identity::Identity::from_pairs(&[("藍井エイル", "Eir Aoi")])));
+        let lib = vec![track("IGNITE", "藍井エイル")];
+        let d = pick("Eir Aoi", "IGNITE");
+        assert!(owned(&d, &lib));
+        assert!(still_new(vec![d, pick("Eir Aoi", "INNOCENCE")], &lib).len() == 1);
+        crate::identity::set_for_test(None);
     }
 
     #[test]
