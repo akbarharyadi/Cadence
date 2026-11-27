@@ -2,6 +2,13 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.3.6 (2026-11-28)
+
+- **Discover suggests songs that fit what you really play.** It now tells the AI which artists you play most (before,
+  only the first names alphabetically), your favorite songs (hearted or rated 4 stars or more) and more of your
+  month's top songs. It picks the closest matches first, with only a few new releases, and when too many picks are
+  songs you already have it asks once more instead of showing a short list.
+
 ## 0.3.5 (2026-11-28)
 
 - **Sync with phone.** Keep music from your computer on your phone. Right-click a playlist, album or artist and
