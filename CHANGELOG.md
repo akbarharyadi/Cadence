@@ -2,6 +2,11 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.3.4 (2026-11-28)
+
+- **Discover no longer suggests songs you already have under another name of the artist.** A pick credited to
+  “Eir Aoi” is now recognised as the 藍井エイル song in your library, and it disappears from today's picks.
+
 ## 0.3.3 (2026-11-24)
 
 - **Fix song info finds songs tagged with a translated title.** A song the catalogue lists under its original
