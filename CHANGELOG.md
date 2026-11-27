@@ -2,6 +2,16 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.3.5 (2026-11-28)
+
+- **Sync with phone.** Keep music from your computer on your phone. Right-click a playlist, album or artist and
+  pick “Keep on Phone”, or keep your 100, 200 or 500 most played songs. Turn on Settings › Sync with phone on the
+  computer and pair your phone once with the 6-digit code it shows; then tap Sync now on the phone (Settings ›
+  Sync with computer). Songs are copied as they are, at full quality, over your home Wi-Fi or over the cable with
+  USB tethering on, and keep copying with the screen off. A sync picks up where it stopped, checks every song,
+  and removes from the phone only songs it copied itself that you no longer chose. Smart playlists and albums
+  stored as one file aren't sent yet.
+
 ## 0.3.4 (2026-11-28)
 
 - **Discover no longer suggests songs you already have under another name of the artist.** A pick credited to
