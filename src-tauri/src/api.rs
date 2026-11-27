@@ -316,6 +316,48 @@ pub fn waveforms_status(_ctx: &Ctx) -> crate::waveform::JobStatus {
     crate::waveform::status()
 }
 
+// ---------- sync with phone (phone::commands) ----------
+
+pub fn phone_summary(ctx: &Ctx) -> Result<crate::phone::Summary, String> {
+    Ok(crate::phone::commands::summary(ctx))
+}
+
+pub fn phone_kept(ctx: &Ctx) -> crate::phone::commands::Kept {
+    crate::phone::commands::kept(ctx)
+}
+
+pub fn phone_keep(ctx: &Ctx, kind: crate::phone::Kind, id: String, keep: bool) {
+    crate::phone::commands::keep(ctx, kind, &id, keep);
+}
+
+pub fn phone_set_top(ctx: &Ctx, top: u32) {
+    crate::phone::commands::set_top(ctx, top);
+}
+
+pub fn phone_service(ctx: &Ctx) -> crate::phone::commands::Service {
+    crate::phone::commands::service(ctx)
+}
+
+pub fn set_phone_sync(ctx: &Ctx, enabled: bool) -> crate::phone::commands::Service {
+    crate::phone::commands::set_enabled(ctx, enabled)
+}
+
+pub fn phone_pair(ctx: &Ctx) -> Result<crate::phone::commands::Service, String> {
+    crate::phone::commands::pair(ctx)
+}
+
+pub fn phone_unpair(ctx: &Ctx, phone_id: String) -> Result<crate::phone::commands::Service, String> {
+    crate::phone::commands::unpair(ctx, &phone_id)
+}
+
+pub fn phone_keys_pause(ctx: &Ctx, paused: bool) {
+    crate::phone::commands::keys_pause(ctx, paused);
+}
+
+pub fn phone_keys_status(_ctx: &Ctx) -> crate::phone::keys::JobStatus {
+    crate::phone::commands::keys_status()
+}
+
 // ---------- sounds like ----------
 
 #[derive(Serialize)]
@@ -994,6 +1036,8 @@ pub struct AppSettings {
     listenbrainz_loved: bool,
     /// New releases by the library's artists are looked up once a day (Discover).
     new_releases_online: bool,
+    /// Paired phones can sync from this computer (a local network port is open).
+    phone_sync: bool,
 }
 
 pub fn get_app_settings(ctx: &Ctx) -> AppSettings {
@@ -1008,6 +1052,7 @@ pub fn get_app_settings(ctx: &Ctx) -> AppSettings {
         artist_names_online: s.artist_names_online,
         listenbrainz_loved: s.listenbrainz_loved,
         new_releases_online: s.new_releases_online,
+        phone_sync: s.phone_sync,
     }
 }
 
@@ -2643,6 +2688,16 @@ macro_rules! cadence_commands {
             plain waveforms_pause(paused: bool) -> ();
             plain waveforms_stop() -> ();
             plain waveforms_status() -> $crate::waveform::JobStatus;
+            blocking phone_summary() -> $crate::phone::Summary;
+            plain phone_kept() -> $crate::phone::commands::Kept;
+            plain phone_keep(kind: $crate::phone::Kind, id: String, keep: bool) -> ();
+            plain phone_set_top(top: u32) -> ();
+            plain phone_service() -> $crate::phone::commands::Service;
+            plain set_phone_sync(enabled: bool) -> $crate::phone::commands::Service;
+            fallible phone_pair() -> $crate::phone::commands::Service;
+            fallible phone_unpair(phone_id: String) -> $crate::phone::commands::Service;
+            plain phone_keys_pause(paused: bool) -> ();
+            plain phone_keys_status() -> $crate::phone::keys::JobStatus;
         }
     };
 }

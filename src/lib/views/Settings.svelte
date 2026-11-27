@@ -5,6 +5,8 @@
   import { updates } from "#lib/updates.svelte.js";
   import AiSettings from "#lib/components/AiSettings.svelte";
   import BackupSettings from "#lib/components/BackupSettings.svelte";
+  import PhoneSyncSettings from "#lib/components/settings/PhoneSyncSettings.svelte";
+  import { onPhone } from "#lib/phoneSync.svelte.js";
   import Icon from "#lib/components/Icon.svelte";
   import ProgressBar from "#lib/components/ui/ProgressBar.svelte";
   import ListenBrainzTools from "#lib/components/ListenBrainzTools.svelte";
@@ -620,6 +622,12 @@
       {#if lbError}<p class="error">{lbError}</p>{/if}
     {/if}
   </section>
+
+  {#if !onPhone}
+    <section>
+      <PhoneSyncSettings />
+    </section>
+  {/if}
 
   <!-- One title row: the search box matches the whole section (backup, restore, snapshots). -->
   <section>

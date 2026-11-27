@@ -2,6 +2,7 @@
   import { artUrl } from "#lib/api.js";
   import Icon from "#lib/components/Icon.svelte";
   import { app } from "#lib/store.svelte.js";
+  import { phoneSync } from "#lib/phoneSync.svelte.js";
   import type { Track } from "#lib/api.js";
 
   /** Every song of the artist, newest album first (the same order as the artist's page). */
@@ -23,6 +24,7 @@
           { label: "Shuffle", icon: "shuffle", action: () => app.shuffleTracks(songsOf(artist)) },
           { label: "Play Next", icon: "playNext", action: () => app.enqueue(songsOf(artist), true) },
           { label: "Add to Queue", icon: "queue", action: () => app.enqueue(songsOf(artist), false) },
+          ...phoneSync.menuItem("artist", artist.name),
           { label: "Go to Artist", icon: "artist", action: () => app.go({ name: "artist", artist: artist.name }) },
           { label: "Change Picture…", icon: "edit", action: () => (app.artistEditing = artist.name) },
         ])}

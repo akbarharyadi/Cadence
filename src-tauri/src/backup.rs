@@ -69,6 +69,9 @@ const WHOLE: &[&str] = &[
     // musicbrainz-artists.json, and search-readings.json are caches built again: not kept.)
     "artist-names.json",
     "artist-images.json",
+    // What to keep on the phone, and the paired phones (their tokens stay in the keyring; the
+    // keys cache, phone-keys.json, is rebuilt).
+    crate::phone::FILE,
     OFFSETS,
 ];
 

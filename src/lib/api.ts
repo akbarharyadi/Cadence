@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import type { PhoneKept, PhoneKind, PhoneService, PhoneSummary } from "#lib/phone.js";
 
 export interface Track {
   id: string;
@@ -911,6 +912,16 @@ export const api = {
   waveformsPause: (paused: boolean) => invoke<void>("waveforms_pause", { paused }),
   waveformsStop: () => invoke<void>("waveforms_stop"),
   waveformsStatus: () => invoke<WaveformJob>("waveforms_status"),
+  /** Sync with phone (src/lib/phone.ts has the shapes). */
+  phoneKept: () => invoke<PhoneKept>("phone_kept"),
+  phoneKeep: (kind: PhoneKind, id: string, keep: boolean) => invoke<void>("phone_keep", { kind, id, keep }),
+  phoneSetTop: (top: number) => invoke<void>("phone_set_top", { top }),
+  phoneSummary: () => invoke<PhoneSummary>("phone_summary"),
+  phoneService: () => invoke<PhoneService>("phone_service"),
+  setPhoneSync: (enabled: boolean) => invoke<PhoneService>("set_phone_sync", { enabled }),
+  phonePair: () => invoke<PhoneService>("phone_pair"),
+  phoneUnpair: (phoneId: string) => invoke<PhoneService>("phone_unpair", { phoneId }),
+  phoneKeysPause: (paused: boolean) => invoke<void>("phone_keys_pause", { paused }),
   aiRecommended: () => invoke<Recommendations>("ai_recommended"),
   /** The suggestions the library still doesn't have (asked again when the library changes). */
   aiStillNew: (picks: NewSong[]) => invoke<NewSong[]>("ai_still_new", { picks }),

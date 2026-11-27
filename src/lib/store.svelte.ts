@@ -145,6 +145,7 @@ import { announceInterrupted } from "./backupNotice";
 import { api, artChanged, artistIndex, db, khz, type Album, type AiMix, type AiSettings, type AttentionState, type DspSettings, type DupGroup, type HealthProgress, type HealthReport, type HistoryStats, type JobProgress, type Mark, type Mix, type Playlist, type SonicStatus, type Snapshot, type Status, type Track, type VoiceBatch, type VoiceJob, type VoiceStatus, type ArtistGroup, type ArtistIdentity, type ArtistNamesStatus, type SearchKeys, type WaveformJob } from "./api";
 import { deviceName } from "./devices";
 import { throttled } from "./throttle";
+import { phoneSync } from "./phoneSync.svelte.js";
 
 /** One album (same name, same folder) shown as several: its songs have different album artists. */
 export interface SplitAlbum {
@@ -920,6 +921,8 @@ class AppState {
   }
 
   async init() {
+    // What's kept on the phone, for the menus (its own module; it loads in the background).
+    phoneSync.start();
     // All at once: each is a round trip to the app, and one after another they hold up the first screen.
     await Promise.all([
       // The queue (thousands of ids) only comes when it changed; until this window has one (from
@@ -1585,6 +1588,7 @@ class AppState {
       { label: "Play Next", icon: "playNext", action: () => this.enqueue(this.albumTracks(album), true) },
       { label: "Add to Queue", icon: "queue", action: () => this.enqueue(this.albumTracks(album), false) },
       { label: "Add to Playlist…", icon: "playlist", action: () => (this.picker = this.albumTracks(album)) },
+      ...phoneSync.menuItem("album", album.id),
       ...(this.albumTracks(album).some((t) => t.cue)
         ? []
         : [{ label: "Edit Album Info…", icon: "edit", action: () => (this.tagEditing = this.albumTracks(album)) }]),

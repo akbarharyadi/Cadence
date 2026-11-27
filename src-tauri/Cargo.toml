@@ -64,6 +64,10 @@ memchr = "2"
 tempfile = "3"
 # Backups of the user data (one zip file); also unpacks the voice models' ONNX Runtime on Windows.
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+# Sync with phone: random pairing codes and tokens, and the computer's name (both already built
+# for other crates).
+getrandom = "0.3"
+gethostname = "1"
 
 # Desktop only: one running window at a time (phones manage that themselves).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
@@ -76,6 +80,9 @@ tauri-plugin-updater = "2.14.0"
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["load-dynamic", "std"] }
 # Removed copies go to the Recycle Bin (Trash), so Undo can bring them back.
 trash = "5.3"
+# Sync with phone: the small local network service the phone pulls its music from (blocking, no
+# async runtime; on only while the listener has Phone sync turned on).
+tiny_http = "0.12"
 
 # Secrets go to each system's own store; Direct output (WASAPI exclusive) is Windows-only.
 [target.'cfg(windows)'.dependencies]

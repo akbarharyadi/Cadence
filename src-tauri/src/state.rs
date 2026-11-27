@@ -105,6 +105,8 @@ pub struct Settings {
     pub device_profiles: bool,
     /// Those, per device (`profiles`).
     pub sound_profiles: crate::profiles::Profiles,
+    /// Sync with phone: the computer answers paired phones on the local network (opens a port).
+    pub phone_sync: bool,
 }
 
 impl Default for Settings {
@@ -133,6 +135,7 @@ impl Default for Settings {
             output_device: None,
             device_profiles: true,
             sound_profiles: Default::default(),
+            phone_sync: false,
         }
     }
 }

@@ -3,6 +3,7 @@
   import { startExport, startExportAll, startImport } from "#lib/playlistTransfer.svelte.js";
   import { MOD } from "#lib/shortcuts.js";
   import { newSmart } from "#lib/smart.js";
+  import { phoneSync } from "#lib/phoneSync.svelte.js";
   import type { Playlist } from "#lib/api.js";
   import { app, type View } from "#lib/store.svelte.js";
   import Icon from "./Icon.svelte";
@@ -122,6 +123,14 @@
             unit: "songs",
             about: "Drawing each song's waveform once for the seek bar, in the background (Settings › Waveform seek bar).",
           }
+        : phoneSync.keysJob
+        ? {
+            label: phoneSync.keysJob.paused ? "Phone songs paused" : "Preparing songs for your phone",
+            done: phoneSync.keysJob.done,
+            total: phoneSync.keysJob.total,
+            unit: "songs",
+            about: "Reading each song kept on the phone once, so the phone can check what it already has (Settings › Sync with phone).",
+          }
         : app.scan
       ? { label: "Importing", ...app.scan, about: "" }
       : app.analysis
@@ -175,7 +184,9 @@
 
   /** Right-click on a playlist. */
   function playlistMenu(e: MouseEvent, p: Playlist) {
-    app.openMenu(e, [{ label: "Export…", icon: "download", action: () => startExport(p) }]);
+    // (A smart playlist's rules are worked out in the window, so the phone can't get it yet.)
+    const phone = p.smart ? [] : phoneSync.menuItem("playlist", p.id);
+    app.openMenu(e, [{ label: "Export…", icon: "download", action: () => startExport(p) }, ...phone]);
   }
 
 </script>

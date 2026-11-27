@@ -31,6 +31,7 @@ mod media;
 mod musicbrainz;
 mod net;
 mod romanize;
+mod phone;
 pub mod playlists;
 mod playlist_io;
 mod profiles;
@@ -160,6 +161,7 @@ pub fn run() {
                 ctx.state.save_settings();
             }
             hub::start_background(&ctx);
+            phone::commands::start_if_on(&ctx);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -364,6 +366,16 @@ pub fn run() {
             commands::waveforms_pause,
             commands::waveforms_stop,
             commands::waveforms_status,
+            commands::phone_summary,
+            commands::phone_kept,
+            commands::phone_keep,
+            commands::phone_set_top,
+            commands::phone_service,
+            commands::set_phone_sync,
+            commands::phone_pair,
+            commands::phone_unpair,
+            commands::phone_keys_pause,
+            commands::phone_keys_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Cadence")
