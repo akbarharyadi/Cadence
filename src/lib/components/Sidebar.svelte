@@ -123,6 +123,14 @@
             unit: "songs",
             about: "Drawing each song's waveform once for the seek bar, in the background (Settings › Waveform seek bar).",
           }
+        : phoneSync.syncJob
+        ? {
+            label: phoneSync.syncJob.paused ? "Sync paused" : "Syncing with your computer",
+            done: phoneSync.syncJob.done,
+            total: phoneSync.syncJob.total,
+            unit: "songs",
+            about: "Copying the music chosen on your computer to this phone (Settings › Sync with computer).",
+          }
         : phoneSync.keysJob
         ? {
             label: phoneSync.keysJob.paused ? "Phone songs paused" : "Preparing songs for your phone",

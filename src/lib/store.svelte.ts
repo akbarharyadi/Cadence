@@ -65,6 +65,8 @@ export interface AndroidBridge {
   storageVolumes?(): string;
   /** The song a file manager asked Cadence to play ("" if none), handed over once. */
   takeOpenedFile?(): string;
+  /** Sync with computer: keeps the copying going with the screen off while `running` (newer app versions). */
+  syncProgress?(running: boolean, text: string, done: number, total: number): void;
 }
 
 /** "album": colours from the song playing; "dark" / "black": the same for every song. */

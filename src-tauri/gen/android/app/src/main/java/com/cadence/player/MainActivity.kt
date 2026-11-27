@@ -241,6 +241,12 @@ class MainActivity : TauriActivity() {
       }
     }
 
+    /** Sync with computer: keeps the copying going with the screen off while `running`. */
+    @JavascriptInterface
+    fun syncProgress(running: Boolean, text: String, done: Int, total: Int) {
+      runCatching { SyncService.report(this@MainActivity, running, text, done, total) }
+    }
+
     @JavascriptInterface
     fun getPlayOnBluetooth(): Boolean = PlaybackService.playOnBluetooth(this@MainActivity)
 

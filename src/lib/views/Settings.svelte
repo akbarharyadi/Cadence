@@ -6,6 +6,7 @@
   import AiSettings from "#lib/components/AiSettings.svelte";
   import BackupSettings from "#lib/components/BackupSettings.svelte";
   import PhoneSyncSettings from "#lib/components/settings/PhoneSyncSettings.svelte";
+  import PhoneLinkSettings from "#lib/components/settings/PhoneLinkSettings.svelte";
   import { onPhone } from "#lib/phoneSync.svelte.js";
   import Icon from "#lib/components/Icon.svelte";
   import ProgressBar from "#lib/components/ui/ProgressBar.svelte";
@@ -623,7 +624,11 @@
     {/if}
   </section>
 
-  {#if !onPhone}
+  {#if onPhone}
+    <section>
+      <PhoneLinkSettings />
+    </section>
+  {:else}
     <section>
       <PhoneSyncSettings />
     </section>

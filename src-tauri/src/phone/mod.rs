@@ -6,10 +6,13 @@
 //! are worked out from that whenever they're needed (`select`), so a kept album or artist includes
 //! songs added later.
 
+pub mod client;
 pub mod commands;
 pub mod keys;
 pub mod manifest;
+pub mod plan;
 pub mod select;
+pub mod sync_job;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod server;
 
@@ -21,6 +24,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::ctx::Ctx;
 use crate::library::Track;
+
+/// The computer's port tried first (then the next few), and the phone's default.
+pub const PORT: u16 = 47300;
 
 /// The file of the listener's choices (in the data folder).
 pub const FILE: &str = "phone.json";

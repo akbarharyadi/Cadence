@@ -88,6 +88,18 @@ favorites, ratings, skip marks, playlists) the same on both devices?
 3. Listening data both ways (mark/skip timestamps, history merge, playlist merge).
 4. Polish: QR code, sync on connect when the phone is charging and on Wi-Fi (setting, off by default).
 
+## As built
+
+- Phase 1 (computer): `src-tauri/src/phone/` `mod.rs` (choices), `select.rs`, `keys.rs`, `manifest.rs`,
+  `server.rs`, `commands.rs`; Settings › Sync with phone; "Keep on Phone" in the playlist, album and artist
+  menus. Smart playlists and single-file (CUE) albums aren't sent yet; the page counts them.
+- Phase 2 (phone): `plan.rs` (what a sync does; only ledger files are ever removed; network paths checked),
+  `client.rs` (pairing, the list, a download resumed from its `.part` file and checked against its key),
+  `sync_job.rs` (the job, free space, a file in the way is never written over), Settings › Sync with computer,
+  and `SyncService.kt` (data-sync foreground service, CPU and Wi-Fi awake, stops itself after 3 hours). The
+  window drives the service from the progress events, so with the screen off its notification may lag; the copying
+  itself doesn't depend on the window. The ledger is `phone-sync.json` (not backed up: it describes this phone).
+
 ## Open points for the owner
 
 - New dependency `tiny_http` on the PC side (and a QR code crate in phase 4).

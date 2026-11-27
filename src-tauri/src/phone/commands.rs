@@ -66,12 +66,71 @@ fn changed(ctx: &Ctx) {
     let _ = std::thread::Builder::new().name("cadence-phone-keys".into()).spawn(move || super::prepare_keys(&ctx));
 }
 
-pub fn keys_pause(ctx: &Ctx, paused: bool) {
-    super::keys::pause(ctx, paused);
+// ---------- the phone's side ----------
+
+/// What the phone's settings show about its computer.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkView {
+    /// This device can sync from a computer (the phone).
+    pub supported: bool,
+    pub paired: bool,
+    pub computer: String,
+    pub address: String,
+    /// Where synced music goes.
+    pub folder: String,
+    pub songs: usize,
+    pub last_sync: u64,
+    pub last_result: String,
 }
 
-pub fn keys_status() -> super::keys::JobStatus {
-    super::keys::status()
+pub fn link_view(ctx: &Ctx) -> LinkView {
+    let l = super::client::load_link();
+    let ledger = super::sync_job::load_ledger(&ctx.state.data_dir);
+    LinkView {
+        supported: super::sync_job::ROOT.is_some(),
+        paired: l.paired(),
+        computer: l.computer,
+        address: l.address,
+        folder: super::sync_job::ROOT.unwrap_or_default().to_string(),
+        songs: ledger.files.len(),
+        last_sync: ledger.last_sync,
+        last_result: ledger.last_result,
+    }
+}
+
+pub fn link_pair(ctx: &Ctx, address: &str, code: &str, name: &str) -> Result<LinkView, String> {
+    super::client::pair(address, code, name)?;
+    Ok(link_view(ctx))
+}
+
+pub fn link_forget(ctx: &Ctx) -> Result<LinkView, String> {
+    super::client::forget()?;
+    Ok(link_view(ctx))
+}
+
+/// Starts a sync. False: one is running already.
+pub fn sync_now(ctx: &Ctx) -> Result<bool, String> {
+    let root = super::sync_job::ROOT.ok_or("Syncing from a computer is done on the phone.")?;
+    std::fs::create_dir_all(root).map_err(|e| format!("Couldn't make the folder {root}: {e}"))?;
+    // The synced music is part of the library: its folder is added unless a music folder has it.
+    let listed = ctx.state.settings.lock().folders.iter().any(|f| std::path::Path::new(root).starts_with(f));
+    if !listed {
+        crate::api::add_folders(ctx, vec![root.to_string()]);
+    }
+    Ok(super::sync_job::start(ctx, root.into()))
+}
+
+pub fn sync_pause(ctx: &Ctx, paused: bool) {
+    super::sync_job::pause(ctx, paused);
+}
+
+pub fn sync_stop(ctx: &Ctx) {
+    super::sync_job::stop(ctx);
+}
+
+pub fn keys_pause(ctx: &Ctx, paused: bool) {
+    super::keys::pause(ctx, paused);
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

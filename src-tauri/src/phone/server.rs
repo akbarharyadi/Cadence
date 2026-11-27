@@ -20,11 +20,9 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
-use super::{computer_name, manifest::Manifest, now};
+use super::{PORT, computer_name, manifest::Manifest, now};
 use crate::ctx::Ctx;
 
-/// The port tried first, then the next few.
-pub const PORT: u16 = 47300;
 const PORT_TRIES: u16 = 10;
 const PAIR_SECS: u64 = 600;
 const PAIR_TRIES: u32 = 5;
@@ -378,7 +376,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("s.flac");
         std::fs::write(&f, b"0123456789").unwrap();
-        *FILES.lock() = Some([("k1".to_string(), f.to_string_lossy().into_owned())].into());
+        FILES.lock().get_or_insert_with(HashMap::new).insert("k1".to_string(), f.to_string_lossy().into_owned());
         let server = Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
         std::thread::spawn(move || {
@@ -397,6 +395,47 @@ mod tests {
         assert_eq!(rest.headers().get("Content-Range").unwrap(), "bytes 4-9/10");
         assert_eq!(rest.bytes().unwrap().as_ref(), b"456789");
         assert_eq!(http.get(url("..%2F..%2Fsecret")).send().unwrap().status().as_u16(), 404);
+    }
+
+    #[test]
+    fn the_phone_resumes_a_cut_off_song_and_throws_away_a_damaged_one() {
+        use crate::phone::{client, manifest::Entry};
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("song.flac");
+        let bytes: Vec<u8> = (0..1_000_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        std::fs::write(&source, &bytes).unwrap();
+        let key = crate::phone::keys::file_key(&source).unwrap();
+        FILES.lock().get_or_insert_with(HashMap::new).insert(key.clone(), source.to_string_lossy().into_owned());
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests().take(2) {
+                let k = req.url().trim_start_matches("/song/").to_string();
+                send_song(req, &k);
+            }
+        });
+        let link = client::Link { address: format!("127.0.0.1:{port}"), token: "t".into(), ..Default::default() };
+        let e = Entry { key: key.clone(), size: bytes.len() as u64, title: "Song".into(), ..Default::default() };
+        let http = client::download_client().unwrap();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+
+        // Cut off after 300 KB last time: only the rest comes now.
+        let target = dir.path().join("phone").join("A").join("01 Song.flac");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(client::part_of(&target), &bytes[..300_000]).unwrap();
+        let mut got = 0u64;
+        client::download(&http, &link, &e, &target, &stop, &mut |n| got += n).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        assert!(!client::part_of(&target).exists());
+
+        // A partial file with wrong bytes: the whole song fails its check and is dropped.
+        let other = dir.path().join("phone").join("A").join("02 Song.flac");
+        let mut bad = bytes[..500_000].to_vec();
+        bad[10] ^= 0xff;
+        std::fs::write(client::part_of(&other), &bad).unwrap();
+        let err = client::download(&http, &link, &e, &other, &stop, &mut |_| {}).unwrap_err();
+        assert!(err.contains("damaged"), "{err}");
+        assert!(!other.exists() && !client::part_of(&other).exists());
     }
 
     #[test]

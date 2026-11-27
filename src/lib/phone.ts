@@ -61,5 +61,36 @@ export interface PhoneKeysJob {
   total: number;
 }
 
+/** The phone's side: the computer it's paired with and its last sync. */
+export interface PhoneLink {
+  /** This device syncs from a computer (the phone). */
+  supported: boolean;
+  paired: boolean;
+  computer: string;
+  address: string;
+  /** Where synced music goes on the phone. */
+  folder: string;
+  /** Songs this phone copied from the computer. */
+  songs: number;
+  /** Unix seconds (0: never). */
+  lastSync: number;
+  lastResult: string;
+}
+
+/** A sync on the phone ("phone-sync-progress" events). */
+export interface PhoneSyncJob {
+  running: boolean;
+  paused: boolean;
+  phase: "" | "connecting" | "copying" | "removing";
+  done: number;
+  total: number;
+  bytesDone: number;
+  bytesTotal: number;
+  current: string;
+  /** How the last sync ended, in words. */
+  message: string;
+  failed: boolean;
+}
+
 /** The "most played" counts offered. */
 export const TOP_CHOICES = [0, 100, 200, 500] as const;

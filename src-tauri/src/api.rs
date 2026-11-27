@@ -354,8 +354,28 @@ pub fn phone_keys_pause(ctx: &Ctx, paused: bool) {
     crate::phone::commands::keys_pause(ctx, paused);
 }
 
-pub fn phone_keys_status(_ctx: &Ctx) -> crate::phone::keys::JobStatus {
-    crate::phone::commands::keys_status()
+pub fn phone_link(ctx: &Ctx) -> crate::phone::commands::LinkView {
+    crate::phone::commands::link_view(ctx)
+}
+
+pub fn phone_link_pair(ctx: &Ctx, address: String, code: String, name: String) -> Result<crate::phone::commands::LinkView, String> {
+    crate::phone::commands::link_pair(ctx, &address, &code, &name)
+}
+
+pub fn phone_link_forget(ctx: &Ctx) -> Result<crate::phone::commands::LinkView, String> {
+    crate::phone::commands::link_forget(ctx)
+}
+
+pub fn phone_sync_now(ctx: &Ctx) -> Result<bool, String> {
+    crate::phone::commands::sync_now(ctx)
+}
+
+pub fn phone_sync_pause(ctx: &Ctx, paused: bool) {
+    crate::phone::commands::sync_pause(ctx, paused);
+}
+
+pub fn phone_sync_stop(ctx: &Ctx) {
+    crate::phone::commands::sync_stop(ctx);
 }
 
 // ---------- sounds like ----------
@@ -2697,7 +2717,12 @@ macro_rules! cadence_commands {
             fallible phone_pair() -> $crate::phone::commands::Service;
             fallible phone_unpair(phone_id: String) -> $crate::phone::commands::Service;
             plain phone_keys_pause(paused: bool) -> ();
-            plain phone_keys_status() -> $crate::phone::keys::JobStatus;
+            plain phone_link() -> $crate::phone::commands::LinkView;
+            blocking phone_link_pair(address: String, code: String, name: String) -> $crate::phone::commands::LinkView;
+            fallible phone_link_forget() -> $crate::phone::commands::LinkView;
+            fallible phone_sync_now() -> bool;
+            plain phone_sync_pause(paused: bool) -> ();
+            plain phone_sync_stop() -> ();
         }
     };
 }
