@@ -2,6 +2,12 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.3.7 (2026-11-28)
+
+- **Sync with computer works on Android.** Android doesn't let an app make a half-finished file in the Music folder,
+  so every sync stopped at the first song with “Operation not permitted”. Songs are now downloaded in Cadence's
+  own folder, checked, and only then put in Music › Cadence, so the library never sees half a song.
+
 ## 0.3.6 (2026-11-28)
 
 - **Discover suggests songs that fit what you really play.** It now tells the AI which artists you play most (before,
