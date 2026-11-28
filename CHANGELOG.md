@@ -2,6 +2,12 @@
 
 Each release's section here becomes the "What's new" of its GitHub release.
 
+## 0.3.8 (2026-11-28)
+
+- **Pair your phone with a QR code.** On the computer, Settings › Sync with phone › Pair a phone shows a QR code. Point
+  the phone's camera at it and tap to open it in Cadence: it asks “Pair with this computer?” and, on yes, pairs. No
+  more typing the address and code (you still can). Only a computer on your own network is accepted.
+
 ## 0.3.7 (2026-11-28)
 
 - **Sync with computer works on Android.** Android doesn't let an app make a half-finished file in the Music folder,
