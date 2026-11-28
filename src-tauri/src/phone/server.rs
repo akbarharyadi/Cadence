@@ -419,23 +419,26 @@ mod tests {
         let http = client::download_client().unwrap();
         let stop = std::sync::atomic::AtomicBool::new(false);
 
-        // Cut off after 300 KB last time: only the rest comes now.
-        let target = dir.path().join("phone").join("A").join("01 Song.flac");
-        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::fs::write(client::part_of(&target), &bytes[..300_000]).unwrap();
+        // Cut off after 300 KB last time: only the rest comes now, then the song is put in its place.
+        let parts = dir.path().join("app").join("phone-parts");
+        let part = client::part_in(&parts, &key);
+        std::fs::create_dir_all(&parts).unwrap();
+        std::fs::write(&part, &bytes[..300_000]).unwrap();
         let mut got = 0u64;
-        client::download(&http, &link, &e, &target, &stop, &mut |n| got += n).unwrap();
+        client::download(&http, &link, &e, &part, &stop, &mut |n| got += n).unwrap();
+        assert_eq!(got, bytes.len() as u64, "the first 300 KB were kept, the rest came");
+        let target = dir.path().join("phone").join("A").join("01 Song.flac");
+        client::install(&part, &target, "Song").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), bytes);
-        assert!(!client::part_of(&target).exists());
+        assert!(!part.exists());
 
         // A partial file with wrong bytes: the whole song fails its check and is dropped.
-        let other = dir.path().join("phone").join("A").join("02 Song.flac");
         let mut bad = bytes[..500_000].to_vec();
         bad[10] ^= 0xff;
-        std::fs::write(client::part_of(&other), &bad).unwrap();
-        let err = client::download(&http, &link, &e, &other, &stop, &mut |_| {}).unwrap_err();
+        std::fs::write(&part, &bad).unwrap();
+        let err = client::download(&http, &link, &e, &part, &stop, &mut |_| {}).unwrap_err();
         assert!(err.contains("damaged"), "{err}");
-        assert!(!other.exists() && !client::part_of(&other).exists());
+        assert!(!part.exists());
     }
 
     #[test]

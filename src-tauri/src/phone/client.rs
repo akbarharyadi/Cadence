@@ -150,11 +150,55 @@ pub fn fetch_list(link: &Link) -> Result<Manifest, String> {
     serde_json::from_slice(&bytes).map_err(|_| "The computer's music list wasn't understood. Update Cadence on both.".into())
 }
 
-/// The file a download goes to until it's whole and checked.
-pub fn part_of(target: &Path) -> PathBuf {
-    let mut name = target.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-    name.push(".part");
-    target.with_file_name(name)
+/// The file a song is downloaded to until it's whole and checked: in the app's own folder, never in
+/// the shared Music folder (Android refuses any file there that isn't named like audio, so a
+/// `.part` file can't be made in it).
+pub fn part_in(dir: &Path, key: &str) -> PathBuf {
+    let safe: String = key.chars().filter(char::is_ascii_alphanumeric).take(64).collect();
+    dir.join(format!("{safe}.part"))
+}
+
+/// What a song is called while it's being copied into its place: it still ends in the song's own
+/// extension (Android only accepts audio names in the Music folder). `sweep_copying` removes
+/// the ones an interrupted copy left.
+const COPYING: &str = ".syncing";
+
+fn copying_name(target: &Path) -> PathBuf {
+    let stem = target.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    match target.extension() {
+        Some(ext) => target.with_file_name(format!("{stem}{COPYING}.{}", ext.to_string_lossy())),
+        None => target.with_file_name(format!("{stem}{COPYING}")),
+    }
+}
+
+/// Puts a finished download in its place: copied under a temporary name, checked by size, then
+/// renamed, so the library never sees half a song under a real name. The download is removed.
+pub fn install(part: &Path, target: &Path, title: &str) -> Result<(), String> {
+    if let Some(dir) = target.parent() {
+        std::fs::create_dir_all(dir).map_err(|err| format!("Couldn't make the folder {}: {err}", dir.display()))?;
+    }
+    let tmp = copying_name(target);
+    let want = std::fs::metadata(part).map(|m| m.len()).map_err(|e| e.to_string())?;
+    let done = std::fs::copy(part, &tmp).and_then(|n| if n == want { std::fs::rename(&tmp, target) } else { Err(std::io::Error::other("short copy")) });
+    if let Err(err) = done {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Couldn't put “{title}” in {}: {err}", target.display()));
+    }
+    let _ = std::fs::remove_file(part);
+    Ok(())
+}
+
+/// Removes the temporary copies an interrupted sync left below `root` (only names ending in
+/// `.syncing.<ext>`, which only Cadence makes).
+pub fn sweep_copying(root: &Path) -> usize {
+    let mut n = 0;
+    for entry in walkdir::WalkDir::new(root).max_depth(4).into_iter().filter_map(Result::ok).filter(|e| e.file_type().is_file()) {
+        let stem = entry.path().file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        if stem.ends_with(COPYING) && std::fs::remove_file(entry.path()).is_ok() {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// The shared client for downloads (no overall time limit: a song can take minutes).
@@ -166,32 +210,31 @@ pub fn download_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Downloads `e` to `target`: into its `.part` file (continuing one left by an earlier try), then,
-/// once it has every byte and its key matches, renamed into place. `progress` gets the bytes as
-/// they arrive; `stop` ends it early (the `.part` stays for next time).
-pub fn download(client: &reqwest::blocking::Client, link: &Link, e: &Entry, target: &Path, stop: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<(), String> {
-    let part = part_of(target);
-    if let Some(dir) = target.parent() {
+/// Downloads `e` into `part` (continuing the bytes an earlier try left there) and checks it: every
+/// byte, and its key. Ok: `part` is the whole song. `progress` gets the bytes as they arrive;
+/// `stop` ends it early (what came stays for next time).
+pub fn download(client: &reqwest::blocking::Client, link: &Link, e: &Entry, part: &Path, stop: &AtomicBool, progress: &mut dyn FnMut(u64)) -> Result<(), String> {
+    if let Some(dir) = part.parent() {
         std::fs::create_dir_all(dir).map_err(|err| format!("Couldn't make the folder {}: {err}", dir.display()))?;
     }
-    let mut have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    let mut have = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
     if have > e.size {
-        let _ = std::fs::remove_file(&part);
+        let _ = std::fs::remove_file(part);
         have = 0;
     }
     if have < e.size {
-        fetch(client, link, e, &part, have, stop, progress)?;
+        fetch(client, link, e, part, have, stop, progress)?;
     }
     if stop.load(Ordering::SeqCst) {
         return Err("Stopped.".into());
     }
-    let got = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
-    let key = super::keys::file_key(&part).map_err(|err| err.to_string())?;
+    let got = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
+    let key = super::keys::file_key(part).map_err(|err| err.to_string())?;
     if got != e.size || key != e.key {
-        let _ = std::fs::remove_file(&part);
+        let _ = std::fs::remove_file(part);
         return Err(format!("“{}” arrived damaged; it's fetched again next time.", e.title));
     }
-    std::fs::rename(&part, target).map_err(|err| format!("Couldn't put “{}” in place: {err}", e.title))
+    Ok(())
 }
 
 /// Appends the bytes from `from` on to `part`, bounded by the song's size.
@@ -253,7 +296,32 @@ mod tests {
     }
 
     #[test]
-    fn a_part_file_sits_next_to_the_song() {
-        assert_eq!(part_of(Path::new("/m/A/01 One.flac")), Path::new("/m/A/01 One.flac.part"));
+    fn a_download_waits_in_the_apps_own_folder_under_its_key() {
+        assert_eq!(part_in(Path::new("/data/phone-parts"), "ab12/../cd"), Path::new("/data/phone-parts/ab12cd.part"));
+    }
+
+    #[test]
+    fn a_finished_song_is_copied_in_under_an_audio_name_and_the_download_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("parts").join("k.part");
+        std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+        std::fs::write(&part, b"whole song").unwrap();
+        let target = dir.path().join("Music").join("A").join("01 One.flac");
+        install(&part, &target, "One").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"whole song");
+        assert!(!part.exists());
+        assert!(!copying_name(&target).exists());
+        assert_eq!(copying_name(&target).file_name().unwrap(), "01 One.syncing.flac");
+    }
+
+    #[test]
+    fn what_an_interrupted_copy_left_is_swept_and_songs_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = dir.path().join("A").join("B");
+        std::fs::create_dir_all(&album).unwrap();
+        std::fs::write(album.join("01 One.flac"), b"x").unwrap();
+        std::fs::write(album.join("02 Two.syncing.flac"), b"half").unwrap();
+        assert_eq!(sweep_copying(dir.path()), 1);
+        assert!(album.join("01 One.flac").exists() && !album.join("02 Two.syncing.flac").exists());
     }
 }

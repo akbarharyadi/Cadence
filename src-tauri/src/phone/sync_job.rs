@@ -136,6 +136,9 @@ fn run(ctx: &Ctx, root: &Path) -> Result<(String, bool), String> {
     }
     let list = client::fetch_list(&link)?;
     let data_dir = ctx.state.data_dir.clone();
+    // What an interrupted sync left: temporary copies in the sync folder, downloads nobody wants.
+    client::sweep_copying(root);
+    prune_parts(&parts_dir(&data_dir), &list.songs);
     let mut ledger = load_ledger(&data_dir);
     let there = |rel: &str, size: u64| plan::safe_rel(root, rel).and_then(|p| std::fs::metadata(p).ok()).is_some_and(|m| m.len() == size);
     let p = plan::plan(&list, &ledger, there);
@@ -178,6 +181,7 @@ struct Copied {
 
 fn copy_all(ctx: &Ctx, link: &Link, root: &Path, get: &[Entry], ledger: &mut Ledger) -> Result<Copied, String> {
     let http = client::download_client()?;
+    let parts = parts_dir(&ctx.state.data_dir);
     let mut out = Copied { done: 0, failed: 0, last_error: None };
     let mut in_a_row = 0;
     let mut last_report = Instant::now();
@@ -197,7 +201,7 @@ fn copy_all(ctx: &Ctx, link: &Link, root: &Path, get: &[Entry], ledger: &mut Led
                 report(ctx);
             }
         };
-        match copy_one(&http, link, root, e, &mut progress) {
+        match copy_one(&http, link, (root, &parts), e, &mut progress) {
             Ok(held) => {
                 ledger.files.insert(e.key.clone(), held);
                 // After every song: a sync cut short keeps what it copied.
@@ -224,15 +228,35 @@ fn copy_all(ctx: &Ctx, link: &Link, root: &Path, get: &[Entry], ledger: &mut Led
     Ok(out)
 }
 
-/// Copies one song; its ledger entry.
-fn copy_one(http: &reqwest::blocking::Client, link: &Link, root: &Path, e: &Entry, progress: &mut dyn FnMut(u64)) -> Result<Held, String> {
+/// Where unfinished downloads wait: the app's own folder (the Music folder takes only audio names).
+fn parts_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("phone-parts")
+}
+
+/// Copies one song (`places`: the sync folder, and where downloads wait); its ledger entry.
+fn copy_one(http: &reqwest::blocking::Client, link: &Link, places: (&Path, &Path), e: &Entry, progress: &mut dyn FnMut(u64)) -> Result<Held, String> {
+    let (root, parts) = places;
     let wanted = plan::safe_rel(root, &e.path).ok_or_else(|| format!("“{}” has a name the phone can't use.", e.title))?;
     let target = match place_for(&wanted, e) {
         Place::Adopt(path) => return held(root, &path, e.size),
         Place::Write(path) => path,
     };
-    client::download(http, link, e, &target, &STOP, progress)?;
+    let part = client::part_in(parts, &e.key);
+    client::download(http, link, e, &part, &STOP, progress)?;
+    client::install(&part, &target, &e.title)?;
     held(root, &target, e.size)
+}
+
+/// Removes unfinished downloads of songs no longer on the list (and any old ones past a week).
+fn prune_parts(parts: &Path, list: &[Entry]) {
+    let keep: std::collections::HashSet<PathBuf> = list.iter().map(|e| client::part_in(parts, &e.key)).collect();
+    let Ok(dir) = std::fs::read_dir(parts) else { return };
+    for f in dir.filter_map(Result::ok) {
+        let old = f.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > Duration::from_secs(7 * 86_400));
+        if !keep.contains(&f.path()) || old {
+            let _ = std::fs::remove_file(f.path());
+        }
+    }
 }
 
 enum Place {
