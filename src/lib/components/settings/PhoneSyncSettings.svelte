@@ -82,9 +82,16 @@
       <button class="pill ghost" onclick={() => run(api.phonePair)} disabled={busy}>Pair a phone</button>
     </div>
     {#if service.code}
-      <p class="code" role="status">
-        On your phone, enter <span class="mono big">{service.code}</span> to pair. It works once, until {time(service.codeUntil)}.
-      </p>
+      <div class="pairing" role="status">
+        {#if service.qr}
+          <!-- Drawn by the app itself (a QR code image), never from outside. -->
+          <div class="qr" aria-label="QR code to pair your phone">{@html service.qr}</div>
+        {/if}
+        <p class="code">
+          Open your phone's camera and point it at this code, then tap to open it in Cadence. Or in Cadence on the phone type
+          the address and <span class="mono big">{service.code}</span>. It works once, until {time(service.codeUntil)}.
+        </p>
+      </div>
     {/if}
     {#each service.phones as p (p.id)}
       <div class="row phone">
@@ -112,7 +119,7 @@
   </p>
 {/if}
 {#if phoneSync.keysJob}
-  <button class="link small" onclick={() => api.phoneKeysPause(!phoneSync.keysJob?.paused)}>{phoneSync.keysJob.paused ? "Resume preparing" : "Pause preparing"}</button>
+  <button class="link small" onclick={() => api.phonePause(!phoneSync.keysJob?.paused)}>{phoneSync.keysJob.paused ? "Resume preparing" : "Pause preparing"}</button>
 {/if}
 
 <style>
@@ -158,8 +165,27 @@
     letter-spacing: 0.08em;
     color: var(--text);
   }
+  .pairing {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin: 8px 0;
+  }
+  .qr {
+    flex: none;
+    width: 168px;
+    height: 168px;
+    padding: 8px;
+    border-radius: var(--r-sm);
+    background: #fff;
+  }
+  .qr :global(svg) {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
   .code {
-    margin: 6px 0 8px;
+    margin: 0;
     color: var(--text-2);
   }
   .what {

@@ -301,7 +301,9 @@ computer). While it's on, the computer listens on a local network port and answe
 networks (your home Wi-Fi, USB tethering), and only phones you paired with a one-time 6-digit code; each paired
 phone gets a random token, of which only a fingerprint is kept, in the system's credential store. A paired phone
 can ask for the list of songs you chose to keep on it (names, sizes, where they go) and for those songs' files,
-nothing else. Nothing goes over the internet.
+nothing else. Pairing shows a QR code with the computer's local address and the one-time code; the phone's camera
+opens it in Cadence, which asks before pairing and takes only an address on the phone's own network. Nothing goes
+over the internet.
 
 The website counts visits with Cloudflare Web Analytics, which uses no cookies and keeps no personal data.
 

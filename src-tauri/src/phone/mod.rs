@@ -10,6 +10,7 @@ pub mod client;
 pub mod commands;
 pub mod keys;
 pub mod manifest;
+pub mod pair_link;
 pub mod plan;
 pub mod select;
 pub mod sync_job;

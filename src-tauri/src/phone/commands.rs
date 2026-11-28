@@ -17,6 +17,8 @@ pub struct Service {
     pub computer: String,
     pub code: Option<String>,
     pub code_until: u64,
+    /// The pairing code as a QR image (SVG), while pairing is open and the address is known.
+    pub qr: Option<String>,
     pub phones: Vec<super::Phone>,
     /// An error from starting it, in words.
     pub error: String,
@@ -99,6 +101,11 @@ pub fn link_view(ctx: &Ctx) -> LinkView {
     }
 }
 
+/// What a pairing link (from a QR code) offers, for the phone to ask about before pairing.
+pub fn pair_offer(link: &str) -> Result<super::pair_link::Offer, String> {
+    super::pair_link::parse(link)
+}
+
 pub fn link_pair(ctx: &Ctx, address: &str, code: &str, name: &str) -> Result<LinkView, String> {
     super::client::pair(address, code, name)?;
     Ok(link_view(ctx))
@@ -121,16 +128,14 @@ pub fn sync_now(ctx: &Ctx) -> Result<bool, String> {
     Ok(super::sync_job::start(ctx, root.into()))
 }
 
-pub fn sync_pause(ctx: &Ctx, paused: bool) {
+/// Pauses the job running on this device (the computer prepares songs, the phone syncs).
+pub fn pause(ctx: &Ctx, paused: bool) {
+    super::keys::pause(ctx, paused);
     super::sync_job::pause(ctx, paused);
 }
 
 pub fn sync_stop(ctx: &Ctx) {
     super::sync_job::stop(ctx);
-}
-
-pub fn keys_pause(ctx: &Ctx, paused: bool) {
-    super::keys::pause(ctx, paused);
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -140,6 +145,7 @@ mod desktop {
 
     pub fn service(ctx: &Ctx, error: String) -> Service {
         let s = server::status();
+        let qr = s.code.as_deref().filter(|_| !s.address.is_empty()).and_then(|c| crate::phone::pair_link::qr_svg(&crate::phone::pair_link::make(&s.address, c, &s.computer)));
         Service {
             enabled: ctx.state.settings.lock().phone_sync,
             on: s.on,
@@ -147,6 +153,7 @@ mod desktop {
             computer: s.computer,
             code: s.code,
             code_until: s.code_until,
+            qr,
             phones: crate::phone::load(&ctx.state.data_dir).phones,
             error,
         }

@@ -31,6 +31,8 @@ class MainActivity : TauriActivity() {
   private var webView: WebView? = null
   /** A song another app asked Cadence to play, until the app takes it (see takeOpenedFile). */
   @Volatile private var opened: String? = null
+  /** The pairing link the camera opened (handed to the page once). */
+  @Volatile private var pairLink: String? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     // Cadence is always dark: light status-bar and navigation icons, whatever the phone's own theme
@@ -97,6 +99,12 @@ class MainActivity : TauriActivity() {
   private fun openFrom(intent: Intent?) {
     if (intent?.action != Intent.ACTION_VIEW) return
     val uri = intent.data ?: return
+    if (uri.scheme == "cadence") {
+      // A pairing link (the computer's QR code): the page reads it and asks before pairing.
+      synchronized(this@MainActivity) { pairLink = uri.toString() }
+      runOnUiThread { webView?.evaluateJavascript("window.__cadencePair && window.__cadencePair()", null) }
+      return
+    }
     Thread {
       val path = runCatching { localPath(uri) }.onFailure { android.util.Log.w("Cadence", "can't open $uri", it) }.getOrNull()
         ?: return@Thread
@@ -196,6 +204,10 @@ class MainActivity : TauriActivity() {
     /** The song another app asked Cadence to play, once ("" when there's none). */
     @JavascriptInterface
     fun takeOpenedFile(): String = synchronized(this@MainActivity) { opened.also { opened = null } } ?: ""
+
+    /** The pairing link the camera opened ("" if none), handed over once. */
+    @JavascriptInterface
+    fun takePairLink(): String = synchronized(this@MainActivity) { pairLink.also { pairLink = null } } ?: ""
 
     /** SD cards and USB drives that are plugged in, for the folder browser: [{path, name}]. */
     @JavascriptInterface

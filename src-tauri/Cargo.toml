@@ -1,6 +1,6 @@
 [package]
 name = "cadence"
-version = "0.3.7"
+version = "0.3.8"
 description = "Cadence — an open-source lossless music player for your own files"
 authors = ["Akbar Priyono Haryadi"]
 license = "GPL-3.0-only"
@@ -68,6 +68,8 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # for other crates).
 getrandom = "0.3"
 gethostname = "1"
+# The pairing QR code (drawn as an SVG; no image libraries).
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 # Desktop only: one running window at a time (phones manage that themselves).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

@@ -41,6 +41,13 @@ export interface PhoneSummary {
   notSentPlaylists: number;
 }
 
+/** A computer's pairing QR code, read on the phone. */
+export interface PhoneOffer {
+  address: string;
+  code: string;
+  computer: string;
+}
+
 /** The computer's side: on, its address, the pairing code while pairing is open. */
 export interface PhoneService {
   enabled: boolean;
@@ -49,6 +56,8 @@ export interface PhoneService {
   computer: string;
   code: string | null;
   codeUntil: number;
+  /** The pairing code as a QR image (SVG), while pairing is open. */
+  qr: string | null;
   phones: PairedPhone[];
   error: string;
 }

@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import PhoneLinkSettings from "#lib/components/settings/PhoneLinkSettings.svelte";
+import PhonePairAsk from "#lib/components/settings/PhonePairAsk.svelte";
 import type { PhoneLink, PhoneSyncJob } from "#lib/phone.js";
 import { phoneName, phoneSync, syncLine } from "#lib/phoneSync.svelte.js";
 import { mockBackend, settle } from "./helpers";
@@ -80,7 +81,7 @@ describe("Settings › Sync with computer", () => {
     expect(screen.getByText(/Copying 2 of 10 songs/)).toBeTruthy();
     expect(screen.getByText("IGNITE")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Pause" }));
-    expect(backend.last("phone_sync_pause")).toEqual({ paused: true });
+    expect(backend.last("phone_pause")).toEqual({ paused: true });
   });
 
   test("shows nothing on the computer", async () => {
@@ -88,5 +89,42 @@ describe("Settings › Sync with computer", () => {
     render(PhoneLinkSettings);
     await settle();
     expect(screen.queryByText("Sync with computer")).toBeNull();
+  });
+});
+
+describe("a pairing QR code opened from the camera", () => {
+  const link = "cadence://pair?a=192.168.1.10%3A47300&c=482913&n=DESK";
+  afterEach(() => phoneSync.decline());
+
+  test("asks before pairing, and pairs on yes", async () => {
+    const toast = vi.fn();
+    const go = vi.fn();
+    const backend = mockBackend({
+      phone_pair_offer: () => ({ address: "192.168.1.10:47300", code: "482913", computer: "DESK" }),
+      phone_link_pair: () => ({ ...paired, computer: "DESK" }),
+    });
+    (globalThis as { CadenceAndroid?: unknown }).CadenceAndroid = {};
+    phoneSync.watchPairing({ showToast: toast, go });
+    render(PhonePairAsk);
+    await phoneSync.takePairLink(link);
+    expect(backend.last("phone_pair_offer")).toEqual({ link });
+    expect(await screen.findByText("DESK")).toBeTruthy();
+    expect(backend.to("phone_link_pair")).toHaveLength(0);
+    await userEvent.click(screen.getByRole("button", { name: "Pair" }));
+    await settle();
+    expect(backend.last("phone_link_pair")).toMatchObject({ address: "192.168.1.10:47300", code: "482913" });
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("Paired with DESK"));
+    expect(go).toHaveBeenCalledWith({ name: "settings" });
+    expect(phoneSync.offer).toBeNull();
+  });
+
+  test("a link that isn't taken says why and asks nothing", async () => {
+    const toast = vi.fn();
+    mockBackend({ phone_pair_offer: () => Promise.reject("That pairing code points outside your own network, so it isn't used.") });
+    (globalThis as { CadenceAndroid?: unknown }).CadenceAndroid = {};
+    phoneSync.watchPairing({ showToast: toast, go: vi.fn() });
+    await phoneSync.takePairLink(link);
+    expect(phoneSync.offer).toBeNull();
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining("outside your own network"));
   });
 });

@@ -17,6 +17,8 @@
   import SmartEditor from "#lib/components/SmartEditor.svelte";
   import TagEditor from "#lib/components/TagEditor.svelte";
   import FixInfo from "#lib/components/FixInfo.svelte";
+  import PhonePairAsk from "#lib/components/settings/PhonePairAsk.svelte";
+  import { phoneSync } from "#lib/phoneSync.svelte.js";
   import FixAlbum from "#lib/components/FixAlbum.svelte";
   import ArtistPicture from "#lib/components/ArtistPicture.svelte";
   import SkippedSongs from "#lib/components/SkippedSongs.svelte";
@@ -160,6 +162,7 @@
       app.showToast("Cadence recovered from an error.", { label: "Report", run: () => reportCrash(crash) }, 12_000);
     }
     updates.start();
+    phoneSync.watchPairing(app); // a computer's pairing QR code, opened from the phone's camera
     (window as unknown as { __cadenceBack: () => boolean }).__cadenceBack = () => app.handleBack();
     (window as unknown as { __cadenceMedia: (c: string) => void }).__cadenceMedia = (c: string) => {
       if (c.startsWith("seek:")) app.seek(Number(c.slice(5)));
@@ -415,6 +418,7 @@
 {#if app.smartEditing}<SmartEditor />{/if}
 <PlaylistTransfer />
 {#if app.tagEditing}<TagEditor />{/if}
+<PhonePairAsk />
 {#if app.fixing}{#key app.fixing.id}<FixInfo />{/key}{/if}
 {#if app.fixingAlbum}{#key app.fixingAlbum.id}<FixAlbum />{/key}{/if}
 {#if app.artistEditing}{#key app.artistEditing}<ArtistPicture />{/key}{/if}

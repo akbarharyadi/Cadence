@@ -65,6 +65,10 @@
   </div>
 
   {#if !link.paired}
+    <p class="desc">
+      Easiest: on the computer, press “Pair a phone”, then point this phone's camera at the QR code and tap to open it in
+      Cadence. Or type the address and code below.
+    </p>
     <form class="pair" onsubmit={(e) => { e.preventDefault(); void pair(); }}>
       <label>Computer's address<input class="field" bind:value={address} placeholder="192.168.1.20:47300" autocomplete="off" inputmode="url" /></label>
       <label>Code<input class="field" bind:value={code} placeholder="6 digits" inputmode="numeric" maxlength="7" autocomplete="one-time-code" /></label>
@@ -91,7 +95,7 @@
         <ProgressBar value={job.bytesTotal ? job.bytesDone / job.bytesTotal : 0.06} />
         {#if job.current}<span class="small secondary current">{job.current}</span>{/if}
         <div class="actions">
-          <button class="pill ghost" onclick={() => api.phoneSyncPause(!job.paused)}>{job.paused ? "Resume" : "Pause"}</button>
+          <button class="pill ghost" onclick={() => api.phonePause(!job.paused)}>{job.paused ? "Resume" : "Pause"}</button>
           <button class="link small" onclick={() => api.phoneSyncStop()}>Stop</button>
         </div>
       </div>

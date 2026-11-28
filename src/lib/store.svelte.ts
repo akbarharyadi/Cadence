@@ -65,6 +65,8 @@ export interface AndroidBridge {
   storageVolumes?(): string;
   /** The song a file manager asked Cadence to play ("" if none), handed over once. */
   takeOpenedFile?(): string;
+  /** The pairing link (cadence://pair…) the camera opened, handed over once ("" if none; newer app versions). */
+  takePairLink?(): string;
   /** Sync with computer: keeps the copying going with the screen off while `running` (newer app versions). */
   syncProgress?(running: boolean, text: string, done: number, total: number): void;
 }

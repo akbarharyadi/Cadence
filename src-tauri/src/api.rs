@@ -350,8 +350,8 @@ pub fn phone_unpair(ctx: &Ctx, phone_id: String) -> Result<crate::phone::command
     crate::phone::commands::unpair(ctx, &phone_id)
 }
 
-pub fn phone_keys_pause(ctx: &Ctx, paused: bool) {
-    crate::phone::commands::keys_pause(ctx, paused);
+pub fn phone_pair_offer(_ctx: &Ctx, link: String) -> Result<crate::phone::pair_link::Offer, String> {
+    crate::phone::commands::pair_offer(&link)
 }
 
 pub fn phone_link(ctx: &Ctx) -> crate::phone::commands::LinkView {
@@ -370,8 +370,9 @@ pub fn phone_sync_now(ctx: &Ctx) -> Result<bool, String> {
     crate::phone::commands::sync_now(ctx)
 }
 
-pub fn phone_sync_pause(ctx: &Ctx, paused: bool) {
-    crate::phone::commands::sync_pause(ctx, paused);
+/// Pauses or resumes the job running on this device: preparing songs (computer) or a sync (phone).
+pub fn phone_pause(ctx: &Ctx, paused: bool) {
+    crate::phone::commands::pause(ctx, paused);
 }
 
 pub fn phone_sync_stop(ctx: &Ctx) {
@@ -2733,12 +2734,12 @@ macro_rules! cadence_commands {
             plain set_phone_sync(enabled: bool) -> $crate::phone::commands::Service;
             fallible phone_pair() -> $crate::phone::commands::Service;
             fallible phone_unpair(phone_id: String) -> $crate::phone::commands::Service;
-            plain phone_keys_pause(paused: bool) -> ();
+            fallible phone_pair_offer(link: String) -> $crate::phone::pair_link::Offer;
             plain phone_link() -> $crate::phone::commands::LinkView;
             blocking phone_link_pair(address: String, code: String, name: String) -> $crate::phone::commands::LinkView;
             fallible phone_link_forget() -> $crate::phone::commands::LinkView;
             fallible phone_sync_now() -> bool;
-            plain phone_sync_pause(paused: bool) -> ();
+            plain phone_pause(paused: bool) -> ();
             plain phone_sync_stop() -> ();
         }
     };

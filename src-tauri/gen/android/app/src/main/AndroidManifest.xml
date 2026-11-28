@@ -40,6 +40,13 @@
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+            <!-- Pairing with the computer: its QR code is a cadence://pair link, opened from the camera. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="cadence" android:host="pair" />
+            </intent-filter>
             <!-- "Open with Cadence" for music files in file managers. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />

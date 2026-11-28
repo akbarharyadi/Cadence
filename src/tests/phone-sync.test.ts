@@ -8,7 +8,7 @@ import { mockBackend, settle } from "./helpers";
 
 const kept: PhoneKept = { playlists: ["p1"], albums: ["al1"], artistNames: ["藍井エイル", "Eir Aoi"], top: 0 };
 
-const off: PhoneService = { enabled: false, on: false, address: "", computer: "DESK", code: null, codeUntil: 0, phones: [], error: "" };
+const off: PhoneService = { enabled: false, on: false, address: "", computer: "DESK", code: null, codeUntil: 0, qr: null, phones: [], error: "" };
 const on: PhoneService = { ...off, enabled: true, on: true, address: "192.168.1.20:47300" };
 const summary: PhoneSummary = {
   choice: { playlists: ["p1"], albums: ["al1", "al2"], artists: [], top: 100, phones: [] },
@@ -73,6 +73,17 @@ describe("Settings › Sync with phone", () => {
     expect(await screen.findByText("192.168.1.20:47300")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Pair a phone" }));
     expect(await screen.findByText("482913")).toBeTruthy();
+  });
+
+  test("while pairing is open the QR code is shown with the code beside it", async () => {
+    mockBackend({
+      phone_service: () => ({ ...on, code: "482913", codeUntil: 1_900_000_000, qr: '<svg data-testid="qr-svg"></svg>' }),
+      phone_summary: () => summary,
+    });
+    render(PhoneSyncSettings);
+    await settle();
+    expect(screen.getByTestId("qr-svg")).toBeTruthy();
+    expect(screen.getByText("482913")).toBeTruthy();
   });
 
   test("choosing the most played songs saves the count", async () => {

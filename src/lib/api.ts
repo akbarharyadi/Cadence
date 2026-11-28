@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import type { PhoneKept, PhoneKind, PhoneLink, PhoneService, PhoneSummary, PhoneSyncJob } from "#lib/phone.js";
+import type { PhoneKept, PhoneKind, PhoneLink, PhoneOffer, PhoneService, PhoneSummary, PhoneSyncJob } from "#lib/phone.js";
 
 export interface Track {
   id: string;
@@ -921,12 +921,13 @@ export const api = {
   setPhoneSync: (enabled: boolean) => invoke<PhoneService>("set_phone_sync", { enabled }),
   phonePair: () => invoke<PhoneService>("phone_pair"),
   phoneUnpair: (phoneId: string) => invoke<PhoneService>("phone_unpair", { phoneId }),
-  phoneKeysPause: (paused: boolean) => invoke<void>("phone_keys_pause", { paused }),
+  /** Pauses or resumes the job running here: preparing songs (computer) or a sync (phone). */
+  phonePause: (paused: boolean) => invoke<void>("phone_pause", { paused }),
+  phonePairOffer: (link: string) => invoke<PhoneOffer>("phone_pair_offer", { link }),
   phoneLink: () => invoke<PhoneLink>("phone_link"),
   phoneLinkPair: (address: string, code: string, name: string) => invoke<PhoneLink>("phone_link_pair", { address, code, name }),
   phoneLinkForget: () => invoke<PhoneLink>("phone_link_forget"),
   phoneSyncNow: () => invoke<boolean>("phone_sync_now"),
-  phoneSyncPause: (paused: boolean) => invoke<void>("phone_sync_pause", { paused }),
   phoneSyncStop: () => invoke<void>("phone_sync_stop"),
   aiRecommended: () => invoke<Recommendations>("ai_recommended"),
   /** The suggestions the library still doesn't have (asked again when the library changes). */

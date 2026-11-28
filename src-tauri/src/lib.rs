@@ -375,12 +375,12 @@ pub fn run() {
             commands::set_phone_sync,
             commands::phone_pair,
             commands::phone_unpair,
-            commands::phone_keys_pause,
+            commands::phone_pair_offer,
             commands::phone_link,
             commands::phone_link_pair,
             commands::phone_link_forget,
             commands::phone_sync_now,
-            commands::phone_sync_pause,
+            commands::phone_pause,
             commands::phone_sync_stop,
         ])
         .build(tauri::generate_context!())
